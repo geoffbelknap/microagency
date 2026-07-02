@@ -10,6 +10,60 @@ import (
 	"time"
 )
 
+// A path-bearing issuer (e.g. Robinhood's .../mcp/trading) must be discovered via
+// RFC 8414 path INSERTION first; the old path-append form is only a last-resort
+// fallback. A root issuer collapses to the plain well-known.
+func TestASMetadataURLsPathInsertion(t *testing.T) {
+	got := asMetadataURLs("https://agent.robinhood.com/mcp/trading")
+	want := []string{
+		"https://agent.robinhood.com/.well-known/oauth-authorization-server/mcp/trading",
+		"https://agent.robinhood.com/.well-known/openid-configuration/mcp/trading",
+		"https://agent.robinhood.com/mcp/trading/.well-known/openid-configuration",
+		"https://agent.robinhood.com/mcp/trading/.well-known/oauth-authorization-server",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	root := asMetadataURLs("https://as.example.com/")
+	if len(root) == 0 || root[0] != "https://as.example.com/.well-known/oauth-authorization-server" {
+		t.Fatalf("root issuer first candidate = %v, want the plain well-known", root)
+	}
+}
+
+// DiscoverAS must fall through a 404 on the append form and succeed on the
+// path-insertion location — the exact Robinhood shape.
+func TestDiscoverASFallsThroughToPathInsertion(t *testing.T) {
+	var ts *httptest.Server // captured by the handlers; ts.URL is set before any request
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization_servers":["` + ts.URL + `/mcp/trading"],"scopes_supported":["internal"]}`))
+	})
+	// Only the RFC 8414 path-insertion location serves the AS metadata — the append
+	// form (.../mcp/trading/.well-known/...) 404s, so discovery must fall through.
+	mux.HandleFunc("/.well-known/oauth-authorization-server/mcp/trading", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"` + ts.URL + `/mcp/trading","authorization_endpoint":"` + ts.URL + `/authorize","token_endpoint":"` + ts.URL + `/token"}`))
+	})
+	ts = httptest.NewServer(mux)
+	defer ts.Close()
+
+	meta, err := DiscoverAS(context.Background(), ts.Client(), ts.URL+"/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatalf("DiscoverAS should have found the path-insertion metadata: %v", err)
+	}
+	if meta.TokenEndpoint != ts.URL+"/token" || meta.AuthorizationEndpoint != ts.URL+"/authorize" {
+		t.Fatalf("wrong endpoints: %+v", meta)
+	}
+	if len(meta.ScopesSupported) != 1 || meta.ScopesSupported[0] != "internal" {
+		t.Fatalf("scopes should fall back to the resource's: %+v", meta.ScopesSupported)
+	}
+}
+
 // approveAndCode POSTs the authorize params with approve=yes (simulating the
 // operator clicking Approve) and returns the issued auth code from the redirect.
 func approveAndCode(t *testing.T, c *http.Client, authURL string) string {
