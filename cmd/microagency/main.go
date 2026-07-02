@@ -340,6 +340,11 @@ func runRestart(args []string) {
 		}
 		fmt.Fprintf(os.Stderr, "microagency: stopped (pid %d)\n", pid)
 	}
+	// Re-exec as `up`, not `restart`. run() backgrounds by re-running os.Args[1:];
+	// if that still said "restart", the daemon child would run restart again, find
+	// its own freshly-written pid in the pid file, and SIGTERM itself. Rewrite argv
+	// to the up form so the child serves instead of killing itself.
+	os.Args = append([]string{os.Args[0], "up"}, args...)
 	run(args)
 }
 
