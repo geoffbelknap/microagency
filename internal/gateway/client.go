@@ -25,6 +25,16 @@ import (
 // body. A response over the cap fails with a clear error, never a silent truncation.
 const maxUpstreamBytes = 64 << 20 // 64 MiB
 
+// ClientVersion is the version microagency reports in the MCP initialize
+// handshake with upstream servers (clientInfo.version). main sets it to the real
+// build version at startup; "dev" for a plain `go build`.
+var ClientVersion = "dev"
+
+// clientInfo is the identity microagency presents to an upstream MCP server.
+func clientInfo() map[string]any {
+	return map[string]any{"name": "microagency-gateway", "version": ClientVersion}
+}
+
 // Tool is one tool advertised by an upstream MCP server.
 type Tool struct {
 	Name        string           `json:"name"`
@@ -193,7 +203,7 @@ func (u *Upstream) Initialize(ctx context.Context) error {
 	if _, err := u.call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "microagency-gateway", "version": "0.1.0"},
+		"clientInfo":      clientInfo(),
 	}); err != nil {
 		return err
 	}
@@ -256,7 +266,7 @@ func (u *Upstream) CallTool(ctx context.Context, name string, args json.RawMessa
 func (u *Upstream) Probe(ctx context.Context) (string, error) {
 	body, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: "initialize", Params: map[string]any{
 		"protocolVersion": "2025-06-18", "capabilities": map[string]any{},
-		"clientInfo": map[string]any{"name": "microagency-gateway", "version": "0.1.0"},
+		"clientInfo": clientInfo(),
 	}})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.URL, bytes.NewReader(body))
 	if err != nil {
