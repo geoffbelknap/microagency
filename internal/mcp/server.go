@@ -33,6 +33,10 @@ type Runner interface {
 type Server struct {
 	runner Runner
 
+	// version is the build's release version (main.version via -ldflags), surfaced
+	// in /admin/infra and the MCP serverInfo. "" for a plain `go build`.
+	version string
+
 	// wasm holds the reduce substrate's engines by name (e.g. jq, sql, text, html).
 	// A declarative reduction is computed in the selected engine instead of running
 	// Python in a microVM. Empty = the declarative reduce path is off. The agent
@@ -91,15 +95,15 @@ type runRecord struct {
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.
-	Substrate   string               `json:"substrate,omitempty"` // "wasm" | "microvm"
-	Engine      string               `json:"engine,omitempty"`    // wasm engine name
-	LatencyMs   int64                `json:"latency_ms"`
-	InputBytes  int                  `json:"input_bytes"`
-	OutputBytes int                  `json:"output_bytes"`
-	Reffed      bool                 `json:"reffed"`
-	Ref         string               `json:"ref,omitempty"`
-	Bytes       int                  `json:"bytes"`
-	ExitCode    int                  `json:"exit_code"`
+	Substrate   string `json:"substrate,omitempty"` // "wasm" | "microvm"
+	Engine      string `json:"engine,omitempty"`    // wasm engine name
+	LatencyMs   int64  `json:"latency_ms"`
+	InputBytes  int    `json:"input_bytes"`
+	OutputBytes int    `json:"output_bytes"`
+	Reffed      bool   `json:"reffed"`
+	Ref         string `json:"ref,omitempty"`
+	Bytes       int    `json:"bytes"`
+	ExitCode    int    `json:"exit_code"`
 	// Stderr is the guest's captured stderr (or console log on a guest failure),
 	// bounded — OPERATOR-BOUND diagnostics surfaced via /admin/runs. It is never
 	// part of the agent-facing tool result: guest output over the input can echo
@@ -112,11 +116,11 @@ type runRecord struct {
 
 func NewServer(r Runner, opts ...Option) *Server {
 	s := &Server{
-		runner:         r,
-		runs:           map[string]runRecord{},
-		toolUsage:      map[string]int{},
-		oauthFlows:     map[string]*oauthFlow{},
-		inflight:       newInflight(),
+		runner:     r,
+		runs:       map[string]runRecord{},
+		toolUsage:  map[string]int{},
+		oauthFlows: map[string]*oauthFlow{},
+		inflight:   newInflight(),
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
 		// aren't killed mid-flight.
@@ -145,6 +149,10 @@ func WithBudgetGate(g budget.Gate) Option { return func(s *Server) { s.budget = 
 // upstream MCP URLs. Production keeps the SSRF-guarded default; tests inject a
 // plain client to reach loopback mocks.
 func WithUpstreamClient(c *http.Client) Option { return func(s *Server) { s.upstreamClient = c } }
+
+// WithVersion sets the build's release version, reported in /admin/infra and the
+// MCP serverInfo.
+func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
 
 // WithWasmEngine registers a named engine for the declarative wasm-compute
 // substrate (e.g. "jq", "text", "html"). A reduce query is routed to the
@@ -232,7 +240,7 @@ func (s *Server) Handle(ctx context.Context, line []byte) (rpcResponse, bool) {
 	}
 	switch req.Method {
 	case "initialize":
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: initializeResult()}, true
+		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: initializeResult(s.version)}, true
 	case "tools/list":
 		// Lean by design: only microagency's own tools. Aggregated upstream tools
 		// are NOT listed here — they'd flood the model's context — they live behind
@@ -254,11 +262,14 @@ func (s *Server) Handle(ctx context.Context, line []byte) (rpcResponse, bool) {
 	}
 }
 
-func initializeResult() map[string]any {
+func initializeResult(version string) map[string]any {
+	if version == "" {
+		version = "dev"
+	}
 	return map[string]any{
 		"protocolVersion": "2025-06-18",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "microagency", "version": "0.1.0"},
+		"serverInfo":      map[string]any{"name": "microagency", "version": version},
 	}
 }
 

@@ -781,7 +781,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	// Hand the store + gate to the Server so the PROXY path (aggregated MCP tool
 	// calls) goes through reference-by-default minimization and the reffed results
 	// are reducible off-context.
-	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate)}
+	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate), mcp.WithVersion(version)}
 	// The wasm engines back reduce (a declarative reduction over a ref is computed
 	// in the selected engine instead of running Python in a microVM). The engines
 	// BUNDLED into the binary are registered automatically; each `--engine name=path`
