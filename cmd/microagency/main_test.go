@@ -14,7 +14,7 @@ func TestServeInitializeAndToolsList(t *testing.T) {
 			`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n",
 	)
 	var out bytes.Buffer
-	if err := buildServer(nil, 512, 2048, false).Serve(context.Background(), in, &out); err != nil {
+	if err := buildServer(nil, 512, 2048, false, "127.0.0.1:8765").Serve(context.Background(), in, &out); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")

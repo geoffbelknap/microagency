@@ -3,6 +3,9 @@ package mcp
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"os/user"
 	"runtime"
 	"runtime/debug"
 	"time"
@@ -31,9 +34,20 @@ type InfraBuild struct {
 	Modified bool   `json:"modified"`
 }
 
+// InfraHost identifies who and where this operator surface runs: the OS user the
+// daemon runs as, and the address the console is bound to. Loopback is true when
+// that bind is local-only (the default, most private posture) — false when the
+// console is reachable over the network.
+type InfraHost struct {
+	User     string `json:"user"`           // OS user the daemon runs as
+	Addr     string `json:"addr,omitempty"` // console bind address, e.g. 127.0.0.1:8765
+	Loopback bool   `json:"loopback"`       // bound to a local-only address
+}
+
 // InfraStatus is the console footer's data: what's actually running, probed live.
 type InfraStatus struct {
 	Build      InfraBuild       `json:"build"`
+	Host       InfraHost        `json:"host"`
 	Components []InfraComponent `json:"components"`
 }
 
@@ -44,6 +58,7 @@ type InfraStatus struct {
 func (s *Server) InfraStatus(ctx context.Context) InfraStatus {
 	st := InfraStatus{Build: buildInfo()}
 	st.Build.Version = s.version
+	st.Host = hostInfo(s.consoleAddr)
 
 	// gateway — if this handler answered, the gateway + admin plane are up.
 	st.Components = append(st.Components, InfraComponent{
@@ -153,6 +168,38 @@ func (s *Server) auditComponent() InfraComponent {
 		c.Detail["break_at"] = v.BreakAt
 	}
 	return c
+}
+
+// hostInfo reports the OS user the daemon runs as and the console bind address,
+// with Loopback set when that address is local-only. A missing addr (plain `go
+// build` / tests) leaves Addr empty and Loopback false — the browser then falls
+// back to its own location.
+func hostInfo(consoleAddr string) InfraHost {
+	h := InfraHost{User: osUsername(), Addr: consoleAddr}
+	if consoleAddr == "" {
+		return h
+	}
+	host := consoleAddr
+	if hh, _, err := net.SplitHostPort(consoleAddr); err == nil {
+		host = hh
+	}
+	switch host {
+	case "127.0.0.1", "::1", "localhost":
+		h.Loopback = true
+	}
+	return h
+}
+
+// osUsername is the OS user the process runs as, for the console header. Falls
+// back to $USER, then "unknown", so it never blocks the status probe.
+func osUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	if n := os.Getenv("USER"); n != "" {
+		return n
+	}
+	return "unknown"
 }
 
 // buildInfo reads the binary's embedded VCS stamp (go build records it
