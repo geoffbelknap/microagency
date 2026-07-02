@@ -1,0 +1,49 @@
+name: Release
+
+# Stable train: a semver tag (e.g. v1.2.3) cuts a GitHub Release and updates the
+# `microagency` Homebrew formula. The "latest" channel is a separate workflow
+# (latest.yaml) that runs on every merge to main.
+on:
+  push:
+    tags:
+      - "v*"
+      - "!v*-latest*" # the latest channel (latest.yaml) uses these; don't double-fire
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A GitHub App token scoped to the tap repo, so GoReleaser can push the
+      # generated formula. NOTE: this repo needs the HOMEBREW_APP_CLIENT_ID and
+      # HOMEBREW_APP_PRIVATE_KEY secrets, and the app installed on homebrew-tap.
+      - name: Generate Homebrew tap token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2.16"
+          args: release --clean --config .goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}

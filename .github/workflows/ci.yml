@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the docs-only check can diff against the PR base.
+          fetch-depth: 0
+
+      # build-test is the required check that auto-merge waits on, so it must
+      # always report — a paths-ignore trigger would leave docs-only PRs
+      # pending forever. Instead the job always runs and skips the Go steps
+      # when the diff is docs-only. Pushes to main always run everything.
+      - name: Detect docs-only diff
+        id: diff
+        run: |
+          code=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            non_docs=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD | grep -vE '\.md$' || true)
+            if [ -z "$non_docs" ]; then
+              code=false
+              echo "docs-only diff — skipping build and tests"
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        if: steps.diff.outputs.code == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache-dependency-path: go.sum
+
+      # microagency depends on the PUBLIC github.com/geoffbelknap/microagent module
+      # (pinned in go.mod) — no sibling checkout, go.work, or token needed. Devs may
+      # keep a local go.work replace for co-development; CI builds against the module.
+      - name: Build
+        if: steps.diff.outputs.code == 'true'
+        run: go build ./...
+
+      - name: Vet
+        if: steps.diff.outputs.code == 'true'
+        run: go vet ./...
+
+      - name: Test
+        if: steps.diff.outputs.code == 'true'
+        run: go test -short ./cmd/... ./internal/...
+
+      - name: Race test
+        if: steps.diff.outputs.code == 'true'
+        run: go test -race -short ./cmd/... ./internal/...
+
+      # Each engines/* dir is a standalone Go module (compiled to wasip1 in the
+      # product, but its logic is host-testable). Run their unit tests too —
+      # they're outside ./cmd/... ./internal/... . Engines with no test files
+      # pass trivially ("no test files" is not a failure).
+      - name: Engine module tests
+        if: steps.diff.outputs.code == 'true'
+        run: |
+          for d in engines/*/; do
+            (cd "$d" && go test ./...)
+          done

@@ -1,0 +1,72 @@
+# "Latest" release train. Triggered on every merge to main via
+# .github/workflows/latest.yaml, which tags the commit v0.0.0-latest.<N> (N =
+# commit count, so the version strictly increases) and runs GoReleaser. Publishes
+# a prerelease and writes the `microagency-latest` formula to the tap; the
+# workflow prunes old latest prereleases. Stable releases live in .goreleaser.yaml.
+version: 2
+
+project_name: microagency
+
+before:
+  hooks:
+    - make engines
+
+builds:
+  - id: microagency
+    main: ./cmd/microagency
+    binary: microagency
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "microagency_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - ARCHITECTURE.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - ids: [default]
+    repository:
+      owner: geoffbelknap
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    name: microagency-latest
+    homepage: "https://github.com/geoffbelknap/microagency"
+    description: "Governed MCP gateway (latest build from main): cred-blind, off-context MCP access"
+    conflicts:
+      - microagency
+    dependencies:
+      - name: microagent
+      - name: openbao
+    caveats: |
+      This is the latest build from main, refreshed on every merge. It conflicts
+      with the stable `microagency` formula (both install `microagency`).
+
+      Get started:  microagency up
+    test: |
+      system "#{bin}/microagency", "version"
+
+release:
+  github:
+    owner: geoffbelknap
+    name: microagency
+  # The version tag carries a -latest.<N> prerelease suffix, so this is always a
+  # prerelease; it stays off the "Latest release" banner on the repo.
+  prerelease: true
+  name_template: "microagency (latest) {{ .Version }}"

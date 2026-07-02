@@ -1,0 +1,80 @@
+# Stable release train. Triggered by a semver tag (v1.2.3) via
+# .github/workflows/release.yaml. Publishes a GitHub Release and writes the
+# `microagency` formula to geoffbelknap/homebrew-tap. See .goreleaser.latest.yaml
+# for the every-merge "latest" channel.
+version: 2
+
+project_name: microagency
+
+# The wasm query engines (wasip1) are go:embed'd into the binary, so they must be
+# built before GoReleaser compiles it — otherwise the embed dir is empty and the
+# binary ships with no query engines.
+before:
+  hooks:
+    - make engines
+
+builds:
+  - id: microagency
+    main: ./cmd/microagency
+    binary: microagency
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "microagency_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - ARCHITECTURE.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+brews:
+  - ids: [default]
+    repository:
+      owner: geoffbelknap
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    name: microagency
+    # Never overwrite the stable formula from a prerelease or snapshot tag.
+    skip_upload: auto
+    homepage: "https://github.com/geoffbelknap/microagency"
+    description: "Governed MCP gateway: cred-blind, off-context tool access for any MCP client"
+    # Both formulae install a `microagency` binary, so they can't coexist.
+    conflicts:
+      - microagency-latest
+    dependencies:
+      - name: microagent # microVM supervisor + guest binaries (the reduce code path)
+      - name: openbao # at-rest secret store for upstream credentials
+    caveats: |
+      Get started:  microagency up
+    test: |
+      system "#{bin}/microagency", "version"
+
+release:
+  github:
+    owner: geoffbelknap
+    name: microagency
+  prerelease: auto
+  name_template: "microagency v{{ .Version }}"

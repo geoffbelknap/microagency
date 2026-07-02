@@ -1,0 +1,84 @@
+name: Latest
+
+# Latest train: every merge to main tags the commit v0.0.0-latest.<N> (N = commit
+# count, monotonic), publishes a prerelease, and updates the `microagency-latest`
+# Homebrew formula — so `brew upgrade` on the latest channel tracks main. Old
+# latest prereleases are pruned. Stable releases are cut by tagging (release.yaml).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# If merges land quickly, only the newest build needs to publish.
+concurrency:
+  group: latest-release
+  cancel-in-progress: true
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A GitHub App token scoped to the tap repo, so GoReleaser can push the
+      # generated formula. NOTE: this repo needs the HOMEBREW_APP_CLIENT_ID and
+      # HOMEBREW_APP_PRIVATE_KEY secrets, and the app installed on homebrew-tap.
+      - name: Generate Homebrew tap token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # Anchor the version to the most recent stable tag it's based on, so the
+      # channel reads e.g. 0.1.1-latest.<N> (a prerelease of that stable line)
+      # instead of a bare 0.0.0. The commit count N is monotonic, so the version
+      # strictly increases across merges and Homebrew treats each build as newer.
+      - name: Tag this build
+        id: tag
+        run: |
+          base="$(git tag -l 'v[0-9]*' | grep -v -- '-latest' | sort -V | tail -1)"
+          base="${base#v}"
+          [ -n "$base" ] || base="0.0.0"
+          version="v${base}-latest.$(git rev-list --count HEAD)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2.16"
+          args: release --clean --config .goreleaser.latest.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Keep only the newest few latest prereleases (and their tags), so the
+      # releases page doesn't accumulate one entry per merge.
+      - name: Prune old latest prereleases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease \
+            | jq -r '.[] | select(.isPrerelease and (.tagName | contains("-latest."))) | .tagName' \
+            | sort -t. -k4 -n \
+            | head -n -5 \
+            | while read -r t; do
+                echo "pruning $t"
+                gh release delete "$t" --yes --cleanup-tag || true
+              done

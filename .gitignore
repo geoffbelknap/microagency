@@ -1,0 +1,28 @@
+# Go
+bin/
+*.test
+coverage.out
+
+# Go workspace — local per-environment wiring for the microagent local dependency
+# (its `replace` path differs per machine/worktree); never committed.
+go.work
+go.work.sum
+
+# built wasm engines (build with `make engines`)
+*.wasm
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# scratch
+tmp/
+*.log
+.superpowers/
+/microagency
+scorecard/harness/.venv/
+scorecard/harness/__pycache__/
+scorecard/harness/.pytest_cache/
+.claude/worktrees/
+AGENTS.md
