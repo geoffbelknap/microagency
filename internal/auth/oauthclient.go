@@ -42,18 +42,62 @@ func DiscoverAS(ctx context.Context, hc *http.Client, resourceMetadataURL string
 	if len(pr.AuthorizationServers) == 0 {
 		return nil, fmt.Errorf("no authorization_servers in resource metadata")
 	}
-	as := strings.TrimRight(pr.AuthorizationServers[0], "/")
-	var meta ASMetadata
-	if err := getJSON(ctx, hc, as+"/.well-known/oauth-authorization-server", &meta); err != nil {
-		return nil, fmt.Errorf("authorization-server metadata: %w", err)
-	}
-	if meta.AuthorizationEndpoint == "" || meta.TokenEndpoint == "" {
-		return nil, fmt.Errorf("authorization-server metadata missing endpoints")
+	meta, err := discoverASMetadata(ctx, hc, pr.AuthorizationServers[0])
+	if err != nil {
+		return nil, err
 	}
 	if len(meta.ScopesSupported) == 0 {
 		meta.ScopesSupported = pr.ScopesSupported // fall back to the resource's advertised scopes
 	}
-	return &meta, nil
+	return meta, nil
+}
+
+// discoverASMetadata fetches an authorization server's RFC 8414 metadata, trying
+// each well-known location in spec-preferred order until one yields a document
+// with the endpoints we need. The first non-404 with valid endpoints wins.
+func discoverASMetadata(ctx context.Context, hc *http.Client, issuer string) (*ASMetadata, error) {
+	var lastErr error
+	for _, candidate := range asMetadataURLs(issuer) {
+		var m ASMetadata
+		if err := getJSON(ctx, hc, candidate, &m); err != nil {
+			lastErr = err
+			continue
+		}
+		if m.AuthorizationEndpoint == "" || m.TokenEndpoint == "" {
+			lastErr = fmt.Errorf("%s: metadata missing authorization/token endpoints", candidate)
+			continue
+		}
+		return &m, nil
+	}
+	return nil, fmt.Errorf("authorization-server metadata: %w", lastErr)
+}
+
+// asMetadataURLs returns the candidate metadata URLs for an issuer, in the order
+// an MCP client should try them. RFC 8414 §3.1 INSERTS the well-known segment
+// after the host and keeps the issuer's path suffix — appending it after the path
+// (the old behavior) 404s on any issuer with a path, e.g. .../mcp/trading. When
+// the issuer has no path, insert and append coincide. We also try the OpenID
+// Connect discovery locations, since some providers only serve those.
+func asMetadataURLs(issuer string) []string {
+	issuer = strings.TrimRight(issuer, "/")
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return []string{issuer + "/.well-known/oauth-authorization-server"}
+	}
+	origin := u.Scheme + "://" + u.Host
+	path := strings.TrimRight(u.Path, "/") // "" for a root issuer, else "/mcp/trading"
+	if path == "" {
+		return []string{
+			origin + "/.well-known/oauth-authorization-server",
+			origin + "/.well-known/openid-configuration",
+		}
+	}
+	return []string{
+		origin + "/.well-known/oauth-authorization-server" + path, // RFC 8414 path insertion (correct)
+		origin + "/.well-known/openid-configuration" + path,       // OIDC path insertion
+		issuer + "/.well-known/openid-configuration",              // OIDC path append (legacy)
+		issuer + "/.well-known/oauth-authorization-server",        // append (some servers; old behavior)
+	}
 }
 
 // RegisterClient performs Dynamic Client Registration (RFC 7591) and returns the
