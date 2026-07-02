@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -307,6 +308,52 @@ func daemonize(cfg httpConfig) {
 	}
 	fmt.Fprintf(os.Stderr, "    Logs           %s\n", logPath)
 	fmt.Fprintf(os.Stderr, "    Stop           microagency down\n\n")
+	upgradeNudge()
+}
+
+// upgradeNudge prints a one-line hint if the Homebrew tap has a newer build than
+// the one running. Best-effort and unobtrusive: the server is already up by the
+// time this runs, it uses a short timeout and fails silently (offline, blocked,
+// parse miss), and it's skipped for `go build` binaries or when
+// MICROAGENCY_NO_UPDATE_CHECK is set. The tap formula's version is exactly what
+// `brew upgrade` would install, so it's the authoritative comparison — and it
+// keys off the running channel (stable vs latest) to name the right formula.
+func upgradeNudge() {
+	if version == "dev" || version == "" || os.Getenv("MICROAGENCY_NO_UPDATE_CHECK") != "" {
+		return
+	}
+	formula := "microagency"
+	if strings.Contains(version, "-latest.") {
+		formula = "microagency-latest"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("https://raw.githubusercontent.com/geoffbelknap/homebrew-tap/main/" + formula + ".rb")
+	if err != nil {
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if latest := parseFormulaVersion(string(body)); latest != "" && latest != version {
+		fmt.Fprintf(os.Stderr, "    Update         %s available — run: brew upgrade %s\n\n", latest, formula)
+	}
+}
+
+// parseFormulaVersion pulls the value out of a Homebrew formula's `version "X"`
+// line; "" if not found.
+func parseFormulaVersion(formula string) string {
+	const marker = `version "`
+	i := strings.Index(formula, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := formula[i+len(marker):]
+	if j := strings.Index(rest, `"`); j >= 0 {
+		return rest[:j]
+	}
+	return ""
 }
 
 // runDown stops the background server and the managed OpenBao.
