@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,6 +70,19 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// localSubject is the identity the built-in single-user OAuth server stamps on
+// issued tokens (so runs attribute to the real human, matching the console
+// header). The OS user, falling back to $USER then "operator".
+func localSubject() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	if n := os.Getenv("USER"); n != "" {
+		return n
+	}
+	return "operator"
 }
 
 func printVersion() {
@@ -487,6 +501,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 		// interactively (refresh is silent), short enough that a leaked bearer has a
 		// bounded life. (Was 12h — a long-lived bearer with no revocation path.)
 		as := auth.NewAuthServer(signer, issuer, audience, 2*time.Hour)
+		as.Subject = localSubject() // attribute runs to the real OS user, not a generic "operator"
 		as.LoadClients(oauthClientsPath()) // remember DCR client_ids across restarts (no re-auth)
 		as.Register(mcpMux)
 		rs := &auth.ResourceServer{Issuer: issuer, Audience: audience, Keys: signer.KeySet()}

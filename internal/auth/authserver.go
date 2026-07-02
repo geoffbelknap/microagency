@@ -41,6 +41,12 @@ type AuthServer struct {
 	clients     map[string]clientReg // client_id -> registration
 	codes       map[string]authCode  // auth code -> pending grant (single-use, short TTL)
 	clientsPath string               // if set, client registrations persist here across restarts
+
+	// Subject is the `sub` this single-user AS stamps on the tokens it issues — the
+	// one local principal. Defaults to "operator"; main sets it to the OS user so
+	// runs are attributed to the real human, matching the console header. When
+	// microagency grows multi-principal, this stops being a single fixed value.
+	Subject string
 }
 
 type clientReg struct {
@@ -66,6 +72,7 @@ func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Durat
 	return &AuthServer{
 		signer: signer, issuer: issuer, audience: audience, accessTTL: accessTTL,
 		clients: map[string]clientReg{}, codes: map[string]authCode{},
+		Subject: "operator",
 	}
 }
 
@@ -163,9 +170,13 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	code := randToken(24)
 	s.mu.Lock()
+	subject := s.Subject
+	if subject == "" {
+		subject = "operator"
+	}
 	s.codes[code] = authCode{
 		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
-		subject: "operator", scope: scope, expiry: time.Now().Add(60 * time.Second),
+		subject: subject, scope: scope, expiry: time.Now().Add(60 * time.Second),
 	}
 	s.mu.Unlock()
 	u, _ := url.Parse(redirectURI)
