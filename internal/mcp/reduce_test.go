@@ -445,7 +445,7 @@ func TestProxyLargeResultIsReffed(t *testing.T) {
 
 	out := call(t, s, "call_tool", map[string]any{"name": "db__q", "arguments": map[string]any{}})
 	raw, _ := json.Marshal(out)
-	if !strings.Contains(string(raw), "ref_1") || !strings.Contains(string(raw), "reffed") {
+	if !strings.Contains(string(raw), "ref_") || !strings.Contains(string(raw), "reffed") {
 		t.Fatalf("a large proxied result must come back as a reference, got %s", raw)
 	}
 	if strings.Contains(string(raw), big) {

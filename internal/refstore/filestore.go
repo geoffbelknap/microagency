@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,16 +27,15 @@ type FileStore struct {
 	ttl        time.Duration
 	maxEntries int
 
-
-	mu  sync.Mutex
-	seq int
-	now func() time.Time // injectable for tests
+	mu    sync.Mutex
+	now   func() time.Time // injectable for tests
+	newID func() Ref       // injectable for tests; defaults to randRef
 }
 
 // NewFileStore opens (creating if needed) a 0700 directory-backed store encrypted
 // with key (must be 16/24/32 bytes; 32 → AES-256). ttl<=0 disables expiry;
-// maxEntries<=0 disables the cap. It resumes the ref sequence from existing files so
-// handles minted after a restart never collide with persisted ones.
+// maxEntries<=0 disables the cap. Handles are random, so nothing needs to resume
+// from disk — a fresh handle can't collide with a persisted one.
 func NewFileStore(dir string, key []byte, ttl time.Duration, maxEntries int) (*FileStore, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -50,23 +48,33 @@ func NewFileStore(dir string, key []byte, ttl time.Duration, maxEntries int) (*F
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	fs := &FileStore{dir: dir, aead: aead, ttl: ttl, maxEntries: maxEntries, now: time.Now}
-	fs.mu.Lock()
-	fs.seq = fs.maxSeqLocked()
-	fs.mu.Unlock()
-	return fs, nil
+	return &FileStore{dir: dir, aead: aead, ttl: ttl, maxEntries: maxEntries, now: time.Now, newID: randRef}, nil
 }
 
 func (s *FileStore) Put(payload string) (Ref, Summary) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seq++
-	ref := Ref(fmt.Sprintf("<ref_%d>", s.seq))
-	if name, ok := safeRefFile(ref); ok {
+	ref, name := s.mintLocked()
+	if name != "" {
 		_ = s.writeLocked(name, payload)
 	}
 	s.sweepLocked() // after the write, so the cap counts the new entry (never evicts it — it's newest)
 	return ref, Summary{Bytes: len(payload)}
+}
+
+// mintLocked returns a fresh handle whose backing file doesn't already exist, so a
+// repeated id source (a deterministic test generator) can't overwrite a stored ref.
+func (s *FileStore) mintLocked() (Ref, string) {
+	for {
+		ref := s.newID()
+		name, ok := safeRefFile(ref)
+		if !ok {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(s.dir, name)); os.IsNotExist(err) {
+			return ref, name
+		}
+	}
 }
 
 func (s *FileStore) Get(ref Ref) (string, bool) {
@@ -146,44 +154,15 @@ func (s *FileStore) sweepLocked() {
 	}
 }
 
-// maxSeqLocked returns the highest ref number persisted, so Put resumes from there.
-func (s *FileStore) maxSeqLocked() int {
-	entries, _ := os.ReadDir(s.dir)
-	max := 0
-	for _, e := range entries {
-		if n, ok := seqOfFile(e.Name()); ok && n > max {
-			max = n
-		}
-	}
-	return max
-}
-
-// safeRefFile maps a "<ref_N>" handle to its "ref_N.enc" filename, rejecting any
-// other shape — so a caller-supplied ref can never escape the store directory.
+// safeRefFile maps a "<ref_TOKEN>" handle to its "ref_TOKEN.enc" filename via the
+// shared base62 validator, rejecting any other shape — so a caller-supplied ref
+// can never carry a path separator or ".." and escape the store directory.
 func safeRefFile(ref Ref) (string, bool) {
-	s := string(ref)
-	if !strings.HasPrefix(s, "<ref_") || !strings.HasSuffix(s, ">") {
+	tok, ok := refToken(ref)
+	if !ok {
 		return "", false
 	}
-	num := s[len("<ref_") : len(s)-1]
-	if num == "" {
-		return "", false
-	}
-	if _, err := strconv.Atoi(num); err != nil {
-		return "", false
-	}
-	return "ref_" + num + ".enc", true
-}
-
-func seqOfFile(name string) (int, bool) {
-	if !strings.HasPrefix(name, "ref_") || !strings.HasSuffix(name, ".enc") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "ref_"), ".enc"))
-	if err != nil {
-		return 0, false
-	}
-	return n, true
+	return "ref_" + tok + ".enc", true
 }
 
 func readCreated(path string) (int64, bool) {
