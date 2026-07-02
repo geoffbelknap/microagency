@@ -125,7 +125,12 @@ func TestFileStoreMaxEntriesEvictsOldest(t *testing.T) {
 func TestFileStoreRejectsPathTraversal(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := NewFileStore(dir, testKey(), 0, 0)
-	for _, bad := range []Ref{"<ref_../../etc/passwd>", "../../etc/passwd", "<ref_>", "<ref_1a>", "ref_1"} {
+	// base62-only tokens: anything with a path separator, "..", brackets, or an
+	// empty token must be rejected by refToken before it can touch the filesystem.
+	for _, bad := range []Ref{"<ref_../../etc/passwd>", "../../etc/passwd", "<ref_>", "<ref_a/b>", "<ref_..>", "<ref_a.b>", "ref_abc"} {
+		if _, ok := refToken(bad); ok {
+			t.Fatalf("malicious/invalid ref %q should be rejected by refToken", bad)
+		}
 		if _, ok := s.Get(bad); ok {
 			t.Fatalf("malicious/invalid ref %q should not resolve", bad)
 		}

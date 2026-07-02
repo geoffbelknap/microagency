@@ -9,8 +9,8 @@ import (
 func TestMemStorePutGetRoundTrip(t *testing.T) {
 	s := NewMemStore()
 	ref, sum := s.Put("hello world")
-	if ref != "<ref_1>" {
-		t.Fatalf("first ref = %q, want <ref_1>", ref)
+	if _, ok := refToken(ref); !ok {
+		t.Fatalf("ref %q is not a well-formed handle", ref)
 	}
 	if sum.Bytes != len("hello world") {
 		t.Fatalf("summary bytes = %d, want %d", sum.Bytes, len("hello world"))
@@ -21,12 +21,27 @@ func TestMemStorePutGetRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMemStoreDeterministicSequentialRefs(t *testing.T) {
+// Handles must be unguessable and non-enumerable: random (not sequential), so one
+// ref can't reveal the existence of others and the space can't be walked.
+func TestMemStoreRefsAreUnguessable(t *testing.T) {
 	s := NewMemStore()
 	r1, _ := s.Put("a")
 	r2, _ := s.Put("b")
-	if r1 != "<ref_1>" || r2 != "<ref_2>" {
-		t.Fatalf("refs = %q,%q, want <ref_1>,<ref_2>", r1, r2)
+	if r1 == r2 {
+		t.Fatalf("two Puts returned the same handle %q", r1)
+	}
+	for _, r := range []Ref{r1, r2} {
+		tok, ok := refToken(r)
+		if !ok {
+			t.Fatalf("handle %q is malformed", r)
+		}
+		if len(tok) != refTokenLen {
+			t.Fatalf("handle %q token len = %d, want %d", r, len(tok), refTokenLen)
+		}
+	}
+	// Sequential handles would be trivially guessable — assert we are NOT that.
+	if r1 == "<ref_1>" || r2 == "<ref_2>" {
+		t.Fatalf("handles look sequential (%q,%q) — must be random", r1, r2)
 	}
 }
 
