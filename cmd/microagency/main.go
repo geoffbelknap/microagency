@@ -26,6 +26,7 @@ import (
 	"microagency/internal/auth"
 	"microagency/internal/baomanager"
 	"microagency/internal/budget"
+	"microagency/internal/gateway"
 	"microagency/internal/mcp"
 	"microagency/internal/refstore"
 	"microagency/internal/router"
@@ -43,6 +44,7 @@ var (
 )
 
 func main() {
+	gateway.ClientVersion = version // identify the real build to upstream MCP servers
 	args := os.Args[1:]
 	if len(args) < 1 {
 		usage()

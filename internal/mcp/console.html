@@ -173,6 +173,12 @@ section{min-width:0}
 .run-detail{padding:0 18px 16px 61px}
 .run-detail pre{margin:0;padding:10px 12px;background:var(--ink);color:var(--warm);border-radius:8px;font-family:var(--mono);font-size:10.5px;line-height:1.7;white-space:pre-wrap;word-break:break-all}
 .run-detail .getrow{margin-top:10px;display:flex;align-items:center;gap:10px}
+.run-detail .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;margin:0 0 10px}
+.run-detail .kv dt{font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:.08em;text-transform:uppercase;align-self:baseline}
+.run-detail .kv dd{margin:0;font-family:var(--mono);font-size:11px;color:var(--ink);word-break:break-all}
+.run-detail .kv dd.bad{color:var(--red)}
+.run-id{font-family:var(--mono);font-size:9px;color:var(--ink-faint);background:var(--warm-3);border:.5px solid var(--ink-hairline);border-radius:4px;padding:1px 5px;flex-shrink:0}
+.copyid{cursor:pointer;border:0;background:none;padding:0 0 0 6px;color:var(--teal-dark);font-family:var(--mono);font-size:10px}
 
 /* kpis */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
@@ -339,6 +345,7 @@ async function api(method,path,body){
 function toast(msg){var t=$("#toast");$("#toast-txt").textContent=msg;t.classList.add("show");clearTimeout(toast._t);toast._t=setTimeout(function(){t.classList.remove("show")},3400)}
 function fmtB(b){b=b||0;return b<1024?b+" B":b<1048576?(b/1024).toFixed(1)+" KB":(b/1048576).toFixed(2)+" MB"}
 function fmtTime(ts){if(!ts)return "—";var d=new Date(ts);return isNaN(d)?String(ts):d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})}
+function fmtFull(ts){if(!ts)return "—";var d=new Date(ts);return isNaN(d)?String(ts):d.toLocaleString()}
 function ic(paths,o){o=o||{};var s=o.s||15;var svg='<svg width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" stroke="'+(o.stroke||"currentColor")+'" stroke-width="'+(o.sw||1.6)+'" stroke-linecap="round" stroke-linejoin="round">'+paths+'</svg>';return svg}
 var ICN={chat:'<path d="M8 12h8M8 8h8M8 16h5"/><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-6.5A8 8 0 1 1 21 12Z"/>',activity:'<path d="M3 12h4l3 8 4-16 3 8h4"/>',more:'<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',chev:'<path d="m6 9 6 6 6-6"/>',reduce:'<path d="M3 5h18l-7 8v6l-4-2v-4z"/>',proxy:'<path d="M4 7h11"/><path d="M12 4l3 3-3 3"/><path d="M20 17H9"/><path d="M12 14l-3 3 3 3"/>',shieldok:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>',shieldno:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>',dl:'<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 21h14"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',alert:'<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>'};
 
@@ -592,8 +599,9 @@ function runRow(r){
   var tgt=isProxy?(r.upstream+"__"+r.tool):(r.source_id||"—");
   var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.exit_code!==0?" · refused":"")):
     ((r.substrate||"?")+"/"+(r.engine||"?")+" · "+(r.reffed?(fmtB(r.bytes)+" → parked off-context"):(fmtB(r.bytes)+" in · "+fmtB(r.output_bytes||0)+" returned")));
-  main.innerHTML='<div class="run-target"><span class="t"></span><span class="ktag '+(isProxy?"":"reduce")+'">'+(isProxy?"proxy":"reduce")+'</span></div><div class="run-meta"></div>';
+  main.innerHTML='<div class="run-target"><span class="t"></span><span class="ktag '+(isProxy?"":"reduce")+'">'+(isProxy?"proxy":"reduce")+'</span><span class="run-id"></span></div><div class="run-meta"></div>';
   main.querySelector(".t").textContent=tgt;main.querySelector(".run-meta").textContent=meta;
+  var ridEl=main.querySelector(".run-id");if(r.run_id)ridEl.textContent=r.run_id;else ridEl.style.display="none";
   var right=el("div",{class:"run-right"});
   right.appendChild(egressPill(r));
   right.appendChild(el("span",{class:"run-lat"},r.latency_ms!=null?r.latency_ms+" ms":"—"));
@@ -602,20 +610,45 @@ function runRow(r){
   head.appendChild(chip);head.appendChild(main);head.appendChild(right);
   head.onclick=function(){state.expanded[id]=!open;renderRuns()};
   wrap.appendChild(head);
-  if(open){
-    var det=el("div",{class:"run-detail"});
-    var lines=(r.audit&&r.audit.length)?r.audit.map(function(a){return (a.event||"")+"  "+(a.host||a.dst||"")+(a.reason?"  — "+a.reason:"")}).join("\n"):(isProxy&&r.args?"args  "+r.args:"no egress recorded");
-    if(r.stderr)lines+="\nstderr  "+r.stderr;
-    var pre=el("pre",null,lines);det.appendChild(pre);
-    if(r.reffed&&r.ref){
-      var gr=el("div",{class:"getrow"});
-      var g=el("button",{class:"btn sm"});g.innerHTML=ic(ICN.dl,{s:12,sw:1.8})+" Download "+r.ref;g.onclick=function(){materialize(r.ref)};
-      gr.appendChild(g);gr.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)"},"operator-only · never routed through the model"));
-      det.appendChild(gr);
-    }
-    wrap.appendChild(det);
-  }
+  if(open)wrap.appendChild(runDetail(r,isProxy));
   return wrap;
+}
+// kvRow appends a labelled row to a <dl class="kv"> when the value is present.
+function kvRow(dl,k,v,cls){if(v==null||v==="")return;dl.appendChild(el("dt",null,k));dl.appendChild(el("dd",cls?{class:cls}:null,String(v)))}
+// runDetail is the expanded breakdown of one run: the event id (copyable, so it
+// can be cited), what it touched, the byte flow, and the egress audit / args /
+// stderr. Every field comes from /admin/runs — nothing is fabricated.
+function runDetail(r,isProxy){
+  var det=el("div",{class:"run-detail"});
+  var dl=el("dl",{class:"kv"});
+  // event id — the stable handle for this run, with a copy affordance
+  dl.appendChild(el("dt",null,"event"));
+  var idd=el("dd");idd.appendChild(document.createTextNode(r.run_id||"—"));
+  if(r.run_id){var cp=el("button",{class:"copyid",title:"copy event id"},"copy");
+    cp.onclick=function(ev){ev.stopPropagation();if(navigator.clipboard)navigator.clipboard.writeText(r.run_id);toast("copied "+r.run_id)};idd.appendChild(cp)}
+  dl.appendChild(idd);
+  kvRow(dl,"time",fmtFull(r.timestamp));
+  if(isProxy){kvRow(dl,"upstream",r.upstream);kvRow(dl,"tool",r.tool);}
+  else{kvRow(dl,"source",r.source_id);kvRow(dl,"engine",(r.substrate||"?")+(r.engine?"/"+r.engine:""));}
+  kvRow(dl,"data",fmtB(r.input_bytes||0)+" in → "+fmtB(r.output_bytes||0)+" returned"+(r.reffed?" · parked off-context":""));
+  kvRow(dl,"latency",r.latency_ms!=null?r.latency_ms+" ms":null);
+  if(r.exit_code!==0&&r.exit_code!=null)kvRow(dl,"exit",r.exit_code+" · refused","bad");
+  kvRow(dl,"session",r.session);
+  kvRow(dl,"user",r.user);
+  det.appendChild(dl);
+  // egress audit (or args / stderr) — the raw trace, in the dark block
+  var lines=(r.audit&&r.audit.length)?r.audit.map(function(a){return (a.event||"")+"  "+(a.host||a.dst||"")+(a.reason?"  — "+a.reason:"")}).join("\n"):(isProxy?"no egress recorded":"no egress — computed off-context");
+  if(isProxy&&r.args)lines="args  "+r.args+"\n"+lines;
+  if(r.stderr)lines+="\nstderr  "+r.stderr;
+  if(r.audit_err)lines+="\naudit_err  "+r.audit_err;
+  det.appendChild(el("pre",null,lines));
+  if(r.reffed&&r.ref){
+    var gr=el("div",{class:"getrow"});
+    var g=el("button",{class:"btn sm"});g.innerHTML=ic(ICN.dl,{s:12,sw:1.8})+" Download "+r.ref;g.onclick=function(){materialize(r.ref)};
+    gr.appendChild(g);gr.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)"},"operator-only · never routed through the model"));
+    det.appendChild(gr);
+  }
+  return det;
 }
 function egressPill(r){
   var denied=(r.audit||[]).filter(function(a){return /deny/i.test(a.event||"")}).length,allowed=(r.audit||[]).length-denied;
