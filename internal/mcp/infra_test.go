@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"microagency/internal/secretstore"
 )
 
 // InfraStatus must report real, probed component health — never a fabricated
@@ -65,5 +68,24 @@ func TestInfraEndpointServesJSON(t *testing.T) {
 	}
 	if len(got.Components) == 0 {
 		t.Fatal("no components returned")
+	}
+}
+
+// The file store is a fallback used only when OpenBao can't come up, so the
+// secrets component warns (degraded posture) rather than reporting a healthy ok.
+func TestSecretsFileStoreWarns(t *testing.T) {
+	s := newTestServer(t, fakeRunner{})
+	s.secrets = &secretstore.File{Path: filepath.Join(t.TempDir(), "tokens.json")}
+	var sc InfraComponent
+	for _, c := range s.InfraStatus(context.Background()).Components {
+		if c.Key == "secrets" {
+			sc = c
+		}
+	}
+	if sc.Status != "warn" {
+		t.Fatalf("file-store secrets status = %q, want warn", sc.Status)
+	}
+	if sc.Label != "file" {
+		t.Fatalf("label = %q, want file", sc.Label)
 	}
 }
