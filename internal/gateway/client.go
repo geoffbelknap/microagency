@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+
+	"microagency/internal/auth"
 )
 
 // maxUpstreamBytes caps an upstream tool result we buffer before parsing. Generous
@@ -280,13 +282,28 @@ func (u *Upstream) Probe(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode == http.StatusUnauthorized {
-		return resolveResourceMetadata(u.URL, resp.Header.Get("WWW-Authenticate")), nil
+	challenged := resp.StatusCode == http.StatusUnauthorized
+	// A 401 may name the metadata directly (RFC 9728) — authoritative when present.
+	if challenged {
+		if rm := resourceMetadataFromWWWAuth(u.URL, resp.Header.Get("WWW-Authenticate")); rm != "" {
+			return rm, nil
+		}
 	}
-	// No 401 challenge — check whether the resource advertises OAuth anyway.
-	rm := resolveResourceMetadata(u.URL, "") // <origin>/.well-known/oauth-protected-resource
-	if u.advertisesOAuth(ctx, rm) {
-		return rm, nil
+	// Otherwise derive the protected-resource metadata location. Path-aware, the
+	// same shape as AS discovery: a resource at /mcp/trading serves its metadata at
+	// <origin>/.well-known/oauth-protected-resource/mcp/trading (insertion), not by
+	// appending after the path. Return the first candidate that declares an AS.
+	candidates := auth.WellKnownCandidates(u.URL, "oauth-protected-resource")
+	for _, cand := range candidates {
+		if u.advertisesOAuth(ctx, cand) {
+			return cand, nil
+		}
+	}
+	// A 401 means OAuth IS required even if we couldn't confirm the metadata; hand
+	// back the best-guess (insertion) URL so discovery proceeds and surfaces a real
+	// error, rather than silently treating the upstream as unauthenticated.
+	if challenged && len(candidates) > 0 {
+		return candidates[0], nil
 	}
 	return "", nil
 }
@@ -317,28 +334,30 @@ func (u *Upstream) advertisesOAuth(ctx context.Context, metadataURL string) bool
 	return len(pr.AuthorizationServers) > 0
 }
 
-// resolveResourceMetadata extracts resource_metadata="…" from a WWW-Authenticate
-// header (resolving a relative value against the upstream's origin), or derives the
-// RFC 9728 default <origin>/.well-known/oauth-protected-resource.
-func resolveResourceMetadata(upstreamURL, wwwAuth string) string {
-	rm := ""
-	if i := strings.Index(wwwAuth, "resource_metadata="); i >= 0 {
-		v := strings.TrimSpace(wwwAuth[i+len("resource_metadata="):])
-		v = strings.TrimPrefix(v, `"`)
-		if j := strings.IndexAny(v, `",`); j >= 0 {
-			v = v[:j]
-		}
-		rm = strings.TrimSpace(v)
+// resourceMetadataFromWWWAuth extracts resource_metadata="…" from a
+// WWW-Authenticate header (RFC 9728), resolving a relative value against the
+// upstream's origin. Returns "" when the header names none — the caller then
+// derives the location via auth.WellKnownCandidates, which is path-aware.
+func resourceMetadataFromWWWAuth(upstreamURL, wwwAuth string) string {
+	i := strings.Index(wwwAuth, "resource_metadata=")
+	if i < 0 {
+		return ""
+	}
+	v := strings.TrimSpace(wwwAuth[i+len("resource_metadata="):])
+	v = strings.TrimPrefix(v, `"`)
+	if j := strings.IndexAny(v, `",`); j >= 0 {
+		v = v[:j]
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
 	}
 	base, err := url.Parse(upstreamURL)
 	if err != nil {
-		return rm
+		return v
 	}
-	if rm == "" {
-		return base.Scheme + "://" + base.Host + "/.well-known/oauth-protected-resource"
-	}
-	if ref, err := url.Parse(rm); err == nil {
+	if ref, err := url.Parse(v); err == nil {
 		return base.ResolveReference(ref).String()
 	}
-	return rm
+	return v
 }
