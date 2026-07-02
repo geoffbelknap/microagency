@@ -358,7 +358,7 @@ async function refresh(){
     var r=await Promise.all([api("GET","/admin/upstreams"),api("GET","/admin/runs"),api("GET","/admin/metrics")]);
     state.ups=r[0]||[];state.runs=r[1]||[];state.metrics=r[2]||null;
     setConn(true,"connected");
-    if(!infraData)renderInfra();
+    if(!infraData)refreshInfra();
   }catch(e){
     // No server, or not authorized. Show an honest error and empty state — the
     // console never renders fabricated data.
@@ -375,7 +375,7 @@ function setConn(ok,txt){
 }
 
 /* ---------- render ---------- */
-function renderAll(){renderTabs();renderImpactStrip();renderUpstreams();renderRuns();renderInfra();if(state.reg.length)renderRegistry()}
+function renderAll(){renderTabs();renderImpactStrip();renderUpstreams();renderRuns();renderInfraFooter();if(state.reg.length)renderRegistry()}
 
 function renderTabs(){
   var disc=state.ups.filter(function(u){return u.state==="discovered"}).length;
@@ -691,11 +691,20 @@ function flowRow(k,v){return '<div style="display:flex;gap:14px;padding:12px 16p
    item opens its probe detail; the "Infrastructure" label re-checks. Never fake. */
 var INFRA_DOT={ok:"var(--teal)",warn:"var(--amber)",bad:"var(--red)",off:"var(--ink-faint)"};
 var infraData=null;
-async function renderInfra(){
+// refreshInfra fetches /admin/infra (which runs the live probes) then draws the
+// footer. renderInfraFooter is the SYNCHRONOUS draw — kept separate so it can't
+// interleave: with the fetch and the clear in one async function, concurrent
+// calls (boot + connect + every renderAll) cleared early and appended late,
+// stacking duplicate footers. Now the draw is atomic and renderAll re-draws from
+// cache without re-probing.
+async function refreshInfra(){
+  try{infraData=await api("GET","/admin/infra")}catch(e){infraData=null}
+  renderInfraFooter();
+}
+function renderInfraFooter(){
   var box=$("#infra");box.innerHTML="";
   var head=el("button",{class:"linkbtn",title:"re-check infrastructure",style:"font-size:9px;letter-spacing:.14em;text-transform:uppercase"},"Infrastructure");
-  head.onclick=renderInfra;box.appendChild(head);
-  try{infraData=await api("GET","/admin/infra")}catch(e){infraData=null}
+  head.onclick=refreshInfra;box.appendChild(head);
   if(!infraData){box.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)"},"status unavailable — connect to the gateway"));box.appendChild(el("div",{class:"grow"}));return}
   infraData.components.forEach(function(c){
     var b=el("button",{class:"svc",title:c.status+" — click for detail",style:"border:0;background:none;cursor:pointer;padding:0"});
@@ -731,7 +740,7 @@ setInterval(function(){
 
 /* boot */
 initTheme();
-renderTabs();renderInfra();
+renderTabs();refreshInfra();
 refresh();
 </script>
 </body>
