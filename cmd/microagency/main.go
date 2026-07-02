@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -62,6 +63,8 @@ func main() {
 		runDown()
 	case "restart":
 		runRestart(args[1:])
+	case "purge":
+		runPurge(args[1:])
 	case "doctor":
 		runDoctor()
 	case "hook":
@@ -98,6 +101,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  microagency up [flags]    start the MCP server (runs in the background)")
 	fmt.Fprintln(os.Stderr, "  microagency down          stop the background server")
 	fmt.Fprintln(os.Stderr, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
+	fmt.Fprintln(os.Stderr, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
 	fmt.Fprintln(os.Stderr, "  microagency doctor        check runtime + engine health")
 	fmt.Fprintln(os.Stderr, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(os.Stderr, "")
@@ -393,14 +397,7 @@ func runDown() {
 // tokens), so only the server process is cycled. If nothing is running, it's just
 // a start.
 func runRestart(args []string) {
-	if pid := runningPID(); pid != 0 {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-		// Wait for it to actually exit so the new instance can bind the port and the
-		// single-instance guard sees a free slot. runningPID clears the stale pid file
-		// once the process is gone.
-		for i := 0; i < 50 && runningPID() != 0; i++ {
-			time.Sleep(100 * time.Millisecond)
-		}
+	if pid := stopRunningServer(); pid != 0 {
 		fmt.Fprintf(os.Stderr, "microagency: stopped (pid %d)\n", pid)
 	}
 	// Re-exec as `up`, not `restart`. run() backgrounds by re-running os.Args[1:];
@@ -409,6 +406,122 @@ func runRestart(args []string) {
 	// to the up form so the child serves instead of killing itself.
 	os.Args = append([]string{os.Args[0], "up"}, args...)
 	run(args)
+}
+
+// stopRunningServer SIGTERMs a running background server and waits for it to exit
+// (so a follow-up start can bind the port, or files can be removed without the
+// process rewriting them). Returns the pid it stopped, or 0 if nothing was up.
+func stopRunningServer() int {
+	pid := runningPID()
+	if pid == 0 {
+		return 0
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	// runningPID clears the stale pid file once the process is gone.
+	for i := 0; i < 50 && runningPID() != 0; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return pid
+}
+
+// runPurge deletes the operator's data. The default (Tier 1) removes parked data
+// and run/audit history but keeps connections, credentials, and the operator
+// token — no re-auth. --full removes the entire ~/.microagency (re-auth after).
+// Both confirm first (skip with --yes) and stop the server so it can't hold stale
+// state in memory or re-append to the audit log after the wipe.
+func runPurge(args []string) {
+	full, yes := false, false
+	for _, a := range args {
+		switch a {
+		case "--full":
+			full = true
+		case "--yes", "-y":
+			yes = true
+		case "-h", "--help", "help":
+			fmt.Fprintln(os.Stderr, "usage: microagency purge [--full] [--yes]")
+			fmt.Fprintln(os.Stderr, "  (default) delete parked data (refs) + run/audit history; keep connections & auth")
+			fmt.Fprintln(os.Stderr, "  --full    delete EVERYTHING under ~/.microagency (re-authenticate afterward)")
+			fmt.Fprintln(os.Stderr, "  --yes,-y  skip the confirmation prompt")
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
+			os.Exit(2)
+		}
+	}
+	dir := microagencyDir()
+	if full {
+		fmt.Fprintf(os.Stderr, "This PERMANENTLY deletes the entire %s directory:\n", dir)
+		fmt.Fprintln(os.Stderr, "  • parked data (refs) and all run/audit history")
+		fmt.Fprintln(os.Stderr, "  • stored upstream credentials — you will re-authenticate every connection")
+		fmt.Fprintln(os.Stderr, "  • the operator token and local OAuth keys — Claude Code will re-consent")
+	} else {
+		fmt.Fprintln(os.Stderr, "This permanently deletes your data:")
+		fmt.Fprintf(os.Stderr, "  • %s   (run/audit history, incl. args + stderr)\n", filepath.Join(dir, "audit.jsonl"))
+		fmt.Fprintf(os.Stderr, "  • %s/       (parked reference payloads)\n", filepath.Join(dir, "refs"))
+		fmt.Fprintf(os.Stderr, "  • %s   (the refs encryption key)\n", filepath.Join(dir, "refs.key"))
+		fmt.Fprintln(os.Stderr, "Connections, credentials, and the operator token are KEPT — no re-auth.")
+	}
+	if !yes && !confirmPurge() {
+		fmt.Fprintln(os.Stderr, "microagency: purge cancelled")
+		return
+	}
+	if pid := stopRunningServer(); pid != 0 {
+		fmt.Fprintf(os.Stderr, "microagency: stopped (pid %d)\n", pid)
+	}
+	if full {
+		baomanager.Stop(filepath.Join(dir, "openbao")) // release the storage dir before removing it
+	}
+	if err := doPurge(dir, full); err != nil {
+		fmt.Fprintf(os.Stderr, "microagency: purge: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "microagency: purge complete")
+	fmt.Fprintln(os.Stderr, "Start fresh with: microagency up")
+}
+
+// confirmPurge reads a yes/no from stdin; only an explicit y/yes proceeds.
+func confirmPurge() bool {
+	fmt.Fprint(os.Stderr, "Continue? [y/N]: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// doPurge removes the on-disk state. full → the whole dir; otherwise the data
+// files only (missing files are not an error), truncating the log (kept as a
+// valid path for the next start). Best-effort: it removes everything it can and
+// reports what it couldn't, rather than stopping at the first error.
+func doPurge(dir string, full bool) error {
+	if full {
+		return os.RemoveAll(dir)
+	}
+	var errs []string
+	for _, p := range []string{
+		filepath.Join(dir, "audit.jsonl"),
+		filepath.Join(dir, "refs"),
+		filepath.Join(dir, "refs.key"),
+	} {
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", p, err))
+		}
+	}
+	if logPath := filepath.Join(dir, "microagency.log"); fileExists(logPath) {
+		if err := os.Truncate(logPath, 0); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", logPath, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func microagencyDir() string {
