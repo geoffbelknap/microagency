@@ -583,7 +583,7 @@ function renderRuns(){
   }
 }
 function runRow(r){
-  var isProxy=r.kind==="proxy",bad=isDenied(r),id=r.ref||r.source_id||(r.upstream+"__"+r.tool)||String(r.timestamp);
+  var isProxy=r.kind==="proxy",bad=isDenied(r),id=r.run_id||(r.ref+"__"+r.timestamp);
   var open=!!state.expanded[id];
   var wrap=el("div",{class:"run"+(bad?" bad":"")+(open?" open":"")});
   var head=el("button",{class:"run-head"});
