@@ -37,6 +37,11 @@ type Server struct {
 	// in /admin/infra and the MCP serverInfo. "" for a plain `go build`.
 	version string
 
+	// consoleAddr is where the operator surface (/console) is bound, reported in
+	// /admin/infra so the header can show where the console is reachable. "" for a
+	// plain `go build` / tests, where the browser falls back to its own location.
+	consoleAddr string
+
 	// wasm holds the reduce substrate's engines by name (e.g. jq, sql, text, html).
 	// A declarative reduction is computed in the selected engine instead of running
 	// Python in a microVM. Empty = the declarative reduce path is off. The agent
@@ -153,6 +158,11 @@ func WithUpstreamClient(c *http.Client) Option { return func(s *Server) { s.upst
 // WithVersion sets the build's release version, reported in /admin/infra and the
 // MCP serverInfo.
 func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
+
+// WithConsoleAddr records where the operator console is bound (e.g.
+// "127.0.0.1:8765"), reported in /admin/infra so the header shows the actual
+// bind rather than a hardcoded label.
+func WithConsoleAddr(addr string) Option { return func(s *Server) { s.consoleAddr = addr } }
 
 // WithWasmEngine registers a named engine for the declarative wasm-compute
 // substrate (e.g. "jq", "text", "html"). A reduce query is routed to the

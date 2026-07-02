@@ -221,7 +221,7 @@ func run(args []string) {
 		}
 	}
 
-	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs)
+	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, consoleAddr(cfg))
 
 	if stdio {
 		if err := srv.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
@@ -752,7 +752,7 @@ func loadOrCreateRefsKey(path string) ([]byte, error) {
 	return key, nil
 }
 
-func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs bool) *mcp.Server {
+func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs bool, consoleAddr string) *mcp.Server {
 	// One refstore backs the budget gate for both substrates AND the proxy path, so
 	// a reffed result is resolvable regardless of which produced it. maxInlineBytes
 	// (operator-set via --max-inline-bytes) is the single context budget everywhere.
@@ -781,7 +781,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	// Hand the store + gate to the Server so the PROXY path (aggregated MCP tool
 	// calls) goes through reference-by-default minimization and the reffed results
 	// are reducible off-context.
-	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate), mcp.WithVersion(version)}
+	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate), mcp.WithVersion(version), mcp.WithConsoleAddr(consoleAddr)}
 	// The wasm engines back reduce (a declarative reduction over a ref is computed
 	// in the selected engine instead of running Python in a microVM). The engines
 	// BUNDLED into the binary are registered automatically; each `--engine name=path`

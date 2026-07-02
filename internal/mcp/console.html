@@ -219,7 +219,7 @@ svg{display:block}
       <span class="mono" id="app-version" style="font-size:9px;color:var(--ink-faint);letter-spacing:.08em"></span>
       <div class="grow"></div>
       <span class="status-pill" id="conn-pill"><span class="dot"><span class="pulse"></span></span><span id="conn-txt">connecting…</span></span>
-      <span class="metaword">operator · loopback</span>
+      <span class="metaword" id="host-meta" title="the OS user microagency runs as, and where the console is bound">operator · loopback</span>
       <button class="iconbtn" id="theme-btn" aria-label="Toggle theme" title="Toggle theme"></button>
     </header>
 
@@ -707,6 +707,7 @@ function renderInfraFooter(){
   head.onclick=refreshInfra;box.appendChild(head);
   var av=$("#app-version"),ver=(infraData&&infraData.build&&infraData.build.version)||"";
   if(av)av.textContent=ver?(/^\d/.test(ver)?"v":"")+ver:"";
+  renderHostMeta();
   if(!infraData){box.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)"},"status unavailable — connect to the gateway"));box.appendChild(el("div",{class:"grow"}));return}
   infraData.components.forEach(function(c){
     var b=el("button",{class:"svc",title:c.status+" — click for detail",style:"border:0;background:none;cursor:pointer;padding:0"});
@@ -718,6 +719,21 @@ function renderInfraFooter(){
   var bi=infraData.build||{},rev=bi.revision||"unknown";
   if(rev!=="unknown")rev=rev.slice(0,7)+(bi.modified?"+":"");
   box.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)",title:bi.time||""},"build "+rev));
+}
+// Header identity: the OS user microagency runs as and where the console is bound.
+// A loopback bind (the default) is local-only; a non-loopback bind is reachable
+// over the network, so flag it in amber. Falls back to the browser's own location
+// when the server doesn't report an address (plain `go build`).
+function renderHostMeta(){
+  var m=$("#host-meta");if(!m)return;
+  var h=(infraData&&infraData.host)||{};
+  var user=h.user||"operator";
+  var where=h.addr||location.host||"";
+  var lo=("loopback"in h)?h.loopback:/^(127\.0\.0\.1|\[?::1\]?|localhost)(:|$)/.test(where);
+  m.textContent=user+" · "+(where||(lo?"loopback":"local"));
+  m.style.color=lo?"":"var(--amber)";
+  m.title=lo?("running as "+user+" · console bound to "+(where||"loopback")+" — local only")
+            :("running as "+user+" · console reachable at "+where+" — exposed over the network");
 }
 function openInfra(c){
   var d=c.detail||{};

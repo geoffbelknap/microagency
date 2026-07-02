@@ -71,6 +71,29 @@ func TestInfraEndpointServesJSON(t *testing.T) {
 	}
 }
 
+// The host block reports the OS user and the console bind, with loopback set for
+// a local-only address and cleared for a network-reachable one.
+func TestInfraHost(t *testing.T) {
+	if got := hostInfo("127.0.0.1:8765"); !got.Loopback || got.Addr != "127.0.0.1:8765" {
+		t.Errorf("loopback bind: got %+v, want Loopback=true addr=127.0.0.1:8765", got)
+	}
+	if got := hostInfo("0.0.0.0:8765"); got.Loopback {
+		t.Errorf("network bind 0.0.0.0 reported loopback: %+v", got)
+	}
+	if got := hostInfo("192.168.1.10:8765"); got.Loopback {
+		t.Errorf("network bind LAN IP reported loopback: %+v", got)
+	}
+	if got := hostInfo("localhost:8765"); !got.Loopback {
+		t.Errorf("localhost should be loopback: %+v", got)
+	}
+	if got := hostInfo(""); got.Loopback || got.Addr != "" {
+		t.Errorf("empty addr: got %+v, want no addr and not loopback", got)
+	}
+	if got := hostInfo("127.0.0.1:8765"); got.User == "" {
+		t.Error("host user is empty — should fall back to a non-empty name")
+	}
+}
+
 // The file store is a fallback used only when OpenBao can't come up, so the
 // secrets component warns (degraded posture) rather than reporting a healthy ok.
 func TestSecretsFileStoreWarns(t *testing.T) {
