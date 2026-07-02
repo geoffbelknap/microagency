@@ -132,6 +132,9 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	if err != nil {
 		return "", err
 	}
+	if meta.Resource == "" {
+		meta.Resource = url // RFC 8707 resource indicator: default to the upstream's canonical URL
+	}
 	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL)
 	if err != nil {
 		return "", err

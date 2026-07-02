@@ -25,6 +25,33 @@ type ASMetadata struct {
 	TokenEndpoint         string   `json:"token_endpoint"`
 	RegistrationEndpoint  string   `json:"registration_endpoint"`
 	ScopesSupported       []string `json:"scopes_supported"` // advertised scopes, for an operator scope picker
+	// Resource is the RFC 8707 resource indicator for this MCP server: the
+	// protected-resource metadata's "resource" (else the upstream URL). Sent as
+	// `resource` on authorize/token so the AS audience-binds the token to this
+	// resource. The MCP auth spec requires it; some servers reject a flow without it.
+	Resource string `json:"-"`
+}
+
+// WellKnownCandidates returns the metadata locations to try for a base URL and a
+// well-known document name, in spec order. RFC 8414 (authorization servers) and
+// RFC 9728 (protected resources) both INSERT the well-known segment after the host
+// and keep the base's path suffix; the legacy form appends it after the path. A
+// base with no path yields the single canonical location. Shared by AS and
+// protected-resource discovery so the two paths can't drift.
+func WellKnownCandidates(base, name string) []string {
+	base = strings.TrimRight(base, "/")
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return []string{base + "/.well-known/" + name}
+	}
+	origin := u.Scheme + "://" + u.Host
+	if path := strings.TrimRight(u.Path, "/"); path != "" {
+		return []string{
+			origin + "/.well-known/" + name + path, // insertion (RFC 8414/9728)
+			base + "/.well-known/" + name,          // legacy append
+		}
+	}
+	return []string{origin + "/.well-known/" + name}
 }
 
 // DiscoverAS finds the authorization server protecting an MCP resource: fetch the
@@ -35,6 +62,7 @@ func DiscoverAS(ctx context.Context, hc *http.Client, resourceMetadataURL string
 	var pr struct {
 		AuthorizationServers []string `json:"authorization_servers"`
 		ScopesSupported      []string `json:"scopes_supported"`
+		Resource             string   `json:"resource"`
 	}
 	if err := getJSON(ctx, hc, resourceMetadataURL, &pr); err != nil {
 		return nil, fmt.Errorf("protected-resource metadata: %w", err)
@@ -49,6 +77,7 @@ func DiscoverAS(ctx context.Context, hc *http.Client, resourceMetadataURL string
 	if len(meta.ScopesSupported) == 0 {
 		meta.ScopesSupported = pr.ScopesSupported // fall back to the resource's advertised scopes
 	}
+	meta.Resource = pr.Resource // RFC 8707 resource indicator (caller fills in the upstream URL if empty)
 	return meta, nil
 }
 
@@ -72,32 +101,30 @@ func discoverASMetadata(ctx context.Context, hc *http.Client, issuer string) (*A
 	return nil, fmt.Errorf("authorization-server metadata: %w", lastErr)
 }
 
-// asMetadataURLs returns the candidate metadata URLs for an issuer, in the order
-// an MCP client should try them. RFC 8414 §3.1 INSERTS the well-known segment
-// after the host and keeps the issuer's path suffix — appending it after the path
-// (the old behavior) 404s on any issuer with a path, e.g. .../mcp/trading. When
-// the issuer has no path, insert and append coincide. We also try the OpenID
-// Connect discovery locations, since some providers only serve those.
+// asMetadataURLs lists the AS-metadata locations to try, most-correct first: the
+// insertion forms before the legacy appends, and oauth-authorization-server before
+// the OpenID Connect discovery document. Providers vary in which they serve, so we
+// try each until one returns usable endpoints.
 func asMetadataURLs(issuer string) []string {
-	issuer = strings.TrimRight(issuer, "/")
-	u, err := url.Parse(issuer)
-	if err != nil || u.Host == "" {
-		return []string{issuer + "/.well-known/oauth-authorization-server"}
-	}
-	origin := u.Scheme + "://" + u.Host
-	path := strings.TrimRight(u.Path, "/") // "" for a root issuer, else "/mcp/trading"
-	if path == "" {
-		return []string{
-			origin + "/.well-known/oauth-authorization-server",
-			origin + "/.well-known/openid-configuration",
+	oauth := WellKnownCandidates(issuer, "oauth-authorization-server")
+	oidc := WellKnownCandidates(issuer, "openid-configuration")
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
 		}
 	}
-	return []string{
-		origin + "/.well-known/oauth-authorization-server" + path, // RFC 8414 path insertion (correct)
-		origin + "/.well-known/openid-configuration" + path,       // OIDC path insertion
-		issuer + "/.well-known/openid-configuration",              // OIDC path append (legacy)
-		issuer + "/.well-known/oauth-authorization-server",        // append (some servers; old behavior)
+	add(oauth[0]) // insertion (or, for a root issuer, the canonical location)
+	add(oidc[0])
+	for _, u := range oauth[1:] { // legacy append forms, if the issuer had a path
+		add(u)
 	}
+	for _, u := range oidc[1:] {
+		add(u)
+	}
+	return out
 }
 
 // RegisterClient performs Dynamic Client Registration (RFC 7591) and returns the
@@ -159,6 +186,9 @@ func AuthorizeURL(meta *ASMetadata, clientID, redirectURI string, p PKCE, scope,
 	if scope != "" {
 		q.Set("scope", scope)
 	}
+	if meta.Resource != "" {
+		q.Set("resource", meta.Resource) // RFC 8707 — audience-bind the token to this MCP resource
+	}
 	sep := "?"
 	if strings.Contains(meta.AuthorizationEndpoint, "?") {
 		sep = "&"
@@ -180,13 +210,17 @@ type UpstreamToken struct {
 
 // ExchangeCode swaps an authorization code (+ PKCE verifier) for tokens.
 func ExchangeCode(ctx context.Context, hc *http.Client, meta *ASMetadata, clientID, clientSecret, redirectURI, code string, p PKCE) (*UpstreamToken, error) {
-	return postToken(ctx, hc, meta.TokenEndpoint, clientID, clientSecret, url.Values{
+	v := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
 		"client_id":     {clientID},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {p.Verifier},
-	})
+	}
+	if meta.Resource != "" {
+		v.Set("resource", meta.Resource) // RFC 8707 — must match the authorize request's resource
+	}
+	return postToken(ctx, hc, meta.TokenEndpoint, clientID, clientSecret, v)
 }
 
 // Expired reports whether the access token is past (or within 30s of) expiry.

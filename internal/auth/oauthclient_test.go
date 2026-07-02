@@ -6,20 +6,61 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-// A path-bearing issuer (e.g. Robinhood's .../mcp/trading) must be discovered via
-// RFC 8414 path INSERTION first; the old path-append form is only a last-resort
-// fallback. A root issuer collapses to the plain well-known.
-func TestASMetadataURLsPathInsertion(t *testing.T) {
-	got := asMetadataURLs("https://agent.robinhood.com/mcp/trading")
+// Metadata discovery is defined by the issuer's URL SHAPE, not any one provider.
+// RFC 8414/9728 insert the well-known segment after the host and keep the path
+// suffix; a root issuer has a single canonical location.
+func TestWellKnownCandidates(t *testing.T) {
+	cases := []struct {
+		name, base, wk string
+		want           []string
+	}{
+		{
+			name: "path issuer inserts then appends",
+			base: "https://host.example/a/b", wk: "oauth-authorization-server",
+			want: []string{
+				"https://host.example/.well-known/oauth-authorization-server/a/b",
+				"https://host.example/a/b/.well-known/oauth-authorization-server",
+			},
+		},
+		{
+			name: "root issuer has one location",
+			base: "https://host.example", wk: "oauth-authorization-server",
+			want: []string{"https://host.example/.well-known/oauth-authorization-server"},
+		},
+		{
+			name: "trailing slash is a root issuer",
+			base: "https://host.example/", wk: "oauth-protected-resource",
+			want: []string{"https://host.example/.well-known/oauth-protected-resource"},
+		},
+	}
+	for _, c := range cases {
+		got := WellKnownCandidates(c.base, c.wk)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("%s[%d]: got %q, want %q", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// asMetadataURLs tries insertion forms before legacy appends, oauth before oidc,
+// for any path-bearing issuer.
+func TestASMetadataURLsOrdering(t *testing.T) {
+	got := asMetadataURLs("https://host.example/a/b")
 	want := []string{
-		"https://agent.robinhood.com/.well-known/oauth-authorization-server/mcp/trading",
-		"https://agent.robinhood.com/.well-known/openid-configuration/mcp/trading",
-		"https://agent.robinhood.com/mcp/trading/.well-known/openid-configuration",
-		"https://agent.robinhood.com/mcp/trading/.well-known/oauth-authorization-server",
+		"https://host.example/.well-known/oauth-authorization-server/a/b", // oauth insertion
+		"https://host.example/.well-known/openid-configuration/a/b",       // oidc insertion
+		"https://host.example/a/b/.well-known/oauth-authorization-server", // oauth append
+		"https://host.example/a/b/.well-known/openid-configuration",       // oidc append
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
@@ -29,38 +70,50 @@ func TestASMetadataURLsPathInsertion(t *testing.T) {
 			t.Errorf("candidate %d = %q, want %q", i, got[i], want[i])
 		}
 	}
-
-	root := asMetadataURLs("https://as.example.com/")
-	if len(root) == 0 || root[0] != "https://as.example.com/.well-known/oauth-authorization-server" {
-		t.Fatalf("root issuer first candidate = %v, want the plain well-known", root)
-	}
 }
 
-// DiscoverAS must fall through a 404 on the append form and succeed on the
-// path-insertion location — the exact Robinhood shape.
-func TestDiscoverASFallsThroughToPathInsertion(t *testing.T) {
-	var ts *httptest.Server // captured by the handlers; ts.URL is set before any request
+// A path-bearing issuer whose AS metadata is served only at the insertion location
+// must be discovered by falling through the append form's 404. Also verifies the
+// RFC 8707 resource indicator is captured from the protected-resource metadata.
+func TestDiscoverASPathAwareWithResourceIndicator(t *testing.T) {
+	var ts *httptest.Server // captured by handlers; ts.URL is set before any request
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"authorization_servers":["` + ts.URL + `/mcp/trading"],"scopes_supported":["internal"]}`))
+		_, _ = w.Write([]byte(`{"authorization_servers":["` + ts.URL + `/a/b"],"scopes_supported":["s"],"resource":"` + ts.URL + `/a/b"}`))
 	})
-	// Only the RFC 8414 path-insertion location serves the AS metadata — the append
-	// form (.../mcp/trading/.well-known/...) 404s, so discovery must fall through.
-	mux.HandleFunc("/.well-known/oauth-authorization-server/mcp/trading", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"issuer":"` + ts.URL + `/mcp/trading","authorization_endpoint":"` + ts.URL + `/authorize","token_endpoint":"` + ts.URL + `/token"}`))
+	// Only the insertion location serves AS metadata; the append form 404s.
+	mux.HandleFunc("/.well-known/oauth-authorization-server/a/b", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"` + ts.URL + `/a/b","authorization_endpoint":"` + ts.URL + `/authorize","token_endpoint":"` + ts.URL + `/token"}`))
 	})
 	ts = httptest.NewServer(mux)
 	defer ts.Close()
 
 	meta, err := DiscoverAS(context.Background(), ts.Client(), ts.URL+"/.well-known/oauth-protected-resource")
 	if err != nil {
-		t.Fatalf("DiscoverAS should have found the path-insertion metadata: %v", err)
+		t.Fatalf("DiscoverAS should have found the insertion metadata: %v", err)
 	}
 	if meta.TokenEndpoint != ts.URL+"/token" || meta.AuthorizationEndpoint != ts.URL+"/authorize" {
 		t.Fatalf("wrong endpoints: %+v", meta)
 	}
-	if len(meta.ScopesSupported) != 1 || meta.ScopesSupported[0] != "internal" {
+	if len(meta.ScopesSupported) != 1 || meta.ScopesSupported[0] != "s" {
 		t.Fatalf("scopes should fall back to the resource's: %+v", meta.ScopesSupported)
+	}
+	if meta.Resource != ts.URL+"/a/b" {
+		t.Fatalf("resource indicator = %q, want the PR metadata's resource", meta.Resource)
+	}
+}
+
+// The RFC 8707 resource indicator is sent on the authorize request when present,
+// and omitted when not — no vendor assumptions.
+func TestAuthorizeURLResourceIndicator(t *testing.T) {
+	base := &ASMetadata{AuthorizationEndpoint: "https://as.example/authorize"}
+	if got := AuthorizeURL(base, "cid", "https://cb", NewPKCE(), "", "st"); strings.Contains(got, "resource=") {
+		t.Errorf("no resource indicator should be sent when unset: %s", got)
+	}
+	base.Resource = "https://mcp.example/a/b"
+	got := AuthorizeURL(base, "cid", "https://cb", NewPKCE(), "", "st")
+	if !strings.Contains(got, "resource=https%3A%2F%2Fmcp.example%2Fa%2Fb") {
+		t.Errorf("authorize URL must carry the resource indicator: %s", got)
 	}
 }
 

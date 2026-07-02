@@ -136,17 +136,44 @@ func TestUpstreamProbeNoOAuth(t *testing.T) {
 	}
 }
 
-func TestResolveResourceMetadata(t *testing.T) {
+func TestResourceMetadataFromWWWAuth(t *testing.T) {
 	const mcp = "https://mcp.example.com/mcp"
 	cases := []struct{ name, www, want string }{
 		{"relative", `Bearer resource_metadata="/.well-known/oauth-protected-resource"`, "https://mcp.example.com/.well-known/oauth-protected-resource"},
 		{"absolute", `Bearer resource_metadata="https://auth.example.com/.well-known/oauth-protected-resource"`, "https://auth.example.com/.well-known/oauth-protected-resource"},
-		{"default-when-absent", "", "https://mcp.example.com/.well-known/oauth-protected-resource"},
+		{"absent-returns-empty", "", ""}, // no header value → caller derives (path-aware) instead
+		{"no-resource-param", `Bearer realm="x"`, ""},
 	}
 	for _, c := range cases {
-		if got := resolveResourceMetadata(mcp, c.www); got != c.want {
+		if got := resourceMetadataFromWWWAuth(mcp, c.www); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A resource served under a path (e.g. /mcp/trading) publishes its RFC 9728
+// metadata at the INSERTION location (<origin>/.well-known/oauth-protected-
+// resource/mcp/trading), not by appending after the path. Probe must find it there
+// even though the root location 404s — the sibling of the AS-discovery fix.
+func TestUpstreamProbePathAwareResourceMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp/trading", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)) // public initialize, no challenge
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/trading", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"resource":"x","authorization_servers":["https://as.example"]}`))
+	})
+	// The root location deliberately 404s (default ServeMux behavior), so a
+	// root-only probe would miss OAuth entirely.
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	rm, err := (&Upstream{Name: "rh", URL: srv.URL + "/mcp/trading"}).Probe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := srv.URL + "/.well-known/oauth-protected-resource/mcp/trading"; rm != want {
+		t.Fatalf("probe rm = %q, want the insertion location %q", rm, want)
 	}
 }
 
