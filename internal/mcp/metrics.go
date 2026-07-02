@@ -66,19 +66,20 @@ func (s *Server) Metrics() MetricsSummary {
 				m.Impact.BytesToContext += int64(rec.OutputBytes)
 			}
 		}
-		sub := rec.Substrate
-		if sub == "" {
-			sub = "unknown"
+		// by_substrate is "where reduce ran" — only reduce runs land on a substrate
+		// (wasm/microvm). Proxy calls have none, so they don't belong in this
+		// breakdown (otherwise they pile up under a bogus "unknown" substrate).
+		if sub := rec.Substrate; sub != "" {
+			st := m.BySubstrate[sub]
+			if st == nil {
+				st = &SubstrateStats{}
+				m.BySubstrate[sub] = st
+			}
+			st.Runs++
+			st.InputBytesTotal += rec.InputBytes
+			st.OutputBytesTotal += rec.OutputBytes
+			lat[sub] = append(lat[sub], rec.LatencyMs)
 		}
-		st := m.BySubstrate[sub]
-		if st == nil {
-			st = &SubstrateStats{}
-			m.BySubstrate[sub] = st
-		}
-		st.Runs++
-		st.InputBytesTotal += rec.InputBytes
-		st.OutputBytesTotal += rec.OutputBytes
-		lat[sub] = append(lat[sub], rec.LatencyMs)
 		if rec.Engine != "" {
 			m.ByEngine[rec.Engine]++
 		}

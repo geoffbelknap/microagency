@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"microagency/internal/budget"
 	"microagency/internal/gateway"
 	"microagency/internal/refstore"
+	"microagency/internal/sandbox"
 )
 
 // maxOffloadBytes bounds how much microagency rehydrates from an upstream offload
@@ -350,6 +352,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	}
 	runID := s.nextRunID()
 	start := time.Now()
+	upHost := hostFromURL(rec.conn.URL) // the egress target for calls that reach the upstream
 	// Tier 1 — pre-egress write guard. If this is a write and its arguments don't
 	// satisfy the tool's retained schema, fail CLOSED: no malformed mutation is sent,
 	// and the agent gets the full spec to retry (it may have seen only a find_tools
@@ -360,12 +363,12 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// which default to write). Enforced OUTSIDE the agent, at the single invocation
 	// gate — the agent can't widen it.
 	if rec.readOnly && (!haveSpec || isWriteTool(spec)) {
-		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("read-only upstream: write refused"), budget.Outcome{})
+		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("read-only upstream: write refused"), budget.Outcome{}, "")
 		return toolError("upstream %q is READ-ONLY; the write/destructive tool %q is refused. Ask the operator to allow writes on this upstream if this is intended.", upName, name), true
 	}
 	if haveSpec && isWriteTool(spec) {
 		if gaps := schemaGaps(spec.InputSchema, args); len(gaps) > 0 {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")), budget.Outcome{})
+			s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")), budget.Outcome{}, "")
 			return schemaBlockResult(name, spec, gaps), true
 		}
 	}
@@ -385,17 +388,17 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			return rec.conn.CallTool(c, tool, args)
 		})
 		if canceled {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, err, budget.Outcome{})
+			s.recordProxy(ctx, runID, upName, tool, args, 0, start, err, budget.Outcome{}, upHost)
 			return toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), true
 		}
 	}
 	if err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{})
+		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost)
 		return toolError("upstream %q: %v", upName, err), true
 	}
 	var passthrough map[string]any
 	if err := json.Unmarshal(res, &passthrough); err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{})
+		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost)
 		return toolError("upstream %q: malformed result: %v", upName, err), true
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
@@ -413,7 +416,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 		if link := offloadURL(payload); link != "" {
 			data, ferr := s.fetchOffload(ctx, link)
 			if ferr != nil {
-				s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("offload rehydrate: %w", ferr), budget.Outcome{})
+				s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("offload rehydrate: %w", ferr), budget.Outcome{}, upHost)
 				return toolError("upstream %q returned an off-platform result link microagency could not retrieve (%v); the raw URL is withheld", upName, ferr), true
 			}
 			payload, rehydrated = string(data), true
@@ -426,7 +429,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 		// claims to be JSON but doesn't parse, or carries a truncation marker — a real
 		// prose document (which doesn't claim to be JSON) still refs normally.
 		if notice, ok := truncatedNotice(payload); ok {
-			s.recordProxy(ctx, runID, upName, tool, args, len(notice), start, nil, budget.Outcome{})
+			s.recordProxy(ctx, runID, upName, tool, args, len(notice), start, nil, budget.Outcome{}, upHost)
 			return truncatedResult(notice), true
 		}
 		// Gate on the LARGER of the extracted payload and the full upstream result.
@@ -444,11 +447,11 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 				stored = string(res)
 			}
 			ref, sum := s.budget.Store.Put(stored)
-			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum})
+			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, upHost)
 			return s.refHandleResult(ref, sum, name), true
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
-			s.recordProxy(ctx, runID, upName, tool, args, len(payload), start, nil, budget.Outcome{})
+			s.recordProxy(ctx, runID, upName, tool, args, len(payload), start, nil, budget.Outcome{}, upHost)
 			return rehydratedResult(payload), true
 		}
 	}
@@ -458,7 +461,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if resultIsError(passthrough) && haveSpec {
 		passthrough = attachToolSpec(passthrough, name, spec)
 	}
-	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{})
+	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost)
 	return passthrough, true
 }
 
@@ -537,10 +540,18 @@ func rehydratedResult(payload string) map[string]any {
 // recordProxy writes an audit record for one aggregated-MCP tool call, so the
 // proxy path shows up in /admin/runs and /admin/metrics exactly like a run. The
 // full arguments are recorded (no redaction — audit means audit).
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome) {
+// egressHost is the upstream host this call reached (mediated, cred-blind), or ""
+// when the call was refused BEFORE any egress (read-only gate, pre-egress schema
+// block). When set, it's recorded as an egress_allow event so the console and the
+// audit chain show the gateway's outbound call, not "no egress".
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string) {
 	exit, auditErr := 0, ""
 	if callErr != nil {
 		exit, auditErr = 1, callErr.Error()
+	}
+	var audit []sandbox.AuditEvent
+	if egressHost != "" {
+		audit = []sandbox.AuditEvent{{Event: "egress_allow", Host: egressHost}}
 	}
 	s.putRun(runID, runRecord{
 		Kind: "proxy", Upstream: upstream, Tool: tool, Args: string(args),
@@ -548,8 +559,16 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 		OutputBytes: outBytes, Bytes: outBytes,
 		LatencyMs: time.Since(start).Milliseconds(),
 		Reffed:    out.Reffed, Ref: string(out.Ref),
-		ExitCode: exit, AuditErr: auditErr,
+		ExitCode: exit, AuditErr: auditErr, Audit: audit,
 	})
+}
+
+// hostOf returns the host[:port] of a URL, for the egress record. "" on parse error.
+func hostFromURL(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		return u.Host
+	}
+	return ""
 }
 
 func resultIsError(result map[string]any) bool {
