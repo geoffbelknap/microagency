@@ -24,6 +24,7 @@ type InfraComponent struct {
 
 // InfraBuild identifies the running binary from its embedded VCS stamp.
 type InfraBuild struct {
+	Version  string `json:"version,omitempty"` // release version (main.version via -ldflags)
 	Revision string `json:"revision"`
 	Time     string `json:"time,omitempty"`
 	Go       string `json:"go"`
@@ -42,6 +43,7 @@ type InfraStatus struct {
 // time-bounded and best-effort; nothing here fabricates a status.
 func (s *Server) InfraStatus(ctx context.Context) InfraStatus {
 	st := InfraStatus{Build: buildInfo()}
+	st.Build.Version = s.version
 
 	// gateway — if this handler answered, the gateway + admin plane are up.
 	st.Components = append(st.Components, InfraComponent{

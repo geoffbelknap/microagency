@@ -216,7 +216,7 @@ svg{display:block}
     <header class="header">
       <div class="brandmark"><i></i><i></i><i></i><i></i></div>
       <div class="brandword">microagency</div>
-      <span class="mono" style="font-size:9px;color:var(--ink-faint);letter-spacing:.08em">v0.9.2</span>
+      <span class="mono" id="app-version" style="font-size:9px;color:var(--ink-faint);letter-spacing:.08em"></span>
       <div class="grow"></div>
       <span class="status-pill" id="conn-pill"><span class="dot"><span class="pulse"></span></span><span id="conn-txt">connecting…</span></span>
       <span class="metaword">operator · loopback</span>
@@ -705,6 +705,8 @@ function renderInfraFooter(){
   var box=$("#infra");box.innerHTML="";
   var head=el("button",{class:"linkbtn",title:"re-check infrastructure",style:"font-size:9px;letter-spacing:.14em;text-transform:uppercase"},"Infrastructure");
   head.onclick=refreshInfra;box.appendChild(head);
+  var av=$("#app-version"),ver=(infraData&&infraData.build&&infraData.build.version)||"";
+  if(av)av.textContent=ver?(/^\d/.test(ver)?"v":"")+ver:"";
   if(!infraData){box.appendChild(el("span",{class:"mono",style:"font-size:10px;color:var(--ink-faint)"},"status unavailable — connect to the gateway"));box.appendChild(el("div",{class:"grow"}));return}
   infraData.components.forEach(function(c){
     var b=el("button",{class:"svc",title:c.status+" — click for detail",style:"border:0;background:none;cursor:pointer;padding:0"});

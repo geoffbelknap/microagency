@@ -26,3 +26,6 @@ scorecard/harness/__pycache__/
 scorecard/harness/.pytest_cache/
 .claude/worktrees/
 AGENTS.md
+
+# GoReleaser build output
+dist/
