@@ -83,6 +83,10 @@ type ScanResult struct {
 	Transformed []byte
 	Tokens      []Token
 	Alerts      []Alert
+	// Protected is the number of field values this scan hid (redacted or tokenized).
+	// It's the minimization impact the gateway records so the work is visible in the
+	// metrics, not just felt in the (scrubbed) output.
+	Protected int
 }
 
 // Module is one pluggable minimizer. Implementations MUST be pure functions of the
@@ -121,6 +125,7 @@ func (p Pipeline) Scan(ctx context.Context, in ScanInput) (ScanResult, error) {
 	cur := in.Payload
 	var tokens []Token
 	var alerts []Alert
+	protected := 0
 	for _, m := range p.Modules {
 		r, err := m.Scan(ctx, ScanInput{
 			Payload: cur, Upstream: in.Upstream, Tool: in.Tool,
@@ -132,8 +137,9 @@ func (p Pipeline) Scan(ctx context.Context, in ScanInput) (ScanResult, error) {
 		cur = r.Transformed
 		tokens = append(tokens, r.Tokens...)
 		alerts = append(alerts, r.Alerts...)
+		protected += r.Protected
 	}
-	return ScanResult{Transformed: cur, Tokens: tokens, Alerts: alerts}, nil
+	return ScanResult{Transformed: cur, Tokens: tokens, Alerts: alerts, Protected: protected}, nil
 }
 
 // TokenStore persists placeholder→value bindings so the return path (model-authored

@@ -37,6 +37,7 @@ type RunInfo struct {
 	Reffed      bool   `json:"reffed"`
 	Ref         string `json:"ref,omitempty"`
 	Bytes       int    `json:"bytes"`
+	Protected   int    `json:"protected,omitempty"` // sensitive field values minimized on this call
 	ExitCode    int    `json:"exit_code"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
@@ -64,7 +65,7 @@ func (s *Server) RunLog() []RunInfo {
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
 			Reffed: rec.Reffed, Ref: rec.Ref,
-			Bytes: rec.Bytes, ExitCode: rec.ExitCode, Stderr: rec.Stderr, Audit: rec.Audit, AuditErr: rec.AuditErr,
+			Bytes: rec.Bytes, Protected: rec.Protected, ExitCode: rec.ExitCode, Stderr: rec.Stderr, Audit: rec.Audit, AuditErr: rec.AuditErr,
 			Timestamp: ts,
 		})
 	}

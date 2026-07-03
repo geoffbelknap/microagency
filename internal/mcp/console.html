@@ -407,12 +407,14 @@ function metricVals(){
   var red=(m.reduction_percent!=null?m.reduction_percent.toFixed(1):"0.0")+"%";
   var parked=(m.parked!=null?m.parked:0)+" / "+(m.calls!=null?m.calls:0);
   var withheld=fmtB(m.bytes_kept_out||0);
+  var protectedN=(m.fields_protected!=null?m.fields_protected:0);
   return {mtok:mtok,red:red,parked:parked,withheld:withheld,
+    protectedN:protectedN,protectedS:protectedN.toLocaleString(),
     returned:fmtB(m.bytes_to_context||0)};
 }
 function renderImpactStrip(){
   var v=metricVals(),box=$("#impact-stats");box.innerHTML="";
-  [[v.mtok,"kept out of context","var(--teal-dark)"],[v.red,"reduction",""],[v.parked,"calls parked",""],[v.withheld,"withheld",""]].forEach(function(s){
+  [[v.mtok,"kept out of context","var(--teal-dark)"],[v.protectedS,"fields protected","var(--teal-dark)"],[v.red,"reduction",""],[v.parked,"calls parked",""]].forEach(function(s){
     var e=el("span",{class:"stat"});e.innerHTML='<b style="color:'+(s[2]||"var(--ink)")+'">'+s[0]+'</b><span>'+s[1]+'</span>';box.appendChild(e);
   });
 }
@@ -666,7 +668,7 @@ function runRow(r){
   var chip=el("span",{class:"run-chip "+(isProxy?"proxy":"reduce")});chip.innerHTML=ic(isProxy?ICN.proxy:ICN.reduce,{s:14});
   var main=el("div",{class:"run-main"});
   var tgt=isProxy?(r.upstream+"__"+r.tool):(r.source_id||"—");
-  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.exit_code!==0?" · refused":"")):
+  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.protected?" · "+r.protected+" protected":"")+(r.exit_code!==0?" · refused":"")):
     ((r.substrate||"?")+"/"+(r.engine||"?")+" · "+(r.reffed?(fmtB(r.bytes)+" → parked off-context"):(fmtB(r.bytes)+" in · "+fmtB(r.output_bytes||0)+" returned")));
   main.innerHTML='<div class="run-target"><span class="t"></span><span class="ktag '+(isProxy?"":"reduce")+'">'+(isProxy?"proxy":"reduce")+'</span><span class="run-id"></span></div><div class="run-meta"></div>';
   main.querySelector(".t").textContent=tgt;main.querySelector(".run-meta").textContent=meta;
@@ -700,6 +702,7 @@ function runDetail(r,isProxy){
   if(isProxy){kvRow(dl,"upstream",r.upstream);kvRow(dl,"tool",r.tool);}
   else{kvRow(dl,"source",r.source_id);kvRow(dl,"engine",(r.substrate||"?")+(r.engine?"/"+r.engine:""));}
   kvRow(dl,"data",fmtB(r.input_bytes||0)+" in → "+fmtB(r.output_bytes||0)+" returned"+(r.reffed?" · parked off-context":""));
+  if(r.protected)kvRow(dl,"minimized",r.protected+" sensitive field"+(r.protected===1?"":"s")+" redacted/tokenized");
   kvRow(dl,"latency",r.latency_ms!=null?r.latency_ms+" ms":null);
   if(r.exit_code!==0&&r.exit_code!=null)kvRow(dl,"exit",r.exit_code+" · refused","bad");
   kvRow(dl,"session",r.session);
@@ -742,7 +745,7 @@ $("#verify-btn").onclick=async function(){
 $("#impact-strip").onclick=openImpact;
 function openImpact(){
   var v=metricVals(),m=state.metrics||{},subs=m.by_substrate||{};
-  var kpis=[[v.mtok,"tokens kept out of context","teal"],[v.red,"context reduction","teal"],[v.parked,"calls parked off-context","amber"],[v.withheld,"raw data withheld from the model","neutral"]];
+  var kpis=[[v.mtok,"tokens kept out of context","teal"],[v.protectedS,"sensitive fields minimized","teal"],[v.parked,"calls parked off-context","amber"],[v.withheld,"raw data withheld from the model","neutral"]];
   var kpiHtml=kpis.map(function(k){return '<div class="kpi '+k[2]+'"><b>'+k[0]+'</b><span>'+k[1]+'</span></div>'}).join("");
   var subHtml=Object.keys(subs).length?Object.keys(subs).map(function(name){var st=subs[name];return '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:6px 0;border-top:.5px solid var(--ink-hairline)"><span class="mono" style="font-size:12px;color:var(--ink)">'+name+'</span><span class="mono" style="font-size:10.5px;color:var(--ink-mid)">p50 '+st.p50_latency_ms+' ms · '+st.runs+' runs</span></div>'}).join(""):'<div class="mono" style="font-size:11px;color:var(--ink-faint);padding:6px 0">no runs yet</div>';
   $("#impact-dialog").innerHTML=
