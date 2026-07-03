@@ -284,6 +284,43 @@ func TestSecureDefaultProtectsEveryType(t *testing.T) {
 	}
 }
 
+// A minimizer's Protected count is recorded on the proxy run and summed into the
+// metrics — so field-level minimization is visible even when nothing is parked. This
+// also covers the input-bytes fix: a proxy run records its args as input bytes.
+func TestMinimizeRecordsProtectedCount(t *testing.T) {
+	ts := upstreamEchoingCard(t, new(string))
+	defer ts.Close()
+
+	// A minimizer that reports it hid 3 fields (redacted, leaving no token/alert).
+	prot := minimize.Func{N: "prot", F: func(_ context.Context, in minimize.ScanInput) (minimize.ScanResult, error) {
+		return minimize.ScanResult{Transformed: in.Payload, Protected: 3}, nil
+	}}
+	s := newTestServer(t, fakeRunner{}, WithMinimizer(prot, minimize.NewMemTokenStore()))
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetMinimizePolicy("acme", []byte(`{"card":"redact"}`))
+
+	call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{"q": "x"}})
+
+	var got, inBytes int
+	for _, r := range s.RunLog() {
+		if r.Kind == "proxy" {
+			got = r.Protected
+			inBytes = r.InputBytes
+		}
+	}
+	if got != 3 {
+		t.Fatalf("expected the run to record Protected=3, got %d", got)
+	}
+	if inBytes == 0 {
+		t.Fatal("expected the proxy run to record input bytes from its args, got 0")
+	}
+	if fp := s.Metrics().Impact.FieldsProtected; fp != 3 {
+		t.Fatalf("expected metrics FieldsProtected=3, got %d", fp)
+	}
+}
+
 func findUpstream(t *testing.T, s *Server, name string) UpstreamInfo {
 	t.Helper()
 	for _, u := range s.UpstreamList() {

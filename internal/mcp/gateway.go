@@ -394,12 +394,12 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// which default to write). Enforced OUTSIDE the agent, at the single invocation
 	// gate — the agent can't widen it.
 	if rec.readOnly && (!haveSpec || isWriteTool(spec)) {
-		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("read-only upstream: write refused"), budget.Outcome{}, "")
+		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("read-only upstream: write refused"), budget.Outcome{}, "", 0)
 		return toolError("upstream %q is READ-ONLY; the write/destructive tool %q is refused. Ask the operator to allow writes on this upstream if this is intended.", upName, name), true
 	}
 	if haveSpec && isWriteTool(spec) {
 		if gaps := schemaGaps(spec.InputSchema, args); len(gaps) > 0 {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")), budget.Outcome{}, "")
+			s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")), budget.Outcome{}, "", 0)
 			return schemaBlockResult(name, spec, gaps), true
 		}
 	}
@@ -419,17 +419,17 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			return rec.conn.CallTool(c, tool, args)
 		})
 		if canceled {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, err, budget.Outcome{}, upHost)
+			s.recordProxy(ctx, runID, upName, tool, args, 0, start, err, budget.Outcome{}, upHost, 0)
 			return toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), true
 		}
 	}
 	if err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost)
+		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost, 0)
 		return toolError("upstream %q: %v", upName, err), true
 	}
 	var passthrough map[string]any
 	if err := json.Unmarshal(res, &passthrough); err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost)
+		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost, 0)
 		return toolError("upstream %q: malformed result: %v", upName, err), true
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
@@ -447,7 +447,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 		if link := offloadURL(payload); link != "" {
 			data, ferr := s.fetchOffload(ctx, link)
 			if ferr != nil {
-				s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("offload rehydrate: %w", ferr), budget.Outcome{}, upHost)
+				s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("offload rehydrate: %w", ferr), budget.Outcome{}, upHost, 0)
 				return toolError("upstream %q returned an off-platform result link microagency could not retrieve (%v); the raw URL is withheld", upName, ferr), true
 			}
 			payload, rehydrated = string(data), true
@@ -460,7 +460,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 		// claims to be JSON but doesn't parse, or carries a truncation marker — a real
 		// prose document (which doesn't claim to be JSON) still refs normally.
 		if notice, ok := truncatedNotice(payload); ok {
-			s.recordProxy(ctx, runID, upName, tool, args, len(notice), start, nil, budget.Outcome{}, upHost)
+			s.recordProxy(ctx, runID, upName, tool, args, len(notice), start, nil, budget.Outcome{}, upHost, 0)
 			return truncatedResult(notice), true
 		}
 		// Gate on the LARGER of the extracted payload and the full upstream result.
@@ -478,11 +478,11 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 				stored = string(res)
 			}
 			ref, sum := s.budget.Store.Put(stored)
-			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, upHost)
+			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, upHost, 0)
 			return s.refHandleResult(ref, sum, name), true
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
-			s.recordProxy(ctx, runID, upName, tool, args, len(payload), start, nil, budget.Outcome{}, upHost)
+			s.recordProxy(ctx, runID, upName, tool, args, len(payload), start, nil, budget.Outcome{}, upHost, 0)
 			return rehydratedResult(payload), true
 		}
 	}
@@ -497,12 +497,12 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// reference-by-default (which only parks LARGE results). No-op unless a minimizer
 	// and a policy are configured for this upstream. Fails closed: a minimizer error
 	// withholds the result rather than emit it un-minimized.
-	scrubbed, alerts, merr := s.scrubInbound(ctx, upName, tool, passthrough)
+	scrubbed, alerts, protected, merr := s.scrubInbound(ctx, upName, tool, passthrough)
 	if merr != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("minimize: %w", merr), budget.Outcome{}, upHost)
+		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("minimize: %w", merr), budget.Outcome{}, upHost, 0)
 		return toolError("upstream %q: field minimization failed; result withheld", upName), true
 	}
-	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost, minimizeAlertEvents(alerts)...)
+	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost, protected, minimizeAlertEvents(alerts)...)
 	return scrubbed, true
 }
 
@@ -585,7 +585,7 @@ func rehydratedResult(payload string) map[string]any {
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, extra ...sandbox.AuditEvent) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, protected int, extra ...sandbox.AuditEvent) {
 	exit, auditErr := 0, ""
 	if callErr != nil {
 		exit, auditErr = 1, callErr.Error()
@@ -598,10 +598,12 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 	s.putRun(runID, runRecord{
 		Kind: "proxy", Upstream: upstream, Tool: tool, Args: string(args),
 		User:        principalOf(ctx).Subject,
+		InputBytes:  len(args), // the tool arguments are the call's input payload
 		OutputBytes: outBytes, Bytes: outBytes,
 		LatencyMs: time.Since(start).Milliseconds(),
 		Reffed:    out.Reffed, Ref: string(out.Ref),
-		ExitCode: exit, AuditErr: auditErr, Audit: audit,
+		Protected: protected,
+		ExitCode:  exit, AuditErr: auditErr, Audit: audit,
 	})
 }
 

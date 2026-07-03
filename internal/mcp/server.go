@@ -123,7 +123,10 @@ type runRecord struct {
 	Reffed      bool   `json:"reffed"`
 	Ref         string `json:"ref,omitempty"`
 	Bytes       int    `json:"bytes"`
-	ExitCode    int    `json:"exit_code"`
+	// Protected is the count of sensitive field values minimized (redacted or
+	// tokenized) on this proxy call — the field-level minimization impact.
+	Protected int    `json:"protected,omitempty"`
+	ExitCode  int    `json:"exit_code"`
 	// Stderr is the guest's captured stderr (or console log on a guest failure),
 	// bounded — OPERATOR-BOUND diagnostics surfaced via /admin/runs. It is never
 	// part of the agent-facing tool result: guest output over the input can echo

@@ -79,6 +79,9 @@ type wireOut struct {
 	Transformed *string `json:"transformed"`
 	Tokens      []Token `json:"tokens,omitempty"`
 	Alerts      []Alert `json:"alerts,omitempty"`
+	// Protected counts the field values a module hid this scan (redacted/tokenized) —
+	// the minimization impact, surfaced so it isn't invisible in the metrics.
+	Protected int `json:"protected,omitempty"`
 }
 
 // Scan runs the module over one payload. It borrows a warm slot (bounding
@@ -131,7 +134,7 @@ func (m *WasmModule) Scan(ctx context.Context, in ScanInput) (ScanResult, error)
 		}
 		transformed = b
 	}
-	return ScanResult{Transformed: transformed, Tokens: out.Tokens, Alerts: out.Alerts}, nil
+	return ScanResult{Transformed: transformed, Tokens: out.Tokens, Alerts: out.Alerts, Protected: out.Protected}, nil
 }
 
 // compile-time check
