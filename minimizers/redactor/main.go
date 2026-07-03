@@ -56,15 +56,20 @@ type wireOut struct {
 	Transformed *string `json:"transformed"`
 	Tokens      []token `json:"tokens,omitempty"`
 	Alerts      []alert `json:"alerts,omitempty"`
+	// Protected is the count of field values actually hidden this scan (redacted or
+	// tokenized). It's how the gateway shows minimization impact — the work that
+	// leaves no token/alert behind and would otherwise be invisible.
+	Protected int `json:"protected,omitempty"`
 }
 
 // acc accumulates the tokens/alerts produced during a scan, plus the request
 // context the module carries.
 type acc struct {
-	policy   map[string]string
-	upstream string
-	tokens   []token
-	alerts   []alert
+	policy    map[string]string
+	upstream  string
+	tokens    []token
+	alerts    []alert
+	protected int // values redacted or tokenized (hidden from the model)
 }
 
 func main() {
@@ -98,7 +103,7 @@ func main() {
 	}
 
 	b64 := base64.StdEncoding.EncodeToString([]byte(out)) // ABI: transformed is base64
-	enc := wireOut{Transformed: &b64, Tokens: a.tokens, Alerts: a.alerts}
+	enc := wireOut{Transformed: &b64, Tokens: a.tokens, Alerts: a.alerts, Protected: a.protected}
 	b, err := json.Marshal(enc)
 	if err != nil {
 		os.Exit(1)
@@ -197,8 +202,10 @@ func embeddedJSON(s string) (int, int, bool) {
 func (a *acc) apply(typ, action, value string) string {
 	switch action {
 	case "redact":
+		a.protected++
 		return mask(typ, value)
 	case "tokenize":
+		a.protected++
 		ph := placeholder(typ, value)
 		a.tokens = append(a.tokens, token{Placeholder: ph, Value: value, Type: typ})
 		return ph

@@ -224,10 +224,22 @@ func (s *AuthServer) grantCode(w http.ResponseWriter, f url.Values) {
 }
 
 func (s *AuthServer) grantRefresh(w http.ResponseWriter, f url.Values) {
-	subject, scope, ok := s.parseRefresh(f.Get("refresh_token"))
+	_, scope, ok := s.parseRefresh(f.Get("refresh_token"))
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
+	}
+	// Single-user AS: the identity is always the current local principal, not the
+	// subject baked into an older refresh token. Re-stamp s.Subject so an upgraded
+	// binary (e.g. one that now attributes to the real OS user instead of the
+	// legacy "operator") corrects the attribution WITHOUT forcing re-consent. The
+	// refresh token still had to be one we signed — it proves the session, the
+	// identity is ours to set. This changes when microagency grows multi-principal.
+	s.mu.Lock()
+	subject := s.Subject
+	s.mu.Unlock()
+	if subject == "" {
+		subject = "operator"
 	}
 	s.issueTokens(w, subject, scope)
 }

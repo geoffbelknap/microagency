@@ -175,6 +175,10 @@ func TestWasmRedactorFieldNameEnforcement(t *testing.T) {
 	if len(res.Tokens) != 1 || res.Tokens[0].Value != acct {
 		t.Fatalf("want exactly one account token for %q, got %+v", acct, res.Tokens)
 	}
+	// Both hides — the tokenized account and the redacted email — count as protected.
+	if res.Protected != 2 {
+		t.Fatalf("want Protected=2 (account tokenized + email redacted), got %d", res.Protected)
+	}
 }
 
 // Rows an MCP wraps in explanatory prose + <untrusted-data> tags (Supabase's shape)

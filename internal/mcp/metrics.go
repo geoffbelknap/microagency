@@ -30,6 +30,11 @@ type Impact struct {
 	BytesToContext   int64   `json:"bytes_to_context"`  // total bytes returned INTO context (inline results + answers)
 	EstTokensSaved   int64   `json:"est_tokens_saved"`  // BytesKeptOut / 4 (rough, model-agnostic)
 	ReductionPercent float64 `json:"reduction_percent"` // BytesKeptOut / (BytesKeptOut + BytesToContext)
+	// FieldsProtected is the total sensitive field values minimized (redacted or
+	// tokenized) across all calls. This is the field-level-minimization impact —
+	// separate from park/reduce, which is about bulk context reduction. A run can
+	// return data INTO context (no park) yet still protect many fields.
+	FieldsProtected int `json:"fields_protected"`
 }
 
 // SubstrateStats summarizes the runs that landed on one substrate.
@@ -65,6 +70,7 @@ func (s *Server) Metrics() MetricsSummary {
 			} else {
 				m.Impact.BytesToContext += int64(rec.OutputBytes)
 			}
+			m.Impact.FieldsProtected += rec.Protected
 		}
 		// by_substrate is "where reduce ran" — only reduce runs land on a substrate
 		// (wasm/microvm). Proxy calls have none, so they don't belong in this

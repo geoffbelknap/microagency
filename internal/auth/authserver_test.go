@@ -141,6 +141,52 @@ func TestAuthServerFullFlow(t *testing.T) {
 	}
 }
 
+// A refresh re-stamps the CURRENT single-user subject, not the one baked into the
+// old refresh token — so an upgraded binary (new OS-user attribution) corrects run
+// attribution without forcing the client to re-consent.
+func TestRefreshRestampsCurrentSubject(t *testing.T) {
+	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := NewAuthServer(signer, testIss, testAud, time.Hour) // Subject defaults to "operator"
+	mux := http.NewServeMux()
+	as.Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	clientID := registerClient(t, ts, c)
+	verifier := "a-sufficiently-long-pkce-code-verifier-1234567890"
+	code := approve(t, ts, c, clientID, pkceS256(verifier))
+	_, tok := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {testRedirect}, "code_verifier": {verifier},
+	})
+	refresh, _ := tok["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatal("no refresh token")
+	}
+
+	// The binary is upgraded: the current subject is now the real OS user.
+	as.Subject = "alice"
+
+	status, rf := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("refresh = %d (%v)", status, rf)
+	}
+	rs := &ResourceServer{Issuer: testIss, Audience: testAud, Keys: signer.KeySet()}
+	p, err := rs.Validate(context.Background(), rf["access_token"].(string))
+	if err != nil {
+		t.Fatalf("refreshed token invalid: %v", err)
+	}
+	if p.Subject != "alice" {
+		t.Fatalf("refresh should re-stamp the current subject; got %q, want alice", p.Subject)
+	}
+}
+
 func TestAuthServerRejectsBadPKCE(t *testing.T) {
 	ts, c, _ := newTestAS(t)
 	clientID := registerClient(t, ts, c)

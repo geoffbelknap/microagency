@@ -91,13 +91,13 @@ func (s *Server) resolveOutbound(args json.RawMessage) json.RawMessage {
 // The whole result envelope is scrubbed as serialized JSON, so a sensitive value
 // is caught wherever it sits — a top-level field, structuredContent, or nested
 // inside a content[].text string — and the transformed bytes re-parse as JSON.
-func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result map[string]any) (map[string]any, []minimize.Alert, error) {
+func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result map[string]any) (map[string]any, []minimize.Alert, int, error) {
 	if !s.minimizeActive(upstream) {
-		return result, nil, nil
+		return result, nil, 0, nil
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	out, err := s.minimizer.Scan(ctx, minimize.ScanInput{
 		Payload:   raw,
@@ -107,7 +107,7 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 		Policy:    s.minimizePolicyFor(upstream),
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	if s.tokens != nil && len(out.Tokens) > 0 {
 		_ = s.tokens.Put(out.Tokens)
@@ -116,9 +116,9 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 	if err := json.Unmarshal(out.Transformed, &scrubbed); err != nil {
 		// The transform broke the JSON envelope — fail closed rather than return a
 		// malformed (or the raw un-scrubbed) result.
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
-	return scrubbed, out.Alerts, nil
+	return scrubbed, out.Alerts, out.Protected, nil
 }
 
 // minimizeAlertEvents turns minimizer alerts into audit events, so a detection
