@@ -151,6 +151,40 @@ func TestMinimizeFailsClosed(t *testing.T) {
 	}
 }
 
+// The admin endpoint sets, clears, and validates a per-upstream policy.
+func TestAdminSetMinimizePolicy(t *testing.T) {
+	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
+	admin := httptest.NewServer(s.AdminHandler("op"))
+	defer admin.Close()
+
+	post := func(body string) int {
+		req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams/rh/minimize", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer op")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post(`{"policy":{"account":"tokenize","ssn":"alert"}}`); code != 200 {
+		t.Fatalf("set policy: status %d", code)
+	}
+	if s.minimizePolicyFor("rh") == nil {
+		t.Fatal("policy was not applied")
+	}
+	if code := post(`{"policy":{}}`); code != 200 {
+		t.Fatalf("clear policy: status %d", code)
+	}
+	if s.minimizePolicyFor("rh") != nil {
+		t.Fatal("policy was not cleared")
+	}
+	if code := post(`{"policy":"not-an-object"}`); code != 400 {
+		t.Fatalf("a non-object policy must be rejected, got %d", code)
+	}
+}
+
 func hasMinimizeAlert(s *Server) bool {
 	for _, r := range s.RunLog() {
 		for _, a := range r.Audit {

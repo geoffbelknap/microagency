@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"microagency/internal/budget"
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
+	"microagency/internal/minimize"
 	"microagency/internal/refstore"
 	"microagency/internal/router"
 	"microagency/internal/sandbox"
@@ -936,6 +938,33 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 			log.Fatalf("microagency: read engine %q: %v", path, err)
 		}
 		addEngine(name, mod)
+	}
+	// Field minimizers: bundled wasip1 modules that redact/tokenize/alert on
+	// sensitive FIELD values at the egress-to-model boundary (the fine-grained
+	// complement to reference-by-default). Loaded into a warm cluster and installed
+	// as an ordered pipeline; per-upstream policy (set from the console) decides what
+	// actually fires — with no policy for an upstream, nothing changes.
+	if mods := bundledMinimizers(); len(mods) > 0 {
+		names := make([]string, 0, len(mods))
+		for n := range mods {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		var chain []minimize.Module
+		for _, n := range names {
+			m, err := minimize.LoadWasm(context.Background(), n, mods[n], minimize.Options{
+				Timeout:        30 * time.Second,
+				MaxMemoryPages: uint32(wasmMaxMemMB) * 16,
+			})
+			if err != nil {
+				log.Printf("microagency: minimizer %q unavailable: %v", n, err)
+				continue
+			}
+			chain = append(chain, m)
+		}
+		if len(chain) > 0 {
+			opts = append(opts, mcp.WithMinimizer(minimize.Pipeline{Modules: chain}, minimize.NewMemTokenStore()))
+		}
 	}
 	return mcp.NewServer(rt, opts...)
 }

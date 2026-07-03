@@ -1,13 +1,13 @@
-.PHONY: build install test engines jq-engine text-engine html-engine sql-engine
+.PHONY: build install test engines jq-engine text-engine html-engine sql-engine minimizers redactor-minimizer
 
 BUNDLED := cmd/microagency/bundled
 
-# build/install bundle the engines into the binary, so `microagency up` works
-# with nothing else to install.
-build: engines
+# build/install bundle the engines AND minimizers into the binary, so `microagency
+# up` works with nothing else to install.
+build: engines minimizers
 	go build ./cmd/microagency
 
-install: engines
+install: engines minimizers
 	go install ./cmd/microagency
 
 test:
@@ -28,3 +28,10 @@ html-engine:
 
 sql-engine:
 	cd engines/sql && GOWORK=off GOOS=wasip1 GOARCH=wasm go build -buildvcs=false -o ../../$(BUNDLED)/sql.wasm .
+
+# Build the field-minimizer modules (wasip1) into bundled/minimizers/, kept in
+# their own subdir so bundledMinimizers() and bundledEngines() never cross-load.
+minimizers: redactor-minimizer
+
+redactor-minimizer:
+	cd minimizers/redactor && GOWORK=off GOOS=wasip1 GOARCH=wasm go build -buildvcs=false -o ../../$(BUNDLED)/minimizers/redactor.wasm .

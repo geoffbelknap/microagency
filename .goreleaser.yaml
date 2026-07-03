@@ -12,6 +12,7 @@ project_name: microagency
 before:
   hooks:
     - make engines
+    - make minimizers
 
 builds:
   - id: microagency
