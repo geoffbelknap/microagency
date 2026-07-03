@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"microagency/internal/budget"
+	"microagency/internal/minimize"
 	"microagency/internal/router"
 	"microagency/internal/safedial"
 	"microagency/internal/sandbox"
@@ -65,6 +66,16 @@ type Server struct {
 	// the proxy path minimizes (reference-by-default) and reffed proxy results are
 	// reducible off-context. Zero value = no gate (proxy results pass through).
 	budget budget.Gate
+
+	// minimizer is the field-level minimization pass applied to inline proxy results
+	// before they enter model context (redact/tokenize/alert on sensitive values),
+	// the fine-grained complement to reference-by-default. nil = off. tokens holds
+	// the placeholder→value bindings for tokenized fields, resolved back on the way
+	// to the upstream. minimizePolicies is the per-upstream policy (nil policy for an
+	// upstream = passthrough), guarded by mu.
+	minimizer        minimize.Module
+	tokens           minimize.TokenStore
+	minimizePolicies map[string][]byte
 
 	// inflight decouples a slow READ's execution from the caller's request context
 	// (a client cancel no longer aborts near-done work) and single-flights identical
@@ -122,10 +133,11 @@ type runRecord struct {
 func NewServer(r Runner, opts ...Option) *Server {
 	s := &Server{
 		runner:     r,
-		runs:       map[string]runRecord{},
-		toolUsage:  map[string]int{},
-		oauthFlows: map[string]*oauthFlow{},
-		inflight:   newInflight(),
+		runs:             map[string]runRecord{},
+		toolUsage:        map[string]int{},
+		oauthFlows:       map[string]*oauthFlow{},
+		minimizePolicies: map[string][]byte{},
+		inflight:         newInflight(),
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
 		// aren't killed mid-flight.
@@ -158,6 +170,14 @@ func WithUpstreamClient(c *http.Client) Option { return func(s *Server) { s.upst
 // WithVersion sets the build's release version, reported in /admin/infra and the
 // MCP serverInfo.
 func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
+
+// WithMinimizer installs the field-level minimization pass (a minimize.Module —
+// typically a warm-pool wasm minimizer) and the store for its tokenized-field
+// bindings. Without it, the proxy path is unchanged. Per-upstream policy is set
+// with SetMinimizePolicy; an upstream with no policy passes through untouched.
+func WithMinimizer(m minimize.Module, tokens minimize.TokenStore) Option {
+	return func(s *Server) { s.minimizer = m; s.tokens = tokens }
+}
 
 // WithConsoleAddr records where the operator console is bound (e.g.
 // "127.0.0.1:8765"), reported in /admin/infra so the header shows the actual

@@ -153,10 +153,12 @@ func action(policy map[string]string, typ string) string {
 
 // placeholder is a deterministic, unguessable-enough handle for a value: same
 // value → same token (so repeats correlate within a payload), no host entropy
-// needed (wasip1-friendly).
+// needed (wasip1-friendly). The [[ ]] delimiters are JSON-safe — unlike < >, Go's
+// JSON encoder does not escape them — so the placeholder survives the model
+// echoing it back verbatim, which is what makes the resolve-on-return path work.
 func placeholder(typ, val string) string {
 	sum := sha256.Sum256([]byte(typ + ":" + val))
-	return "<mtok_" + hex.EncodeToString(sum[:])[:10] + ">"
+	return "[[mtok_" + hex.EncodeToString(sum[:])[:10] + "]]"
 }
 
 // mask redacts a value while keeping a small tail where it aids the operator.
