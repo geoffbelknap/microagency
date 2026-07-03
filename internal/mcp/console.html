@@ -120,6 +120,7 @@ section{min-width:0}
 .chip{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:9px}
 .chip.ro{background:var(--amber-tint);border:.5px solid var(--amber);color:var(--amber);letter-spacing:.04em;text-transform:uppercase}
 .chip.owner{background:var(--warm-3);border:.5px solid var(--ink-hairline-strong);color:var(--ink-mid)}
+.chip.mz{background:var(--teal-tint);border:.5px solid var(--teal-border);color:var(--teal-dark);letter-spacing:.04em;text-transform:uppercase}
 .warnpill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;background:var(--amber-tint);border:.5px solid var(--amber);border-radius:999px;font-family:var(--mono);font-size:10px;color:var(--amber)}
 
 /* upstreams table */
@@ -422,6 +423,7 @@ function renderUpstreams(){
     var c2=el("div",{class:"ustate"});
     var b=el("span",{class:"badge "+(enabled?"enabled":"discovered")});b.innerHTML='<span class="d"></span>'+u.state;c2.appendChild(b);
     if(u.read_only){var ro=el("span",{class:"chip ro"},"read-only");c2.appendChild(ro)}
+    if(u.minimize&&Object.keys(u.minimize).length){var mz=el("span",{class:"chip mz",title:"field minimization active"},"minimized");c2.appendChild(mz)}
     if(u.owner){var ow=el("span",{class:"chip owner"});ow.innerHTML='<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'+u.owner;c2.appendChild(ow)}
     var c3=el("div",{class:"mono",style:"font-size:12px;color:var(--ink-mid)"},u.tools!=null?String(u.tools):"—");
     var c4=el("div",{class:"uactions"});
@@ -439,6 +441,7 @@ function openMenu(ev,u){
   m.innerHTML="";
   function item(label,fn,danger){var b=el("button",{class:danger?"danger":""},label);b.onclick=function(){closeMenu();fn()};m.appendChild(b)}
   item(u.read_only?"Allow writes":"Make read-only",function(){doReadOnly(u)});
+  item((u.minimize&&Object.keys(u.minimize).length)?"Edit field minimization":"Minimize fields…",function(){openMinimize(u)});
   item(u.owner?"Re-scope owner":"Scope to user",function(){openScope(u)});
   item("Re-authorize",function(){doReauth(u)});
   m.appendChild(el("div",{class:"div"}));
@@ -465,6 +468,36 @@ function doReauth(u){pickScopes(u.url,async function(scope){
   try{var res=await api("POST","/admin/upstreams/"+encodeURIComponent(u.name)+"/reauth",{scope:scope});if(res&&res.authorize_url){location.href=res.authorize_url;return}}catch(e){toast(e.message)}
   refresh();
 })}
+
+/* field-minimization editor — a per-connection type→action policy. Runs in
+   mediation before results reach the model: tokenize keeps a placeholder the
+   model can use (resolved on the way back to the upstream), redact masks the
+   value, alert leaves it but records a detection. Empty = off (passthrough). */
+function openMinimize(u){
+  var KNOWN=["account","card","ssn","email","phone","dob","address","name"];
+  var cur=(u.minimize&&typeof u.minimize==="object")?u.minimize:{};
+  var types=KNOWN.slice();
+  Object.keys(cur).forEach(function(k){if(types.indexOf(k)<0)types.push(k)}); // keep custom keys
+  var ACTIONS=[["","off"],["redact","redact"],["tokenize","tokenize"],["alert","alert"]];
+  var rows=types.map(function(t){
+    var opts=ACTIONS.map(function(a){return '<option value="'+a[0]+'"'+((cur[t]||"")===a[0]?" selected":"")+'>'+a[1]+'</option>'}).join("");
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;border-top:.5px solid var(--ink-hairline)"><span class="mono" style="font-size:12px;color:var(--ink)">'+t+'</span><select class="inp mono" data-mtype="'+t+'" style="max-width:130px;font-size:11px">'+opts+'</select></div>';
+  }).join("");
+  openDialog(
+    "Minimize fields for "+u.name,
+    "Choose what happens to each sensitive field type in this connection's results before they reach the model. tokenize keeps a placeholder the model can use; redact masks it; alert leaves it but flags you. Detection is best-effort — it reduces exposure, it doesn't guarantee zero.",
+    '<div>'+rows+'</div>',
+    "Save",
+    async function(){
+      var pol={};
+      document.querySelectorAll("[data-mtype]").forEach(function(sel){if(sel.value)pol[sel.getAttribute("data-mtype")]=sel.value});
+      closeDialog();
+      try{await api("POST","/admin/upstreams/"+encodeURIComponent(u.name)+"/minimize",{policy:pol});
+        toast(Object.keys(pol).length?u.name+": minimizing "+Object.keys(pol).length+" field type(s)":u.name+": minimization off");
+      }catch(e){toast(e.message)}
+      refresh();
+    });
+}
 
 /* scope modal */
 function openScope(u){
