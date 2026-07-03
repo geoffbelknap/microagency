@@ -2,6 +2,7 @@ package minimize
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -173,6 +174,45 @@ func TestWasmRedactorFieldNameEnforcement(t *testing.T) {
 	}
 	if len(res.Tokens) != 1 || res.Tokens[0].Value != acct {
 		t.Fatalf("want exactly one account token for %q, got %+v", acct, res.Tokens)
+	}
+}
+
+// Rows an MCP wraps in explanatory prose + <untrusted-data> tags (Supabase's shape)
+// must still be reached by field-name enforcement — the JSON isn't at the start of
+// the string. A non-Luhn synthetic card is tokenized by its COLUMN NAME (content
+// detection would reject it), proving the structured walk found the embedded rows.
+func TestWasmRedactorEmbeddedJSONInProse(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	const pan = "4796988725904349" // synthetic, NOT Luhn-valid → content detection ignores it
+	// A valid JSON envelope whose "result" string wraps rows in prose (Supabase shape):
+	// the inner quotes are escaped, exactly as the real server returns them.
+	rows := `[{"credit_card_pan":"` + pan + `","billing_address":"3065 Main St","ssn":"771-13-6787"}]`
+	inner := "Below is the result of the SQL query.\n<untrusted-data-abc>\n" + rows + "\n</untrusted-data-abc>\nUse this data to inform your next steps."
+	envelope, _ := json.Marshal(map[string]string{"result": inner})
+
+	res, err := m.Scan(ctx, ScanInput{Payload: envelope, Direction: ToModel, Policy: []byte(`{"card":"tokenize","address":"redact","ssn":"alert"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	if strings.Contains(out, pan) {
+		t.Errorf("card in prose-wrapped rows must be tokenized by column name: %s", out)
+	}
+	if strings.Contains(out, "3065 Main St") {
+		t.Errorf("billing_address in prose-wrapped rows must be redacted: %s", out)
+	}
+	if !strings.Contains(out, "Below is the result") {
+		t.Errorf("the surrounding prose framing must be preserved: %s", out)
+	}
+	if len(res.Tokens) != 1 || res.Tokens[0].Value != pan {
+		t.Fatalf("want one card token for the PAN, got %+v", res.Tokens)
 	}
 }
 
