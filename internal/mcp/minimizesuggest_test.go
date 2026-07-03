@@ -53,6 +53,33 @@ func TestSuggestMinimizePolicyEmpty(t *testing.T) {
 	}
 }
 
+// The server's own prose is a first-class signal: a field described as "the
+// customer's email address" or a tool that "returns social security numbers" is
+// detected even when the field NAME gives nothing away.
+func TestSuggestFromDescriptions(t *testing.T) {
+	tools := []gateway.Tool{
+		{
+			Name:        "lookup",
+			Description: "Returns the member's social security number and date of birth.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string","description":"the customer's email address"},"x":{"type":"string","description":"an opaque handle"}}}`),
+		},
+	}
+	assertPolicy(t, suggestMinimizePolicy(tools), map[string]string{
+		"ssn":   "alert",
+		"dob":   "alert",
+		"email": "redact",
+	})
+}
+
+// A negated mention must not trigger a suggestion — "does not return" is the
+// opposite of a signal. Only the unbounded-output signal (from "search") fires.
+func TestSuggestProseNegationGuard(t *testing.T) {
+	tools := []gateway.Tool{
+		{Name: "safe_search", Description: "A privacy-safe search that does not return social security numbers or email addresses.", InputSchema: json.RawMessage(`{"type":"object","properties":{"term":{"type":"string","description":"free text; without any phone number"}}}`)},
+	}
+	assertPolicy(t, suggestMinimizePolicy(tools), unboundedOutputDefault)
+}
+
 func assertPolicy(t *testing.T, got, want map[string]string) {
 	t.Helper()
 	if len(got) != len(want) {

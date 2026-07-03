@@ -10,25 +10,25 @@ import (
 )
 
 // This is discovery-time auto-detection for field minimization: a static scan of an
-// upstream's advertised tool SCHEMAS (tool names and input property names — never
-// any data) that proposes a minimization policy for the sensitive field types it
-// recognizes. The proposal is surfaced to the operator to accept or edit; it is
-// never applied on its own.
+// upstream's advertised tool SCHEMAS that proposes a minimization policy. It reads
+// three things, all metadata, never any data:
 //
-// Matching is token-based, not substring-based, and distinguishes a sensitive VALUE
-// from a mere reference key. "account_number" is a value; "account_id" is a tenant
-// key — the same substring, opposite sensitivity — so a raw contains() would fire on
-// Cloudflare's account_id or a security tool's ip_address. Tokenizing on separators
-// and camelCase and matching whole words fixes both.
+//   - field NAMES (tokenized), to spot sensitive VALUE fields vs reference keys
+//     (account_number ✓ but account_id ✗; billing_address ✓ but ip_address ✗);
+//   - field and tool DESCRIPTIONS (the server's own prose — "brokerage account
+//     number", "the user's email"), which say what a field IS far more reliably
+//     than its name, in any phrasing, for any vendor; and
+//   - an unbounded-output signal (a free query/sql/search input returns arbitrary
+//     content the schema can't describe).
 //
-// The input-schema scan can't see sensitivity that lives only in RESULTS, so it is
-// paired with an unbounded-output heuristic: a tool whose input is a free query /
-// SQL / search returns arbitrary content, so a starter output-scrub policy is
-// suggested for it regardless of its input field names (catches Notion, Supabase).
+// TRUST AND VERIFY. A description is DATA from an untrusted external source (ASK
+// tenet 24), so it drives a SUGGESTION the operator confirms — never enforcement on
+// its own. The deterministic content detectors in the module are the backstop a
+// lying server can't evade for formatted PII, and the operator is the final check.
 
 // fieldTokens splits a field or tool name into a set of lowercased whole-word
 // tokens, on separators and camelCase boundaries: "account_id" → {account, id},
-// "ipAddress" → {ip, address}, "get_accounts" → {get, accounts}.
+// "ipAddress" → {ip, address}.
 func fieldTokens(s string) map[string]bool {
 	set := map[string]bool{}
 	var cur strings.Builder
@@ -63,8 +63,8 @@ func hasAny(t map[string]bool, words ...string) bool {
 	return false
 }
 
-// fieldSignal maps a token rule to a suggested (type, action). match reports whether
-// the sensitive VALUE (not a reference key) is present in a name's tokens.
+// fieldSignal maps a token rule to a suggested (type, action) — the sensitive VALUE
+// (not a reference key) in a field NAME.
 type fieldSignal struct {
 	typ    string
 	action string
@@ -74,7 +74,6 @@ type fieldSignal struct {
 var fieldSignals = []fieldSignal{
 	{"ssn", "alert", func(t map[string]bool) bool { return t["ssn"] || (t["social"] && t["security"]) }},
 	{"dob", "alert", func(t map[string]bool) bool { return t["dob"] || t["birthdate"] || (t["birth"] && t["date"]) }},
-	// account NUMBER, not account_id / account_name — the id is a reference key.
 	{"account", "tokenize", func(t map[string]bool) bool {
 		return (hasAny(t, "account", "acct") && hasAny(t, "number", "no", "num", "nbr")) || t["iban"] || (t["routing"] && t["number"])
 	}},
@@ -85,11 +84,78 @@ var fieldSignals = []fieldSignal{
 	{"phone", "redact", func(t map[string]bool) bool {
 		return (t["phone"] && t["number"]) || t["telephone"] || (t["mobile"] && t["number"]) || t["msisdn"]
 	}},
-	// postal address, not ip / mac / email address.
 	{"address", "redact", func(t map[string]bool) bool {
 		return (t["address"] && hasAny(t, "street", "postal", "mailing", "billing", "shipping", "home")) ||
 			t["street"] || t["postal"] || t["zipcode"] || (t["zip"] && t["code"])
 	}},
+}
+
+// phraseSignal maps natural-language phrases to a suggested (type, action) — the
+// "trust the server's prose" step. Phrases are specific enough that a plain match is
+// meaningful (unlike a bare token): "social security" isn't "security", "billing
+// address" isn't "ip address".
+type phraseSignal struct {
+	typ     string
+	action  string
+	phrases []string
+}
+
+var phraseSignals = []phraseSignal{
+	{"ssn", "alert", []string{"social security", "social-security"}},
+	{"dob", "alert", []string{"date of birth", "birth date", "birthdate", "born on"}},
+	{"account", "tokenize", []string{"account number", "bank account", "brokerage account", "routing number", "iban"}},
+	{"card", "tokenize", []string{"credit card", "debit card", "payment card", "card number"}},
+	{"email", "redact", []string{"email address", "e-mail", "email"}},
+	{"phone", "redact", []string{"phone number", "telephone", "mobile number", "cell phone"}},
+	{"address", "redact", []string{"mailing address", "street address", "home address", "billing address", "shipping address", "postal address", "residential address", "physical address"}},
+}
+
+// classifyProse is the "trust the prose" classifier: a natural-language blob in, the
+// sensitive types it names out. Phrase matching with a light negation guard for now.
+// This is the SEAM a model classifier can replace — same signature — if phrases
+// aren't enough.
+var classifyProse = func(text string) map[string]string {
+	low := strings.ToLower(text)
+	out := map[string]string{}
+	for _, sig := range phraseSignals {
+		for _, p := range sig.phrases {
+			if phraseHit(low, p) {
+				out[sig.typ] = sig.action
+				break
+			}
+		}
+	}
+	return out
+}
+
+// phraseHit reports whether phrase appears in low (already lowercased) not directly
+// negated — so "does not return social security numbers" doesn't suggest ssn.
+func phraseHit(low, phrase string) bool {
+	from := 0
+	for {
+		i := strings.Index(low[from:], phrase)
+		if i < 0 {
+			return false
+		}
+		at := from + i
+		start := at - 24
+		if start < 0 {
+			start = 0
+		}
+		if !hasNegation(low[start:at]) {
+			return true
+		}
+		from = at + len(phrase)
+	}
+}
+
+func hasNegation(window string) bool {
+	for _, n := range []string{"no ", "not ", "n't", "without", "never", "exclude", "doesn", "don't"} {
+		if strings.Contains(window, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // unboundedInputTokens flag a tool that returns ARBITRARY content — a free query,
@@ -100,12 +166,19 @@ var unboundedInputTokens = map[string]bool{"query": true, "sql": true, "lcql": t
 // limited to what the bundled content detector can actually enforce on free text.
 var unboundedOutputDefault = map[string]string{"email": "redact", "ssn": "alert", "card": "tokenize"}
 
-// suggestMinimizePolicy returns a suggested type→action policy from the tool schemas.
-// Empty when nothing recognizable is found.
+// suggestMinimizePolicy returns a suggested type→action policy from the tool
+// schemas. Empty when nothing recognizable is found.
 func suggestMinimizePolicy(tools []gateway.Tool) map[string]string {
 	pol := map[string]string{}
 	unbounded := false
-	scan := func(name string) {
+	merge := func(m map[string]string) {
+		for k, v := range m {
+			if _, ok := pol[k]; !ok {
+				pol[k] = v
+			}
+		}
+	}
+	scanName := func(name string) {
 		t := fieldTokens(name)
 		for _, sig := range fieldSignals {
 			if _, done := pol[sig.typ]; done {
@@ -122,36 +195,43 @@ func suggestMinimizePolicy(tools []gateway.Tool) map[string]string {
 		}
 	}
 	for _, tl := range tools {
-		scan(tl.Name)
-		for _, k := range schemaPropertyNames(tl.InputSchema) {
-			scan(k)
+		scanName(tl.Name)                    // field NAME tokens (+ unbounded)
+		merge(classifyProse(tl.Description)) // TRUST the tool's prose
+		for _, f := range schemaProperties(tl.InputSchema) {
+			scanName(f.name)
+			merge(classifyProse(f.description)) // TRUST the field's prose
 		}
 	}
 	if unbounded {
-		for typ, act := range unboundedOutputDefault {
-			if _, ok := pol[typ]; !ok {
-				pol[typ] = act
-			}
-		}
+		merge(unboundedOutputDefault)
 	}
 	return pol
 }
 
-// schemaPropertyNames returns the top-level property names of a JSON Schema object.
-func schemaPropertyNames(raw json.RawMessage) []string {
+// schemaProp is one JSON-Schema property: its name and its self-description.
+type schemaProp struct {
+	name        string
+	description string
+}
+
+// schemaProperties returns the top-level properties of a JSON Schema object, name +
+// description, sorted by name.
+func schemaProperties(raw json.RawMessage) []schemaProp {
 	if len(raw) == 0 {
 		return nil
 	}
 	var s struct {
-		Properties map[string]json.RawMessage `json:"properties"`
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
 	}
 	if json.Unmarshal(raw, &s) != nil {
 		return nil
 	}
-	out := make([]string, 0, len(s.Properties))
-	for k := range s.Properties {
-		out = append(out, k)
+	out := make([]schemaProp, 0, len(s.Properties))
+	for k, v := range s.Properties {
+		out = append(out, schemaProp{name: k, description: v.Description})
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
 }
