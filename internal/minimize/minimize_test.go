@@ -142,6 +142,40 @@ func TestWasmRedactorLuhnGuardsCards(t *testing.T) {
 	}
 }
 
+// Field-name-driven enforcement (the Robinhood case): the VALUE of a field the
+// schema NAMES as an account is tokenized even though it has no detectable format,
+// while a reference key (account_id) under the same policy is left alone, and a
+// formatted value in an unrelated field is still caught by content patterns.
+func TestWasmRedactorFieldNameEnforcement(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	const acct = "5PY89921" // opaque — no content signature a detector could catch
+	payload := []byte(`{"account_number":"` + acct + `","account_id":"cf-tenant-123","note":"reach me at a@b.com"}`)
+	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"account":"tokenize","email":"redact"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	if strings.Contains(out, acct) {
+		t.Errorf("account_number VALUE must be tokenized by its field name (no content pattern): %s", out)
+	}
+	if !strings.Contains(out, "cf-tenant-123") {
+		t.Errorf("account_id is a reference key — must be left alone: %s", out)
+	}
+	if strings.Contains(out, "a@b.com") {
+		t.Errorf("email in free text should still be caught by content patterns: %s", out)
+	}
+	if len(res.Tokens) != 1 || res.Tokens[0].Value != acct {
+		t.Fatalf("want exactly one account token for %q, got %+v", acct, res.Tokens)
+	}
+}
+
 // --- wasip1 build helper (mirrors internal/wasmexec) ---
 
 type buildResult struct {

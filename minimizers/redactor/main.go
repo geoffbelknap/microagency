@@ -1,13 +1,20 @@
 // Command redactor is the default field-minimizer module: a wasip1 program that
 // reads a minimize request JSON on stdin and writes a result JSON on stdout,
-// applying a type→action mapping (the "policy") to sensitive values it detects.
+// applying a type→action mapping (the "policy") to sensitive values it finds.
 //
-// It is deliberately small — the MVP detector for checksummed/patterned types —
-// and stands in as the reference implementation of the minimize module ABI. Real
-// deployments drop in their own module against the same ABI; the sandbox denies it
-// network and host access, so even an untrusted detector cannot leak what it sees.
+// It detects two ways, and both run:
 //
-// Built into a module at test/release time with: GOOS=wasip1 GOARCH=wasm go build.
+//   - by CONTENT — email / SSN / credit-card values, recognized by their format
+//     (regex + Luhn) wherever they appear, even in free text; and
+//   - by FIELD NAME — the value of any field whose NAME says what it is
+//     ("account_number", "billing_address"), even when the value has no format a
+//     content detector could catch (an account number is just an opaque string).
+//     This is the "trust the declaration, apply the rule" half: the schema/field
+//     tells us the value is sensitive; content patterns remain the backstop for
+//     fields the server DIDN'T declare.
+//
+// The sandbox denies it network and host access, so even an untrusted detector
+// cannot leak what it sees. Built with: GOOS=wasip1 GOARCH=wasm go build.
 package main
 
 import (
@@ -20,6 +27,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 type wireIn struct {
@@ -50,8 +58,114 @@ type wireOut struct {
 	Alerts      []alert `json:"alerts,omitempty"`
 }
 
-// detector is one type's matcher. valid, when set, is an extra check on the raw
-// match (e.g. Luhn) to cut false positives.
+// acc accumulates the tokens/alerts produced during a scan, plus the request
+// context the module carries.
+type acc struct {
+	policy   map[string]string
+	upstream string
+	tokens   []token
+	alerts   []alert
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var in wireIn
+	if err := json.Unmarshal(raw, &in); err != nil {
+		os.Exit(1)
+	}
+	payload, err := base64.StdEncoding.DecodeString(in.Payload)
+	if err != nil {
+		os.Exit(1)
+	}
+	a := &acc{policy: map[string]string{}, upstream: in.Upstream}
+	if len(in.Policy) > 0 {
+		_ = json.Unmarshal(in.Policy, &a.policy) // unknown types default to pass
+	}
+
+	var out string
+	// Structured path: if the payload is JSON, walk it so field NAMES are visible;
+	// otherwise treat it as free text and rely on content patterns alone.
+	var v interface{}
+	if json.Unmarshal(payload, &v) == nil {
+		v = a.walk(v, "")
+		b, _ := json.Marshal(v)
+		out = string(b)
+	} else {
+		out = a.scanText(string(payload), "")
+	}
+
+	b64 := base64.StdEncoding.EncodeToString([]byte(out)) // ABI: transformed is base64
+	enc := wireOut{Transformed: &b64, Tokens: a.tokens, Alerts: a.alerts}
+	b, err := json.Marshal(enc)
+	if err != nil {
+		os.Exit(1)
+	}
+	_, _ = os.Stdout.Write(b)
+}
+
+// walk recurses the decoded JSON, replacing sensitive string values in place. key
+// is the field name the current value sits under (the field-NAME signal).
+func (a *acc) walk(v interface{}, key string) interface{} {
+	switch val := v.(type) {
+	case string:
+		// FIELD-NAME rule: does the KEY declare this value's type, and is that type
+		// in the policy? If so, act on the value regardless of its format.
+		if typ := fieldType(key); typ != "" {
+			if action := a.policy[typ]; action != "" {
+				return a.apply(typ, action, val)
+			}
+		}
+		// A JSON-encoded string (double-encoded result payloads) — recurse into it so
+		// field names inside are visible too, then re-encode.
+		if t := strings.TrimSpace(val); len(t) > 1 && (t[0] == '{' || t[0] == '[') {
+			var inner interface{}
+			if json.Unmarshal([]byte(val), &inner) == nil {
+				inner = a.walk(inner, key)
+				if b, err := json.Marshal(inner); err == nil {
+					return string(b)
+				}
+			}
+		}
+		// CONTENT fallback: scan the string value for formatted PII.
+		return a.scanText(val, key)
+	case map[string]interface{}:
+		for k, vv := range val {
+			val[k] = a.walk(vv, k)
+		}
+		return val
+	case []interface{}:
+		for i, vv := range val {
+			val[i] = a.walk(vv, key) // elements inherit the array's field name
+		}
+		return val
+	default:
+		return v
+	}
+}
+
+// apply performs one action on a whole value (the field-name path), recording the
+// token/alert.
+func (a *acc) apply(typ, action, value string) string {
+	switch action {
+	case "redact":
+		return mask(typ, value)
+	case "tokenize":
+		ph := placeholder(typ, value)
+		a.tokens = append(a.tokens, token{Placeholder: ph, Value: value, Type: typ})
+		return ph
+	case "alert":
+		a.alerts = append(a.alerts, alert{Type: typ, Severity: "high", Note: "field-declared " + typ + " in " + a.upstream})
+		return value
+	default:
+		return value
+	}
+}
+
+// --- content detection (by value format) ---
+
 type detector struct {
 	typ   string
 	re    *regexp.Regexp
@@ -69,27 +183,10 @@ type hit struct {
 	typ, val   string
 }
 
-func main() {
-	raw, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		os.Exit(1)
-	}
-	var in wireIn
-	if err := json.Unmarshal(raw, &in); err != nil {
-		os.Exit(1)
-	}
-	payload, err := base64.StdEncoding.DecodeString(in.Payload)
-	if err != nil {
-		os.Exit(1)
-	}
-	policy := map[string]string{}
-	if len(in.Policy) > 0 {
-		_ = json.Unmarshal(in.Policy, &policy) // best-effort; unknown types default to pass
-	}
-	text := string(payload)
-
-	// Collect matches across all detectors, then drop overlaps (earliest wins) so a
-	// value is never transformed twice.
+// scanText applies the content detectors to a string, honoring the policy, and
+// returns the transformed string. key is the field name (unused here, reserved for
+// per-field content policy later).
+func (a *acc) scanText(text, _ string) string {
 	var hits []hit
 	for _, d := range detectors {
 		for _, idx := range d.re.FindAllStringIndex(text, -1) {
@@ -104,69 +201,105 @@ func main() {
 		if hits[i].start != hits[j].start {
 			return hits[i].start < hits[j].start
 		}
-		return hits[i].end > hits[j].end // prefer the longer match at the same start
+		return hits[i].end > hits[j].end
 	})
 
-	var (
-		b       strings.Builder
-		tokens  []token
-		alerts  []alert
-		lastEnd int
-	)
+	var b strings.Builder
+	lastEnd := 0
 	for _, h := range hits {
 		if h.start < lastEnd {
-			continue // overlaps a match we already handled
+			continue
 		}
 		b.WriteString(text[lastEnd:h.start])
-		switch action(policy, h.typ) {
-		case "redact":
-			b.WriteString(mask(h.typ, h.val))
-		case "tokenize":
-			ph := placeholder(h.typ, h.val)
-			b.WriteString(ph)
-			tokens = append(tokens, token{Placeholder: ph, Value: h.val, Type: h.typ})
-		case "alert":
-			b.WriteString(h.val) // value stays; the operator is notified
-			alerts = append(alerts, alert{Type: h.typ, Severity: "high", Note: "detected " + h.typ + " in " + in.Upstream + " result"})
-		default: // pass
-			b.WriteString(h.val)
-		}
+		b.WriteString(a.apply(h.typ, action(a.policy, h.typ), h.val))
 		lastEnd = h.end
 	}
 	b.WriteString(text[lastEnd:])
-
-	transformed := base64.StdEncoding.EncodeToString([]byte(b.String()))
-	out := wireOut{Transformed: &transformed, Tokens: tokens, Alerts: alerts}
-	enc, err := json.Marshal(out)
-	if err != nil {
-		os.Exit(1)
-	}
-	_, _ = os.Stdout.Write(enc)
+	return b.String()
 }
 
 func action(policy map[string]string, typ string) string {
-	if a, ok := policy[typ]; ok {
-		return a
+	if act, ok := policy[typ]; ok {
+		return act
 	}
 	return "pass"
 }
 
-// placeholder is a deterministic, unguessable-enough handle for a value: same
-// value → same token (so repeats correlate within a payload), no host entropy
-// needed (wasip1-friendly). The [[ ]] delimiters are JSON-safe — unlike < >, Go's
-// JSON encoder does not escape them — so the placeholder survives the model
-// echoing it back verbatim, which is what makes the resolve-on-return path work.
+// --- field NAME → sensitive type (mirrors internal/mcp/minimizesuggest.go) ---
+
+// fieldType returns the sensitive type a field NAME declares, distinguishing a
+// sensitive VALUE from a reference key (account_number ✓, account_id ✗) and a
+// postal address from a network one (billing_address ✓, ip_address ✗). "" if none.
+func fieldType(name string) string {
+	if name == "" {
+		return ""
+	}
+	t := fieldTokens(name)
+	switch {
+	case t["ssn"] || (t["social"] && t["security"]):
+		return "ssn"
+	case t["dob"] || t["birthdate"] || (t["birth"] && t["date"]):
+		return "dob"
+	case (has(t, "account", "acct") && has(t, "number", "no", "num", "nbr")) || t["iban"] || (t["routing"] && t["number"]):
+		return "account"
+	case (t["card"] && t["number"]) || (t["credit"] && t["card"]) || (t["debit"] && t["card"]):
+		return "card"
+	case t["email"]:
+		return "email"
+	case (t["phone"] && t["number"]) || t["telephone"] || (t["mobile"] && t["number"]) || t["msisdn"]:
+		return "phone"
+	case (t["address"] && has(t, "street", "postal", "mailing", "billing", "shipping", "home")) || t["street"] || t["postal"] || t["zipcode"] || (t["zip"] && t["code"]):
+		return "address"
+	}
+	return ""
+}
+
+func has(t map[string]bool, words ...string) bool {
+	for _, w := range words {
+		if t[w] {
+			return true
+		}
+	}
+	return false
+}
+
+func fieldTokens(s string) map[string]bool {
+	set := map[string]bool{}
+	var cur strings.Builder
+	rs := []rune(s)
+	flush := func() {
+		if cur.Len() > 0 {
+			set[strings.ToLower(cur.String())] = true
+			cur.Reset()
+		}
+	}
+	for i, r := range rs {
+		switch {
+		case r == '_' || r == '-' || r == ' ' || r == '.' || r == '/' || r == ':':
+			flush()
+		case unicode.IsUpper(r) && i > 0 && unicode.IsLower(rs[i-1]):
+			flush()
+			cur.WriteRune(r)
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return set
+}
+
+// --- transforms ---
+
 func placeholder(typ, val string) string {
 	sum := sha256.Sum256([]byte(typ + ":" + val))
 	return "[[mtok_" + hex.EncodeToString(sum[:])[:10] + "]]"
 }
 
-// mask redacts a value while keeping a small tail where it aids the operator.
 func mask(typ, val string) string {
 	switch typ {
 	case "email":
 		return "[redacted:email]"
-	case "card", "ssn":
+	case "card", "ssn", "account", "phone":
 		digits := onlyDigits(val)
 		if len(digits) >= 4 {
 			return "[redacted:" + typ + " ••" + digits[len(digits)-4:] + "]"
@@ -185,8 +318,6 @@ func onlyDigits(s string) string {
 	return b.String()
 }
 
-// luhn reports whether the digits of s pass the Luhn checksum — the standard
-// filter that keeps a 16-digit order id from being mistaken for a card number.
 func luhn(s string) bool {
 	digits := onlyDigits(s)
 	if len(digits) < 13 || len(digits) > 19 {
