@@ -81,6 +81,14 @@ var fieldSignals = []fieldSignal{
 			(hasAny(t, "bearer", "access", "refresh", "session", "auth", "id") && t["token"]) ||
 			(t["auth"] && t["cookie"]) || (t["mfa"] && hasAny(t, "seed", "secret", "code"))
 	}},
+	{"health", "redact", func(t map[string]bool) bool {
+		return t["mrn"] || (t["medical"] && t["record"]) || t["diagnosis"] || t["diagnoses"] || t["icd"] ||
+			t["medication"] || t["medications"] || t["prescription"] || t["rx"] ||
+			(t["mental"] && t["health"]) || t["cpt"] || t["npi"] ||
+			(hasAny(t, "clinical", "provider", "medical", "patient", "encounter", "physician", "doctor") && t["notes"]) ||
+			(t["insurance"] && hasAny(t, "member", "policy", "claim")) ||
+			t["allergy"] || t["allergies"] || t["immunization"] || t["vaccine"] || t["prognosis"]
+	}},
 	{"ssn", "alert", func(t map[string]bool) bool { return t["ssn"] || (t["social"] && t["security"]) }},
 	{"dob", "alert", func(t map[string]bool) bool { return t["dob"] || t["birthdate"] || (t["birth"] && t["date"]) }},
 	{"account", "tokenize", func(t map[string]bool) bool {
@@ -116,6 +124,7 @@ type phraseSignal struct {
 
 var phraseSignals = []phraseSignal{
 	{"secret", "redact", []string{"api key", "secret key", "access token", "bearer token", "refresh token", "session token", "private key", "client secret", "credential", "password", "passphrase", "auth cookie"}},
+	{"health", "redact", []string{"medical record", "diagnosis", "diagnoses", "medication", "prescription", "mental health", "clinical notes", "health record", "protected health", "patient record", "medical history"}},
 	{"ssn", "alert", []string{"social security", "social-security"}},
 	{"dob", "alert", []string{"date of birth", "birth date", "birthdate", "born on"}},
 	{"account", "tokenize", []string{"account number", "bank account", "brokerage account", "routing number", "iban"}},

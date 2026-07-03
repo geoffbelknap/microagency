@@ -104,6 +104,16 @@ func TestSuggestSecretNameAndLoosenedFields(t *testing.T) {
 	}
 }
 
+// PHI columns are suggested as health:redact.
+func TestSuggestHealth(t *testing.T) {
+	got := suggestMinimizePolicy([]gateway.Tool{
+		{Name: "get_patient", InputSchema: json.RawMessage(`{"type":"object","properties":{"patient_id":{"type":"string"},"mrn":{"type":"string"},"diagnosis_codes":{"type":"string"},"provider_notes":{"type":"string"}}}`)},
+	})
+	if got["health"] != "redact" {
+		t.Fatalf("expected health:redact from clinical fields, got %v", got)
+	}
+}
+
 func assertPolicy(t *testing.T, got, want map[string]string) {
 	t.Helper()
 	if len(got) != len(want) {
