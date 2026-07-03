@@ -28,14 +28,18 @@ func (s *Server) SetMinimizePolicy(upstream string, policy []byte) {
 }
 
 // defaultMinimizePolicy is the secure-by-default effective policy for an upstream
-// with no explicit one: every high-confidence type at its least-disruptive safe
-// action (tokenize keeps a resolvable placeholder for identifiers the model may pass
-// back; alert leaves SSN/DOB visible-but-flagged; redact masks the rest). The
-// operator opts DOWN by setting an explicit policy. Detectors only fire on what
-// they're confident about, so an upstream with no sensitive fields is untouched.
+// with no explicit one: every high-confidence type is protected, at the safe action
+// that preserves the most utility. tokenize keeps a resolvable placeholder for
+// identifiers the model may pass back (account/card); redact masks the rest, keeping
+// a last-4 hint where the redactor can (ssn/phone). Direct identifiers — including
+// SSN and DOB — redact rather than merely alert: a secure default must not leave a
+// raw identifier in front of the model, so "alert" (visible-but-flagged) is an
+// opt-IN the operator sets explicitly, not the default. The operator opts DOWN by
+// setting an explicit policy. Detectors only fire on what they're confident about,
+// so an upstream with no sensitive fields is untouched.
 var defaultMinimizePolicy = map[string]string{
 	"secret": "redact", "health": "redact",
-	"ssn": "alert", "dob": "alert",
+	"ssn": "redact", "dob": "redact",
 	"account": "tokenize", "card": "tokenize",
 	"email": "redact", "phone": "redact", "address": "redact", "name": "redact",
 }

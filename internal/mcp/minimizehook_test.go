@@ -267,6 +267,23 @@ func TestMinimizeSecureDefaultOffStaysOptIn(t *testing.T) {
 	}
 }
 
+// The secure default must PROTECT every type it names — a direct identifier like
+// SSN or DOB is redacted/tokenized, never left visible via "alert". ("alert" is an
+// opt-IN the operator sets explicitly, so it must not appear in the default.)
+func TestSecureDefaultProtectsEveryType(t *testing.T) {
+	if len(defaultMinimizePolicy) == 0 {
+		t.Fatal("secure default is empty")
+	}
+	for ty, action := range defaultMinimizePolicy {
+		if action != "redact" && action != "tokenize" {
+			t.Errorf("%s: default action %q leaves the value exposed; must redact or tokenize", ty, action)
+		}
+	}
+	if defaultMinimizePolicy["ssn"] != "redact" || defaultMinimizePolicy["dob"] != "redact" {
+		t.Errorf("ssn/dob must redact by default, got ssn=%q dob=%q", defaultMinimizePolicy["ssn"], defaultMinimizePolicy["dob"])
+	}
+}
+
 func findUpstream(t *testing.T, s *Server, name string) UpstreamInfo {
 	t.Helper()
 	for _, u := range s.UpstreamList() {
