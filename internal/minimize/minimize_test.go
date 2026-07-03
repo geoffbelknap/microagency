@@ -86,7 +86,7 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := m.Scan(ctx, ScanInput{Payload: payload, Upstream: "Robin Hood", Tool: "get", Direction: ToModel, Policy: policy})
+			res, err := m.Scan(ctx, ScanInput{Payload: payload, Upstream: "acme", Tool: "get", Direction: ToModel, Policy: policy})
 			if err != nil {
 				t.Errorf("scan: %v", err)
 				return

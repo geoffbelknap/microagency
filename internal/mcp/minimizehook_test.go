@@ -73,12 +73,12 @@ func TestMinimizeTokenizesAndRoundTrips(t *testing.T) {
 	defer ts.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "rh", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
-	s.SetMinimizePolicy("rh", []byte(`{"card":"tokenize"}`))
+	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))
 
-	out := call(t, s, "call_tool", map[string]any{"name": "rh__acct", "arguments": map[string]any{}})
+	out := call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
 	raw, _ := json.Marshal(out)
 	if strings.Contains(string(raw), secretCard) {
 		t.Fatalf("the card leaked into the model-facing result: %s", raw)
@@ -94,7 +94,7 @@ func TestMinimizeTokenizesAndRoundTrips(t *testing.T) {
 
 	// The model echoes the placeholder in a follow-up call; the upstream must receive
 	// the REAL value, resolved on the way out.
-	call(t, s, "call_tool", map[string]any{"name": "rh__acct", "arguments": map[string]any{"account": cardTokenPH}})
+	call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{"account": cardTokenPH}})
 	if !strings.Contains(gotArgs, secretCard) {
 		t.Fatalf("placeholder was not resolved before dialing the upstream; upstream saw %q", gotArgs)
 	}
@@ -111,12 +111,12 @@ func TestMinimizeInactiveWithoutPolicy(t *testing.T) {
 	defer ts.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "rh", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	// no SetMinimizePolicy
 
-	out := call(t, s, "call_tool", map[string]any{"name": "rh__acct", "arguments": map[string]any{}})
+	out := call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
 	raw, _ := json.Marshal(out)
 	if !strings.Contains(string(raw), secretCard) {
 		t.Fatalf("with no policy the result should pass through unchanged, got %s", raw)
@@ -133,12 +133,12 @@ func TestMinimizeFailsClosed(t *testing.T) {
 		return minimize.ScanResult{}, io.ErrUnexpectedEOF
 	}}
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(boom, minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "rh", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
-	s.SetMinimizePolicy("rh", []byte(`{"card":"tokenize"}`))
+	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))
 
-	out := call(t, s, "call_tool", map[string]any{"name": "rh__acct", "arguments": map[string]any{}})
+	out := call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
 	raw, _ := json.Marshal(out)
 	if strings.Contains(string(raw), secretCard) {
 		t.Fatalf("fail-closed violated — raw result leaked on minimizer error: %s", raw)
@@ -158,7 +158,7 @@ func TestAdminSetMinimizePolicy(t *testing.T) {
 	defer admin.Close()
 
 	post := func(body string) int {
-		req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams/rh/minimize", strings.NewReader(body))
+		req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams/acme/minimize", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer op")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -171,13 +171,13 @@ func TestAdminSetMinimizePolicy(t *testing.T) {
 	if code := post(`{"policy":{"account":"tokenize","ssn":"alert"}}`); code != 200 {
 		t.Fatalf("set policy: status %d", code)
 	}
-	if s.minimizePolicyFor("rh") == nil {
+	if s.minimizePolicyFor("acme") == nil {
 		t.Fatal("policy was not applied")
 	}
 	if code := post(`{"policy":{}}`); code != 200 {
 		t.Fatalf("clear policy: status %d", code)
 	}
-	if s.minimizePolicyFor("rh") != nil {
+	if s.minimizePolicyFor("acme") != nil {
 		t.Fatal("policy was not cleared")
 	}
 	if code := post(`{"policy":"not-an-object"}`); code != 400 {
