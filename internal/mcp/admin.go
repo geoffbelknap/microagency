@@ -168,6 +168,11 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		// read_only), appended to the MCP URL as query params before registration. Distinct
 		// from ReadOnly, which gates write tools at our boundary after the fact.
 		ScopeParams map[string]string `json:"scope_params"`
+		// ClientID/ClientSecret let the operator supply a pre-registered OAuth client for
+		// an authorization server that doesn't offer dynamic client registration (Google,
+		// most enterprise IdPs). When set, they seed the stored client and skip DCR.
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -187,7 +192,7 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 	// flow and return an authorize URL for the operator's browser to visit (no PAT).
 	if in.Token == "" {
 		if rm, perr := u.Probe(r.Context()); perr == nil && rm != "" {
-			authURL, aerr := s.startUpstreamOAuth(r.Context(), in.Name, in.URL, in.Discover, false, in.ReadOnly, in.Owner, in.Scope, rm, callbackURL(r))
+			authURL, aerr := s.startUpstreamOAuth(r.Context(), in.Name, in.URL, in.Discover, false, in.ReadOnly, in.Owner, in.Scope, rm, callbackURL(r), in.ClientID, in.ClientSecret)
 			if aerr != nil {
 				http.Error(w, aerr.Error(), http.StatusBadGateway)
 				return
@@ -432,7 +437,9 @@ func (s *Server) adminReauthUpstream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream does not advertise OAuth", http.StatusBadRequest)
 		return
 	}
-	authURL, aerr := s.startUpstreamOAuth(r.Context(), name, url, state == "discovered", true, false, "", in.Scope, rm, callbackURL(r))
+	// Reauth reuses the client already stored for this AS (from the original add), so
+	// no supplied creds are needed here.
+	authURL, aerr := s.startUpstreamOAuth(r.Context(), name, url, state == "discovered", true, false, "", in.Scope, rm, callbackURL(r), "", "")
 	if aerr != nil {
 		http.Error(w, aerr.Error(), http.StatusBadGateway)
 		return

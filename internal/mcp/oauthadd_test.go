@@ -280,6 +280,108 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	}
 }
 
+// noDCRUpstream serves an OAuth-protected MCP whose authorization server advertises
+// authorize/token endpoints but NO registration_endpoint — the Google / enterprise-IdP
+// shape, where the operator must bring a pre-registered client. Returns the MCP URL.
+func noDCRUpstream(t *testing.T) string {
+	t.Helper()
+	asTS := httptest.NewUnstartedServer(nil)
+	asURL := "http://" + asTS.Listener.Addr().String()
+	asMux := http.NewServeMux()
+	asMux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately no registration_endpoint.
+		_, _ = w.Write([]byte(`{"issuer":"` + asURL + `","authorization_endpoint":"` + asURL + `/authorize","token_endpoint":"` + asURL + `/token"}`))
+	})
+	asTS.Config.Handler = asMux
+	asTS.Start()
+	t.Cleanup(asTS.Close)
+
+	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+asURL+`/.well-known/oauth-protected-resource"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	t.Cleanup(upTS.Close)
+	// The PR metadata (served by the AS host) points back at that AS.
+	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata("microagency", asURL))
+	return upTS.URL
+}
+
+// An operator-supplied client_id/secret is used to start the flow (carried on the
+// authorize URL) and persisted as the stored client, so an AS WITHOUT dynamic client
+// registration (Google) can be connected. This is the BL-5 path.
+func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
+	upURL := noDCRUpstream(t)
+	dir := t.TempDir()
+	store := secretstore.Open(dir, func(string) string { return "" }, nil)
+	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
+	admin := httptest.NewServer(srv.AdminHandler("op"))
+	defer admin.Close()
+
+	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL, "client_id": "goog-client-123", "client_secret": "goog-secret"})
+	req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer op")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("add with supplied client = %d, want 202 (DCR must be skipped)", resp.StatusCode)
+	}
+	var added struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	json.NewDecoder(resp.Body).Decode(&added)
+	au, err := url.Parse(added.AuthorizeURL)
+	if err != nil {
+		t.Fatalf("bad authorize_url: %v", err)
+	}
+	if got := au.Query().Get("client_id"); got != "goog-client-123" {
+		t.Fatalf("authorize_url client_id = %q, want the supplied client", got)
+	}
+	// The supplied client is persisted (so retries/reauth reuse it, no re-entry). The
+	// stored-client key is the AS host, which is the authorize URL's host here.
+	raw, err := store.Load(context.Background(), "oauth-clients/"+au.Host)
+	if err != nil {
+		t.Fatalf("supplied client was not persisted as the stored client: %v", err)
+	}
+	var c storedClient
+	if json.Unmarshal(raw, &c); c.ClientID != "goog-client-123" {
+		t.Fatalf("persisted stored client = %q, want the supplied client", c.ClientID)
+	}
+}
+
+// A no-DCR AS with no supplied client fails with an actionable error, not a raw
+// registration failure.
+func TestConsoleOAuthAddNoDCRNoClientErrors(t *testing.T) {
+	upURL := noDCRUpstream(t)
+	dir := t.TempDir()
+	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
+		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+	admin := httptest.NewServer(srv.AdminHandler("op"))
+	defer admin.Close()
+
+	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL})
+	req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer op")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusAccepted {
+		t.Fatal("no-DCR AS with no supplied client must NOT start a flow")
+	}
+	msg, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(strings.ToLower(string(msg)), "dynamic client registration") {
+		t.Fatalf("expected an actionable no-DCR error, got: %s", msg)
+	}
+}
+
 // TestAdminOAuthScopesDiscovery: the scopes endpoint probes a URL and returns the
 // provider's advertised scopes, so the console can render a checkbox picker.
 func TestAdminOAuthScopesDiscovery(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -64,10 +65,13 @@ func clientKey(issuer string) string {
 	return "oauth-clients/" + host
 }
 
-// loadOrRegisterClient returns a previously-registered client for this AS (so
-// retries don't spawn duplicate OAuth apps at the provider), or registers one and
-// persists it.
-func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata, callbackURL string) (string, string, error) {
+// loadOrRegisterClient returns the OAuth client to use for this AS. Precedence:
+// (1) a client already stored for this AS (so retries don't spawn duplicate apps);
+// (2) operator-supplied client_id/secret — the path for an AS WITHOUT dynamic client
+// registration (Google, most enterprise IdPs), persisted so it's reused; (3) dynamic
+// client registration (RFC 7591). An AS with no registration endpoint and no supplied
+// client fails with an actionable error telling the operator to supply credentials.
+func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata, callbackURL, suppliedID, suppliedSecret string) (string, string, error) {
 	key := clientKey(meta.Issuer)
 	if s.secrets != nil {
 		if raw, err := s.secrets.Load(ctx, key); err == nil {
@@ -76,6 +80,18 @@ func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata
 				return c.ClientID, c.ClientSecret, nil
 			}
 		}
+	}
+	// Operator-supplied client (the no-DCR case). Persist and use it, skipping
+	// registration entirely.
+	if suppliedID != "" {
+		if s.secrets != nil {
+			b, _ := json.Marshal(storedClient{ClientID: suppliedID, ClientSecret: suppliedSecret})
+			_ = s.secrets.Save(ctx, key, b)
+		}
+		return suppliedID, suppliedSecret, nil
+	}
+	if meta.RegistrationEndpoint == "" {
+		return "", "", fmt.Errorf("this authorization server does not support dynamic client registration; supply an OAuth client_id/client_secret when adding the connection")
 	}
 	id, secret, err := auth.RegisterClient(ctx, s.httpClient(), meta.RegistrationEndpoint, callbackURL, "microagency")
 	if err != nil {
@@ -127,7 +143,7 @@ func (s *Server) takeOAuthFlow(state string) *oauthFlow {
 
 // startUpstreamOAuth registers microagency with the upstream's AS (DCR, redirect_uri
 // = the admin callback) and stashes a pending flow. Returns the authorize URL.
-func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, discover, reauth, readOnly bool, owner, scope, resourceMetadataURL, callbackURL string) (string, error) {
+func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, discover, reauth, readOnly bool, owner, scope, resourceMetadataURL, callbackURL, suppliedClientID, suppliedClientSecret string) (string, error) {
 	meta, err := auth.DiscoverAS(ctx, s.httpClient(), resourceMetadataURL)
 	if err != nil {
 		return "", err
@@ -135,7 +151,7 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	if meta.Resource == "" {
 		meta.Resource = url // RFC 8707 resource indicator: default to the upstream's canonical URL
 	}
-	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL)
+	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL, suppliedClientID, suppliedClientSecret)
 	if err != nil {
 		return "", err
 	}
