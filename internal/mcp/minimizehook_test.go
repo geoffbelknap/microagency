@@ -53,7 +53,7 @@ func upstreamEchoingCard(t *testing.T, gotArgs *string) *httptest.Server {
 		case "initialize":
 			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 		case "tools/list":
-			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"acct","description":"get account","inputSchema":{"type":"object"}}]}}`)
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"acct","description":"get account","inputSchema":{"type":"object","properties":{"account_number":{"type":"string"}}}}]}}`)
 		case "tools/call":
 			*gotArgs = string(req.Params.Arguments)
 			b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{

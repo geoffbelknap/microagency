@@ -8,21 +8,53 @@ import (
 	"microagency/internal/gateway"
 )
 
-// The suggester recognizes sensitive field types from tool names and input
-// property names, mapping each to a sensible default action.
-func TestSuggestMinimizePolicy(t *testing.T) {
+// Sensitive VALUE fields are recognized and mapped to a sensible action.
+func TestSuggestMinimizePolicyValues(t *testing.T) {
 	tools := []gateway.Tool{
-		{Name: "get_accounts", InputSchema: json.RawMessage(`{"type":"object","properties":{"account_number":{"type":"string"}}}`)},
+		{Name: "get_portfolio", InputSchema: json.RawMessage(`{"type":"object","properties":{"account_number":{"type":"string"}}}`)},
 		{Name: "place_order", InputSchema: json.RawMessage(`{"type":"object","properties":{"card_number":{"type":"string"},"customer_email":{"type":"string"}}}`)},
-		{Name: "kyc", InputSchema: json.RawMessage(`{"type":"object","properties":{"ssn":{"type":"string"}}}`)},
+		{Name: "kyc", InputSchema: json.RawMessage(`{"type":"object","properties":{"ssn":{"type":"string"},"billing_address":{"type":"string"}}}`)},
 	}
-	got := suggestMinimizePolicy(tools)
-	want := map[string]string{
-		"account": "tokenize",
-		"card":    "tokenize",
-		"email":   "redact",
-		"ssn":     "alert",
+	want := map[string]string{"account": "tokenize", "card": "tokenize", "email": "redact", "ssn": "alert", "address": "redact"}
+	assertPolicy(t, suggestMinimizePolicy(tools), want)
+}
+
+// Reference keys and same-looking non-PII fields must NOT be flagged: account_id is
+// a tenant key (Cloudflare), ip_address is a network address (security tools), and
+// "dashboard" merely contains "card". None are sensitive values.
+func TestSuggestMinimizePolicyNoFalsePositives(t *testing.T) {
+	tools := []gateway.Tool{
+		{Name: "cf_execute", InputSchema: json.RawMessage(`{"type":"object","properties":{"account_id":{"type":"string"},"code":{"type":"string"}}}`)},
+		{Name: "get_sensor", InputSchema: json.RawMessage(`{"type":"object","properties":{"ip_address":{"type":"string"},"mac_address":{"type":"string"}}}`)},
+		{Name: "open_dashboard", InputSchema: json.RawMessage(`{"type":"object","properties":{"country_code":{"type":"string"}}}`)},
 	}
+	if got := suggestMinimizePolicy(tools); len(got) != 0 {
+		t.Fatalf("no sensitive VALUE present — expected no suggestion, got %v", got)
+	}
+}
+
+// An arbitrary-output tool (free query/SQL/search) can return any PII regardless of
+// its input schema, so a starter output-scrub policy is suggested — catching the
+// Notion/Supabase shape the input-name scan misses.
+func TestSuggestMinimizePolicyUnboundedOutput(t *testing.T) {
+	tools := []gateway.Tool{
+		{Name: "execute_sql", InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"project_id":{"type":"string"}}}`)},
+	}
+	assertPolicy(t, suggestMinimizePolicy(tools), unboundedOutputDefault)
+}
+
+// A tool with neither sensitive fields nor a free-query input yields nothing.
+func TestSuggestMinimizePolicyEmpty(t *testing.T) {
+	tools := []gateway.Tool{
+		{Name: "list_items", InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number"},"cursor":{"type":"string"}}}`)},
+	}
+	if got := suggestMinimizePolicy(tools); len(got) != 0 {
+		t.Fatalf("expected no suggestion, got %v", got)
+	}
+}
+
+func assertPolicy(t *testing.T, got, want map[string]string) {
+	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -30,16 +62,6 @@ func TestSuggestMinimizePolicy(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%s: got %q, want %q", k, got[k], v)
 		}
-	}
-}
-
-// A schema with no sensitive signals yields no suggestion.
-func TestSuggestMinimizePolicyEmpty(t *testing.T) {
-	tools := []gateway.Tool{
-		{Name: "search", InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}}}`)},
-	}
-	if got := suggestMinimizePolicy(tools); len(got) != 0 {
-		t.Fatalf("expected no suggestion, got %v", got)
 	}
 }
 
