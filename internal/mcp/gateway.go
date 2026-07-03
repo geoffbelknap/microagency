@@ -227,6 +227,10 @@ type UpstreamInfo struct {
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
+	// MinimizeSuggested is a policy auto-detected from this upstream's tool schemas,
+	// surfaced only when no policy is set yet, so the console can offer it for the
+	// operator to accept or edit. Never applied on its own.
+	MinimizeSuggested json.RawMessage `json:"minimize_suggested,omitempty"`
 }
 
 // SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
@@ -265,7 +269,17 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if rec.enabled {
 			state = "enabled"
 		}
-		out = append(out, UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools), Minimize: json.RawMessage(s.minimizePolicies[name])})
+		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools), Minimize: json.RawMessage(s.minimizePolicies[name])}
+		// Auto-detect a policy from the tool schemas, but only surface it when the
+		// operator hasn't set one — a suggestion to accept/edit, never applied itself.
+		if len(info.Minimize) == 0 {
+			if sug := suggestMinimizePolicy(rec.tools); len(sug) > 0 {
+				if b, err := json.Marshal(sug); err == nil {
+					info.MinimizeSuggested = b
+				}
+			}
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
