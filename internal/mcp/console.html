@@ -476,7 +476,7 @@ function doReauth(u){pickScopes(u.url,async function(scope){
    model can use (resolved on the way back to the upstream), redact masks the
    value, alert leaves it but records a detection. Empty = off (passthrough). */
 function openMinimize(u){
-  var KNOWN=["account","card","ssn","email","phone","dob","address","name"];
+  var KNOWN=["account","card","ssn","email","phone","dob","address","name","secret"];
   var active=(u.minimize&&typeof u.minimize==="object")?u.minimize:{};
   var suggested=(u.minimize_suggested&&typeof u.minimize_suggested==="object")?u.minimize_suggested:{};
   // Seed rows from the active policy; if none is set, from the auto-detected

@@ -80,6 +80,30 @@ func TestSuggestProseNegationGuard(t *testing.T) {
 	assertPolicy(t, suggestMinimizePolicy(tools), unboundedOutputDefault)
 }
 
+// The expanded vocabulary is suggested from field names — credentials, a personal
+// name, a bare phone, a CVV — while DB keys (primary_key/public_key) and generic
+// name-like fields (table_name) are NOT.
+func TestSuggestSecretNameAndLoosenedFields(t *testing.T) {
+	got := suggestMinimizePolicy([]gateway.Tool{
+		{Name: "get_events", InputSchema: json.RawMessage(`{"type":"object","properties":{"api_key":{"type":"string"},"bearer_token":{"type":"string"},"private_key_pem":{"type":"string"},"full_name":{"type":"string"},"phone":{"type":"string"},"card_cvv":{"type":"string"},"zip":{"type":"string"}}}`)},
+	})
+	for _, ty := range []string{"secret", "name", "phone", "card", "address"} {
+		if got[ty] == "" {
+			t.Errorf("expected %q to be suggested, got %v", ty, got)
+		}
+	}
+	if got["secret"] != "redact" {
+		t.Errorf("secret should default to redact, got %q", got["secret"])
+	}
+	// DB keys and generic *_name fields must not be flagged.
+	safe := suggestMinimizePolicy([]gateway.Tool{
+		{Name: "list_things", InputSchema: json.RawMessage(`{"type":"object","properties":{"primary_key":{"type":"string"},"public_key":{"type":"string"},"table_name":{"type":"string"},"tool_name":{"type":"string"}}}`)},
+	})
+	if len(safe) != 0 {
+		t.Fatalf("DB keys / *_name fields must not be flagged: %v", safe)
+	}
+}
+
 func assertPolicy(t *testing.T, got, want map[string]string) {
 	t.Helper()
 	if len(got) != len(want) {
