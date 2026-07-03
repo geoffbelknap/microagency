@@ -303,6 +303,15 @@ func typeForTokens(t map[string]bool) string {
 		(has(t, "bearer", "access", "refresh", "session", "auth", "id") && t["token"]) ||
 		(t["auth"] && t["cookie"]) || (t["mfa"] && has(t, "seed", "secret", "code")):
 		return "secret"
+	// Protected health information (PHI) — clinical fields with no content format,
+	// so the field name is the only signal.
+	case t["mrn"] || (t["medical"] && t["record"]) || t["diagnosis"] || t["diagnoses"] || t["icd"] ||
+		t["medication"] || t["medications"] || t["prescription"] || t["rx"] ||
+		(t["mental"] && t["health"]) || t["cpt"] || t["npi"] ||
+		(has(t, "clinical", "provider", "medical", "patient", "encounter", "physician", "doctor") && t["notes"]) ||
+		(t["insurance"] && has(t, "member", "policy", "claim")) ||
+		t["allergy"] || t["allergies"] || t["immunization"] || t["vaccine"] || t["prognosis"]:
+		return "health"
 	case t["ssn"] || (t["social"] && t["security"]):
 		return "ssn"
 	case t["dob"] || t["birthdate"] || (t["birth"] && t["date"]):

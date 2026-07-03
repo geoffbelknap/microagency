@@ -245,6 +245,33 @@ func TestWasmRedactorSecretsNamesPhone(t *testing.T) {
 	}
 }
 
+// PHI (m5.patients shape): clinical fields with no content format are redacted by
+// field name, while a reference key (patient_id) survives.
+func TestWasmRedactorHealth(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	payload := []byte(`{"patient_id":"p-1","mrn":"MRN00042","diagnosis_codes":"E11.9,I10","medications":"metformin","mental_health_flag":"positive","provider_notes":"stable","insurance_member_id":"INS-99"}`)
+	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"health":"redact"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	for _, leaked := range []string{"MRN00042", "E11.9", "metformin", "positive", "stable", "INS-99"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("PHI leaked (%q): %s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, "p-1") {
+		t.Errorf("patient_id (reference key) must survive: %s", out)
+	}
+}
+
 // --- wasip1 build helper (mirrors internal/wasmexec) ---
 
 type buildResult struct {
