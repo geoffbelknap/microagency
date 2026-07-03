@@ -350,6 +350,10 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if !rec.enabled {
 		return toolError("tool %q is discovered but not enabled; ask the operator to enable upstream %q", name, upName), true
 	}
+	// Restore any tokenized-field placeholders the model authored back to their real
+	// values before this call is dialed (the return path for field minimization).
+	// No-op unless a minimizer previously tokenized a value the model is now echoing.
+	args = s.resolveOutbound(args)
 	runID := s.nextRunID()
 	start := time.Now()
 	upHost := hostFromURL(rec.conn.URL) // the egress target for calls that reach the upstream
@@ -461,8 +465,18 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if resultIsError(passthrough) && haveSpec {
 		passthrough = attachToolSpec(passthrough, name, spec)
 	}
-	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost)
-	return passthrough, true
+	// Field-level minimization: scrub sensitive VALUES out of a small inline result
+	// before it enters model context — the fine-grained complement to
+	// reference-by-default (which only parks LARGE results). No-op unless a minimizer
+	// and a policy are configured for this upstream. Fails closed: a minimizer error
+	// withholds the result rather than emit it un-minimized.
+	scrubbed, alerts, merr := s.scrubInbound(ctx, upName, tool, passthrough)
+	if merr != nil {
+		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("minimize: %w", merr), budget.Outcome{}, upHost)
+		return toolError("upstream %q: field minimization failed; result withheld", upName), true
+	}
+	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost, minimizeAlertEvents(alerts)...)
+	return scrubbed, true
 }
 
 // offloadURL returns the URL an upstream substituted for a large payload — an
@@ -544,15 +558,16 @@ func rehydratedResult(payload string) map[string]any {
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, extra ...sandbox.AuditEvent) {
 	exit, auditErr := 0, ""
 	if callErr != nil {
 		exit, auditErr = 1, callErr.Error()
 	}
 	var audit []sandbox.AuditEvent
 	if egressHost != "" {
-		audit = []sandbox.AuditEvent{{Event: "egress_allow", Host: egressHost}}
+		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: egressHost})
 	}
+	audit = append(audit, extra...) // e.g. minimize_alert events from field minimization
 	s.putRun(runID, runRecord{
 		Kind: "proxy", Upstream: upstream, Tool: tool, Args: string(args),
 		User:        principalOf(ctx).Subject,
