@@ -27,20 +27,44 @@ func (s *Server) SetMinimizePolicy(upstream string, policy []byte) {
 	s.minimizePolicies[upstream] = policy
 }
 
-// minimizePolicyFor returns the policy for an upstream, or nil if none.
+// defaultMinimizePolicy is the secure-by-default effective policy for an upstream
+// with no explicit one: every high-confidence type at its least-disruptive safe
+// action (tokenize keeps a resolvable placeholder for identifiers the model may pass
+// back; alert leaves SSN/DOB visible-but-flagged; redact masks the rest). The
+// operator opts DOWN by setting an explicit policy. Detectors only fire on what
+// they're confident about, so an upstream with no sensitive fields is untouched.
+var defaultMinimizePolicy = map[string]string{
+	"secret": "redact", "health": "redact",
+	"ssn": "alert", "dob": "alert",
+	"account": "tokenize", "card": "tokenize",
+	"email": "redact", "phone": "redact", "address": "redact", "name": "redact",
+}
+
+var defaultMinimizePolicyJSON, _ = json.Marshal(defaultMinimizePolicy)
+
+// minimizePolicyFor returns the policy applied to an upstream: the operator's
+// explicit one if set (an explicit empty "{}" means opted out), else the secure
+// default when enabled, else none.
 func (s *Server) minimizePolicyFor(upstream string) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.minimizePolicies[upstream]
+	if raw, ok := s.minimizePolicies[upstream]; ok {
+		return raw // explicit (possibly "{}" = opted out)
+	}
+	if s.secureDefault {
+		return defaultMinimizePolicyJSON
+	}
+	return nil
 }
 
-// minimizeActive reports whether a minimizer is installed AND this upstream has a
-// policy — the cheap guard the hot path checks before doing any work.
+// minimizeActive reports whether a minimizer is installed AND the effective policy
+// has at least one type (an opted-out "{}" or an absent policy without secure-
+// default is inactive) — the cheap guard the hot path checks before doing any work.
 func (s *Server) minimizeActive(upstream string) bool {
 	if s.minimizer == nil {
 		return false
 	}
-	return s.minimizePolicyFor(upstream) != nil
+	return len(s.minimizePolicyFor(upstream)) > len("{}")
 }
 
 // resolveOutbound restores tokenized placeholders in model-authored arguments to

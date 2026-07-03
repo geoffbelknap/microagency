@@ -231,6 +231,10 @@ type UpstreamInfo struct {
 	// surfaced only when no policy is set yet, so the console can offer it for the
 	// operator to accept or edit. Never applied on its own.
 	MinimizeSuggested json.RawMessage `json:"minimize_suggested,omitempty"`
+	// MinimizeEffective is the policy ACTUALLY applied — the explicit one, or the
+	// secure default when none is set. The console pre-fills the editor from this and
+	// shows the "protected" chip when it's non-empty.
+	MinimizeEffective json.RawMessage `json:"minimize_effective,omitempty"`
 }
 
 // SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
@@ -269,10 +273,16 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if rec.enabled {
 			state = "enabled"
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools), Minimize: json.RawMessage(s.minimizePolicies[name])}
-		// Auto-detect a policy from the tool schemas, but only surface it when the
-		// operator hasn't set one — a suggestion to accept/edit, never applied itself.
-		if len(info.Minimize) == 0 {
+		explicit, hasExplicit := s.minimizePolicies[name]
+		effective := explicit
+		if !hasExplicit && s.secureDefault {
+			effective = defaultMinimizePolicyJSON // secure-by-default
+		}
+		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
+			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
+		// Suggest a policy from the schemas only when nothing is protecting the upstream
+		// (secure-default off and no explicit policy) — never applied on its own.
+		if len(effective) == 0 {
 			if sug := suggestMinimizePolicy(rec.tools); len(sug) > 0 {
 				if b, err := json.Marshal(sug); err == nil {
 					info.MinimizeSuggested = b

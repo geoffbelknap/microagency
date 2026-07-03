@@ -174,15 +174,108 @@ func TestAdminSetMinimizePolicy(t *testing.T) {
 	if s.minimizePolicyFor("acme") == nil {
 		t.Fatal("policy was not applied")
 	}
+	// An empty object is an explicit OPT-OUT (passthrough), not a reset: the policy is
+	// stored as "{}" (non-nil) and minimization is inactive.
 	if code := post(`{"policy":{}}`); code != 200 {
-		t.Fatalf("clear policy: status %d", code)
+		t.Fatalf("opt-out: status %d", code)
+	}
+	if got := s.minimizePolicyFor("acme"); string(got) != "{}" {
+		t.Fatalf("empty object should be stored as an explicit opt-out, got %q", got)
+	}
+	if s.minimizeActive("acme") {
+		t.Fatal("an opted-out upstream must be inactive")
+	}
+	// null RESETS: the explicit policy is dropped (back to nil / secure default).
+	if code := post(`{"policy":null}`); code != 200 {
+		t.Fatalf("reset: status %d", code)
 	}
 	if s.minimizePolicyFor("acme") != nil {
-		t.Fatal("policy was not cleared")
+		t.Fatal("null should reset the explicit policy to nil")
 	}
 	if code := post(`{"policy":"not-an-object"}`); code != 400 {
 		t.Fatalf("a non-object policy must be rejected, got %d", code)
 	}
+}
+
+// Under secure-by-default, an upstream with no explicit policy is protected by the
+// default (a sensitive value is scrubbed), an explicit {} opts out (passthrough),
+// and a null reset restores the default.
+func TestMinimizeSecureByDefault(t *testing.T) {
+	var gotArgs string
+	ts := upstreamEchoingCard(t, &gotArgs)
+	defer ts.Close()
+
+	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()), WithSecureDefault(true))
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No explicit policy → the secure default is effective and the card is scrubbed.
+	if !s.minimizeActive("acme") {
+		t.Fatal("secure-default should make an un-configured upstream active")
+	}
+	out := call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), secretCard) {
+		t.Fatalf("secure-default should scrub the card without any explicit policy, got %s", raw)
+	}
+
+	// UpstreamList surfaces the effective (default) policy and no suggestion.
+	info := findUpstream(t, s, "acme")
+	if len(info.MinimizeEffective) == 0 {
+		t.Fatal("expected minimize_effective populated from the secure default")
+	}
+	if len(info.Minimize) != 0 {
+		t.Fatal("no explicit policy is set")
+	}
+	if len(info.MinimizeSuggested) != 0 {
+		t.Fatal("no suggestion when the default already protects the upstream")
+	}
+
+	// Explicit {} opts out → the card passes through.
+	s.SetMinimizePolicy("acme", []byte(`{}`))
+	if s.minimizeActive("acme") {
+		t.Fatal("an explicit {} must opt the upstream out even under secure-default")
+	}
+	out = call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
+	raw, _ = json.Marshal(out)
+	if !strings.Contains(string(raw), secretCard) {
+		t.Fatalf("opted-out upstream should pass the card through, got %s", raw)
+	}
+
+	// Reset (nil) restores the default.
+	s.SetMinimizePolicy("acme", nil)
+	if !s.minimizeActive("acme") {
+		t.Fatal("reset should restore the secure default")
+	}
+}
+
+// With secure-default OFF (the zero value), an un-configured upstream is inactive —
+// the feature stays strictly opt-in for callers that don't ask for it.
+func TestMinimizeSecureDefaultOffStaysOptIn(t *testing.T) {
+	ts := upstreamEchoingCard(t, new(string))
+	defer ts.Close()
+	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if s.minimizeActive("acme") {
+		t.Fatal("without WithSecureDefault an un-configured upstream must be inactive")
+	}
+	if info := findUpstream(t, s, "acme"); len(info.MinimizeEffective) != 0 {
+		t.Fatalf("no effective policy without secure-default, got %s", info.MinimizeEffective)
+	}
+}
+
+func findUpstream(t *testing.T, s *Server, name string) UpstreamInfo {
+	t.Helper()
+	for _, u := range s.UpstreamList() {
+		if u.Name == name {
+			return u
+		}
+	}
+	t.Fatalf("upstream %q not found", name)
+	return UpstreamInfo{}
 }
 
 func hasMinimizeAlert(s *Server) bool {

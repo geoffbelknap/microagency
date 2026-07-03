@@ -76,6 +76,10 @@ type Server struct {
 	minimizer        minimize.Module
 	tokens           minimize.TokenStore
 	minimizePolicies map[string][]byte
+	// secureDefault protects detected sensitive fields by DEFAULT: an upstream with
+	// no explicit policy gets defaultMinimizePolicy, and the operator opts DOWN by
+	// setting one. Off = opt-in (no policy → passthrough).
+	secureDefault bool
 
 	// inflight decouples a slow READ's execution from the caller's request context
 	// (a client cancel no longer aborts near-done work) and single-flights identical
@@ -178,6 +182,11 @@ func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
 func WithMinimizer(m minimize.Module, tokens minimize.TokenStore) Option {
 	return func(s *Server) { s.minimizer = m; s.tokens = tokens }
 }
+
+// WithSecureDefault turns on secure-by-default minimization: an upstream with no
+// explicit policy is protected by defaultMinimizePolicy (the operator opts down),
+// instead of passing through. No effect without a minimizer installed.
+func WithSecureDefault(on bool) Option { return func(s *Server) { s.secureDefault = on } }
 
 // WithConsoleAddr records where the operator console is bound (e.g.
 // "127.0.0.1:8765"), reported in /admin/infra so the header shows the actual
