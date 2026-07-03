@@ -58,8 +58,12 @@ jobs:
         if: steps.diff.outputs.code == 'true'
         run: go test -short ./cmd/... ./internal/...
 
+      # The race detector re-instruments the whole tree + deps and dominates CI
+      # (~140s vs ~16s for the plain suite). PRs run the full non-race suite above
+      # for fast feedback; the race detector runs on push to main (post-merge), so
+      # a data race is still caught within minutes of landing, off the PR path.
       - name: Race test
-        if: steps.diff.outputs.code == 'true'
+        if: steps.diff.outputs.code == 'true' && github.event_name == 'push'
         run: go test -race -short ./cmd/... ./internal/...
 
       # Each engines/* dir is a standalone Go module (compiled to wasip1 in the
