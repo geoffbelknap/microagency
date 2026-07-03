@@ -100,6 +100,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/enable", g(s.adminEnableUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
+	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
 	mux.HandleFunc("POST /admin/upstreams/{name}/owner", g(s.adminSetOwner))
 	mux.HandleFunc("GET /admin/oauth-scopes", g(s.adminOAuthScopes))
 	mux.HandleFunc("GET /admin/provider-params", g(s.adminProviderParams))
@@ -261,6 +262,38 @@ func (s *Server) adminSetReadOnly(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistReadOnly(name, in.ReadOnly)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "read_only": in.ReadOnly})
+}
+
+// adminSetMinimize sets (or, with an empty policy, clears) an upstream's
+// field-minimization policy — opaque module-defined JSON (a type→action map for the
+// bundled redactor, e.g. {"account":"tokenize","ssn":"alert"}). It takes effect
+// only when a minimizer is installed, but the endpoint accepts and persists the
+// policy regardless, so config survives across builds.
+func (s *Server) adminSetMinimize(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		Policy json.RawMessage `json:"policy"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	policy := strings.TrimSpace(string(in.Policy))
+	if policy == "" || policy == "null" || policy == "{}" {
+		s.SetMinimizePolicy(name, nil)
+		s.persistMinimize(name, "")
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "minimize": nil})
+		return
+	}
+	// Must be a JSON object (module-agnostic check — the module interprets the keys).
+	var obj map[string]any
+	if err := json.Unmarshal(in.Policy, &obj); err != nil {
+		http.Error(w, "policy must be a JSON object (e.g. {\"account\":\"tokenize\"})", http.StatusBadRequest)
+		return
+	}
+	s.SetMinimizePolicy(name, []byte(policy))
+	s.persistMinimize(name, policy)
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "minimize": obj})
 }
 
 // adminEnableUpstream is the explicit operator trust grant: it connects a

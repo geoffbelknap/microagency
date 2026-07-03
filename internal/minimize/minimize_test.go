@@ -67,7 +67,7 @@ func TestResolvePlaceholders(t *testing.T) {
 // email, tokenize + round-trip a card, alert on an SSN — run concurrently to
 // exercise the cluster.
 func TestWasmRedactorWarmPool(t *testing.T) {
-	mod := buildWasip1(t, "testdata/redactor")
+	mod := buildWasip1(t, "../../minimizers/redactor")
 	ctx := context.Background()
 	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 4, Timeout: 5 * time.Second, MaxMemoryPages: 256})
 	if err != nil {
@@ -86,7 +86,7 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := m.Scan(ctx, ScanInput{Payload: payload, Upstream: "Robin Hood", Tool: "get", Direction: ToModel, Policy: policy})
+			res, err := m.Scan(ctx, ScanInput{Payload: payload, Upstream: "acme", Tool: "get", Direction: ToModel, Policy: policy})
 			if err != nil {
 				t.Errorf("scan: %v", err)
 				return
@@ -122,7 +122,7 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 
 // A non-Luhn 16-digit sequence (e.g. an order id) must NOT be treated as a card.
 func TestWasmRedactorLuhnGuardsCards(t *testing.T) {
-	mod := buildWasip1(t, "testdata/redactor")
+	mod := buildWasip1(t, "../../minimizers/redactor")
 	ctx := context.Background()
 	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
 	if err != nil {

@@ -111,6 +111,10 @@ type Pipeline struct {
 	Modules []Module
 }
 
+// Name identifies the pipeline as a composite module (it satisfies Module, so a
+// pipeline can be installed anywhere a single module is expected).
+func (p Pipeline) Name() string { return "pipeline" }
+
 // Scan runs the chain. A module that only detects returns the payload unchanged;
 // the substrate never invents a transform.
 func (p Pipeline) Scan(ctx context.Context, in ScanInput) (ScanResult, error) {

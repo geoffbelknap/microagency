@@ -16,10 +16,22 @@ import (
 var bundledFS embed.FS
 
 // bundledEngines returns the embedded engine modules by name (the .wasm filename
-// without its extension), e.g. {"jq": ..., "sql": ...}.
+// without its extension), e.g. {"jq": ..., "sql": ...}. The minimizers subdir is
+// skipped (it isn't a .wasm entry), so the two module kinds never cross-load.
 func bundledEngines() map[string][]byte {
+	return bundledWasm("bundled")
+}
+
+// bundledMinimizers returns the embedded field-minimizer modules by name, built
+// into bundled/minimizers/ by `make minimizers`.
+func bundledMinimizers() map[string][]byte {
+	return bundledWasm("bundled/minimizers")
+}
+
+// bundledWasm reads every *.wasm in dir, keyed by filename without the extension.
+func bundledWasm(dir string) map[string][]byte {
 	out := map[string][]byte{}
-	entries, err := fs.ReadDir(bundledFS, "bundled")
+	entries, err := fs.ReadDir(bundledFS, dir)
 	if err != nil {
 		return out
 	}
@@ -28,7 +40,7 @@ func bundledEngines() map[string][]byte {
 		if !strings.HasSuffix(name, ".wasm") {
 			continue
 		}
-		b, err := bundledFS.ReadFile("bundled/" + name)
+		b, err := bundledFS.ReadFile(dir + "/" + name)
 		if err != nil {
 			continue
 		}

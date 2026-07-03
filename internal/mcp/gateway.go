@@ -224,6 +224,9 @@ type UpstreamInfo struct {
 	ReadOnly   bool   `json:"read_only"`  // writes refused (least-privilege)
 	Owner      string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
 	Tools      int    `json:"tools"`           // count of advertised tools (shown per connection in the console)
+	// Minimize is the field-minimization policy set for this upstream (type→action
+	// JSON), or empty when none is configured. Shown/edited in the console.
+	Minimize json.RawMessage `json:"minimize,omitempty"`
 }
 
 // SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
@@ -262,7 +265,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if rec.enabled {
 			state = "enabled"
 		}
-		out = append(out, UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools)})
+		out = append(out, UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools), Minimize: json.RawMessage(s.minimizePolicies[name])})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

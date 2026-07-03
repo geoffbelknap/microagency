@@ -30,6 +30,7 @@ type upstreamReg struct {
 	Auth     string `json:"auth,omitempty"`      // authOAuth|authStatic|authNone; "" = oauth (legacy)
 	ReadOnly bool   `json:"read_only,omitempty"` // writes refused (least-privilege)
 	Owner    string `json:"owner,omitempty"`     // principal subject this connection is scoped to; "" = shared
+	Minimize string `json:"minimize,omitempty"`  // field-minimization policy JSON (type→action); "" = off
 }
 
 // authKind returns the registration's auth kind, treating a legacy empty value as
@@ -152,6 +153,23 @@ func (s *Server) persistReadOnly(name string, ro bool) {
 	}
 }
 
+// persistMinimize updates just the field-minimization policy of a persisted
+// registration, so it survives restart independently of the add/enable path. An
+// empty policy clears it.
+func (s *Server) persistMinimize(name, policy string) {
+	if s.stateDir == "" {
+		return
+	}
+	regs := s.loadRegistrations()
+	for i := range regs {
+		if regs[i].Name == name {
+			regs[i].Minimize = policy
+			s.writeRegistrations(regs)
+			return
+		}
+	}
+}
+
 // markRegistrationEnabled flips a persisted registration's discover flag off, so an
 // upstream the operator enabled reloads as enabled (invocable), not discovered. A
 // no-op if the upstream was never persisted.
@@ -267,6 +285,9 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		}
 		if reg.ReadOnly {
 			_ = s.SetUpstreamReadOnly(reg.Name, true)
+		}
+		if reg.Minimize != "" {
+			s.SetMinimizePolicy(reg.Name, []byte(reg.Minimize))
 		}
 		log.Printf("microagency: reloaded upstream %q", reg.Name)
 	}
