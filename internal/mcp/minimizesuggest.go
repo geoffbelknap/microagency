@@ -71,22 +71,36 @@ type fieldSignal struct {
 	match  func(t map[string]bool) bool
 }
 
+// fieldSignals mirrors the redactor's typeForTokens (minimizers/redactor/main.go) —
+// keep the two in sync.
 var fieldSignals = []fieldSignal{
+	{"secret", "redact", func(t map[string]bool) bool {
+		return t["password"] || t["passwd"] || t["pwd"] || t["passphrase"] || t["secret"] ||
+			t["apikey"] || (t["api"] && t["key"]) || (t["private"] && t["key"]) || (t["access"] && t["key"]) ||
+			t["credential"] || t["credentials"] ||
+			(hasAny(t, "bearer", "access", "refresh", "session", "auth", "id") && t["token"]) ||
+			(t["auth"] && t["cookie"]) || (t["mfa"] && hasAny(t, "seed", "secret", "code"))
+	}},
 	{"ssn", "alert", func(t map[string]bool) bool { return t["ssn"] || (t["social"] && t["security"]) }},
 	{"dob", "alert", func(t map[string]bool) bool { return t["dob"] || t["birthdate"] || (t["birth"] && t["date"]) }},
 	{"account", "tokenize", func(t map[string]bool) bool {
 		return (hasAny(t, "account", "acct") && hasAny(t, "number", "no", "num", "nbr")) || t["iban"] || (t["routing"] && t["number"])
 	}},
 	{"card", "tokenize", func(t map[string]bool) bool {
-		return (t["card"] && t["number"]) || (t["credit"] && t["card"]) || (t["debit"] && t["card"])
+		return (t["card"] && hasAny(t, "number", "cvv", "cvc", "exp", "expiry", "expiration")) || (t["credit"] && t["card"]) || (t["debit"] && t["card"]) ||
+			t["cvv"] || t["cvc"] || (t["security"] && t["code"])
 	}},
 	{"email", "redact", func(t map[string]bool) bool { return t["email"] }},
 	{"phone", "redact", func(t map[string]bool) bool {
-		return (t["phone"] && t["number"]) || t["telephone"] || (t["mobile"] && t["number"]) || t["msisdn"]
+		return t["phone"] || t["telephone"] || t["msisdn"] || t["fax"] || (t["mobile"] && t["number"])
 	}},
 	{"address", "redact", func(t map[string]bool) bool {
-		return (t["address"] && hasAny(t, "street", "postal", "mailing", "billing", "shipping", "home")) ||
-			t["street"] || t["postal"] || t["zipcode"] || (t["zip"] && t["code"])
+		return (t["address"] && hasAny(t, "street", "postal", "mailing", "billing", "shipping", "home", "residential", "physical")) ||
+			t["street"] || t["postal"] || t["postcode"] || t["zipcode"] || t["zip"]
+	}},
+	{"name", "redact", func(t map[string]bool) bool {
+		return (hasAny(t, "full", "first", "last", "given", "family", "middle", "maiden", "customer", "patient", "contact", "person", "user", "legal", "display") && t["name"]) ||
+			t["fullname"] || t["surname"]
 	}},
 }
 
@@ -101,13 +115,15 @@ type phraseSignal struct {
 }
 
 var phraseSignals = []phraseSignal{
+	{"secret", "redact", []string{"api key", "secret key", "access token", "bearer token", "refresh token", "session token", "private key", "client secret", "credential", "password", "passphrase", "auth cookie"}},
 	{"ssn", "alert", []string{"social security", "social-security"}},
 	{"dob", "alert", []string{"date of birth", "birth date", "birthdate", "born on"}},
 	{"account", "tokenize", []string{"account number", "bank account", "brokerage account", "routing number", "iban"}},
-	{"card", "tokenize", []string{"credit card", "debit card", "payment card", "card number"}},
+	{"card", "tokenize", []string{"credit card", "debit card", "payment card", "card number", "security code", "card expiration"}},
 	{"email", "redact", []string{"email address", "e-mail", "email"}},
 	{"phone", "redact", []string{"phone number", "telephone", "mobile number", "cell phone"}},
 	{"address", "redact", []string{"mailing address", "street address", "home address", "billing address", "shipping address", "postal address", "residential address", "physical address"}},
+	{"name", "redact", []string{"full name", "first name", "last name", "person's name", "customer name", "legal name"}},
 }
 
 // classifyProse is the "trust the prose" classifier: a natural-language blob in, the
@@ -164,7 +180,7 @@ var unboundedInputTokens = map[string]bool{"query": true, "sql": true, "lcql": t
 
 // unboundedOutputDefault is the starter policy suggested for arbitrary-output tools,
 // limited to what the bundled content detector can actually enforce on free text.
-var unboundedOutputDefault = map[string]string{"email": "redact", "ssn": "alert", "card": "tokenize"}
+var unboundedOutputDefault = map[string]string{"email": "redact", "ssn": "alert", "card": "tokenize", "secret": "redact"}
 
 // suggestMinimizePolicy returns a suggested type→action policy from the tool
 // schemas. Empty when nothing recognizable is found.

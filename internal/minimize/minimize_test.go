@@ -216,6 +216,35 @@ func TestWasmRedactorEmbeddedJSONInProse(t *testing.T) {
 	}
 }
 
+// The expanded vocabulary: credentials by field name AND by value shape (an AWS key
+// in free text), a personal name, a bare phone column, and a card CVV — the m5
+// security_events / customers gaps.
+func TestWasmRedactorSecretsNamesPhone(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	payload := []byte(`{"api_key":"sk-abcdef0123456789abcd","bearer_token":"tok-xyz","full_name":"Frank Jones","phone":"+11090741218","card_cvv":"828","primary_key":"pk-42","note":"leaked AKIA1234567890ABCDEF in logs"}`)
+	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"secret":"redact","name":"redact","phone":"redact","card":"tokenize"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	for _, leaked := range []string{"sk-abcdef0123456789abcd", "tok-xyz", "Frank Jones", "+11090741218", "828", "AKIA1234567890ABCDEF"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("value leaked (%q) in: %s", leaked, out)
+		}
+	}
+	// primary_key is a DB key, not a credential — must survive.
+	if !strings.Contains(out, "pk-42") {
+		t.Errorf("primary_key must not be treated as a secret: %s", out)
+	}
+}
+
 // --- wasip1 build helper (mirrors internal/wasmexec) ---
 
 type buildResult struct {

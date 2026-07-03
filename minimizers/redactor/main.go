@@ -222,6 +222,14 @@ var detectors = []detector{
 	{typ: "email", re: regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)},
 	{typ: "ssn", re: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
 	{typ: "card", re: regexp.MustCompile(`\b(?:\d[ -]?){13,19}\b`), valid: luhn},
+	// Secrets by VALUE — high-precision shapes only, so we don't flag every hash or
+	// base64 blob: PEM private keys, JWTs, and well-known key prefixes.
+	{typ: "secret", re: regexp.MustCompile(`-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----`)},
+	{typ: "secret", re: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)}, // JWT
+	{typ: "secret", re: regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},                                              // AWS access key id
+	{typ: "secret", re: regexp.MustCompile(`\b(?:sk|rk|pk)_[A-Za-z0-9]{16,}`)},                               // stripe/openai-style
+	{typ: "secret", re: regexp.MustCompile(`\bghp_[A-Za-z0-9]{20,}`)},                                        // github PAT
+	{typ: "secret", re: regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},                                  // slack
 }
 
 type hit struct {
@@ -280,22 +288,42 @@ func fieldType(name string) string {
 	if name == "" {
 		return ""
 	}
-	t := fieldTokens(name)
+	return typeForTokens(fieldTokens(name))
+}
+
+// typeForTokens is the shared field-name classification (kept identical to the
+// suggester's rules in internal/mcp/minimizesuggest.go).
+func typeForTokens(t map[string]bool) string {
 	switch {
+	// Credentials/secrets — a key, token, or password, distinguished from a DB key
+	// (primary_key / foreign_key / public_key never match).
+	case t["password"] || t["passwd"] || t["pwd"] || t["passphrase"] || t["secret"] ||
+		t["apikey"] || (t["api"] && t["key"]) || (t["private"] && t["key"]) || (t["access"] && t["key"]) ||
+		t["credential"] || t["credentials"] ||
+		(has(t, "bearer", "access", "refresh", "session", "auth", "id") && t["token"]) ||
+		(t["auth"] && t["cookie"]) || (t["mfa"] && has(t, "seed", "secret", "code")):
+		return "secret"
 	case t["ssn"] || (t["social"] && t["security"]):
 		return "ssn"
 	case t["dob"] || t["birthdate"] || (t["birth"] && t["date"]):
 		return "dob"
 	case (has(t, "account", "acct") && has(t, "number", "no", "num", "nbr")) || t["iban"] || (t["routing"] && t["number"]):
 		return "account"
-	case (t["card"] && t["number"]) || (t["credit"] && t["card"]) || (t["debit"] && t["card"]):
+	case (t["card"] && has(t, "number", "cvv", "cvc", "exp", "expiry", "expiration")) || (t["credit"] && t["card"]) || (t["debit"] && t["card"]) ||
+		t["cvv"] || t["cvc"] || (t["security"] && t["code"]):
 		return "card"
 	case t["email"]:
 		return "email"
-	case (t["phone"] && t["number"]) || t["telephone"] || (t["mobile"] && t["number"]) || t["msisdn"]:
+	case t["phone"] || t["telephone"] || t["msisdn"] || t["fax"] || (t["mobile"] && t["number"]):
 		return "phone"
-	case (t["address"] && has(t, "street", "postal", "mailing", "billing", "shipping", "home")) || t["street"] || t["postal"] || t["zipcode"] || (t["zip"] && t["code"]):
+	case (t["address"] && has(t, "street", "postal", "mailing", "billing", "shipping", "home", "residential", "physical")) ||
+		t["street"] || t["postal"] || t["postcode"] || t["zipcode"] || t["zip"]:
 		return "address"
+	// Personal name — paired with a person qualifier so table_name / file_name /
+	// tool_name never match.
+	case (has(t, "full", "first", "last", "given", "family", "middle", "maiden", "customer", "patient", "contact", "person", "user", "legal", "display") && t["name"]) ||
+		t["fullname"] || t["surname"]:
+		return "name"
 	}
 	return ""
 }
