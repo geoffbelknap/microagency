@@ -118,14 +118,17 @@ func (a *acc) walk(v interface{}, key string) interface{} {
 				return a.apply(typ, action, val)
 			}
 		}
-		// A JSON-encoded string (double-encoded result payloads) — recurse into it so
-		// field names inside are visible too, then re-encode.
-		if t := strings.TrimSpace(val); len(t) > 1 && (t[0] == '{' || t[0] == '[') {
+		// EMBEDDED JSON: a double-encoded payload, or rows an MCP wrapped in
+		// explanatory prose + <untrusted-data> tags (Supabase, Cloudflare, …). Find
+		// the JSON value anywhere in the string — not only when the string starts with
+		// a bracket — walk it so field names inside are enforced, and re-splice it into
+		// the surrounding text (which is content-scanned in case it holds PII too).
+		if s, e, ok := embeddedJSON(val); ok {
 			var inner interface{}
-			if json.Unmarshal([]byte(val), &inner) == nil {
+			if json.Unmarshal([]byte(val[s:e]), &inner) == nil {
 				inner = a.walk(inner, key)
 				if b, err := json.Marshal(inner); err == nil {
-					return string(b)
+					return a.scanText(val[:s], key) + string(b) + a.scanText(val[e:], key)
 				}
 			}
 		}
@@ -144,6 +147,49 @@ func (a *acc) walk(v interface{}, key string) interface{} {
 	default:
 		return v
 	}
+}
+
+// embeddedJSON returns the [start,end) span of the first balanced JSON object or
+// array in s, tracking string literals so braces inside strings don't miscount.
+// This lets the structured walk reach rows an MCP wrapped in prose ("Below is the
+// result…<untrusted-data>[…]</untrusted-data>"). ok=false when none is found.
+func embeddedJSON(s string) (int, int, bool) {
+	start := strings.IndexAny(s, "{[")
+	if start < 0 {
+		return 0, 0, false
+	}
+	open := s[start]
+	closeCh := byte('}')
+	if open == '[' {
+		closeCh = ']'
+	}
+	depth, inStr, esc := 0, false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case open:
+			depth++
+		case closeCh:
+			depth--
+			if depth == 0 {
+				return start, i + 1, true
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 // apply performs one action on a whole value (the field-name path), recording the
