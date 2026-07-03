@@ -260,6 +260,14 @@ svg{display:block}
           <button class="chk" id="u_readonly"><span class="box"></span>read-only</button>
           <button class="btn teal" id="u_add">＋ Add</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="linkbtn" id="u_adv_toggle" type="button">OAuth client — for providers without dynamic registration (Google, enterprise IdPs) ▾</button>
+          <div id="u_adv" style="display:none;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:8px">
+            <input class="inp" id="u_client_id" placeholder="client_id (optional)">
+            <input class="inp" id="u_client_secret" placeholder="client_secret (optional)">
+          </div>
+          <p class="hint" id="u_adv_hint" style="display:none;margin-top:6px">Paste a pre-registered OAuth client. Register its redirect URI as <span class="mono">http://127.0.0.1:8765/admin/oauth/callback</span>. microagency holds the secret; your agent never sees it.</p>
+        </div>
         <div id="u_scope"></div>
       </section>
 
@@ -541,13 +549,15 @@ function openScope(u){
 
 /* add upstream */
 $("#u_readonly").onclick=function(){this.classList.toggle("on")};
+$("#u_adv_toggle").onclick=function(){var a=$("#u_adv"),h=$("#u_adv_hint"),open=a.style.display!=="none";a.style.display=open?"none":"grid";h.style.display=open?"none":"block"};
 $("#u_add").onclick=function(){
   var name=$("#u_name").value.trim(),url=$("#u_url").value.trim(),token=$("#u_token").value.trim();
   if(!name||!url){toast("Enter a name and URL.");return}
   var ro=$("#u_readonly").classList.contains("on");
   var scope_params=scopeParamValues();
+  var client_id=$("#u_client_id").value.trim(),client_secret=$("#u_client_secret").value.trim();
   var submit=async function(scope){
-    try{var res=await api("POST","/admin/upstreams",{name:name,url:url,token:token,scope:scope,read_only:ro,scope_params:scope_params});
+    try{var res=await api("POST","/admin/upstreams",{name:name,url:url,token:token,scope:scope,read_only:ro,scope_params:scope_params,client_id:client_id,client_secret:client_secret});
       if(res&&res.authorize_url){location.href=res.authorize_url;return}
       clearAdd();refresh();
     }catch(e){toast(e.message)}
@@ -555,7 +565,7 @@ $("#u_add").onclick=function(){
   if(token){submit("");return}
   pickScopes(url,submit);
 };
-function clearAdd(){$("#u_name").value="";$("#u_url").value="";$("#u_token").value="";$("#u_readonly").classList.remove("on");$("#u_scope").innerHTML=""}
+function clearAdd(){$("#u_name").value="";$("#u_url").value="";$("#u_token").value="";$("#u_readonly").classList.remove("on");$("#u_scope").innerHTML="";$("#u_client_id").value="";$("#u_client_secret").value=""}
 
 /* provider params (server-driven) */
 var ppTimer;
