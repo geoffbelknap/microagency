@@ -424,7 +424,10 @@ function renderUpstreams(){
     var c2=el("div",{class:"ustate"});
     var b=el("span",{class:"badge "+(enabled?"enabled":"discovered")});b.innerHTML='<span class="d"></span>'+u.state;c2.appendChild(b);
     if(u.read_only){var ro=el("span",{class:"chip ro"},"read-only");c2.appendChild(ro)}
-    if(u.minimize&&Object.keys(u.minimize).length){var mz=el("span",{class:"chip mz",title:"field minimization active"},"minimized");c2.appendChild(mz)}
+    var hasExplicit=u.minimize&&Object.keys(u.minimize).length;
+    var hasEffective=u.minimize_effective&&Object.keys(u.minimize_effective).length;
+    if(hasExplicit){var mz=el("span",{class:"chip mz",title:"field minimization active (custom policy)"},"minimized");mz.onclick=function(){openMinimize(u)};c2.appendChild(mz)}
+    else if(hasEffective){var mp=el("span",{class:"chip mz",title:"protected by default — click to adjust or turn off"},"protected");mp.onclick=function(){openMinimize(u)};c2.appendChild(mp)}
     else if(u.minimize_suggested&&Object.keys(u.minimize_suggested).length){var sg=el("span",{class:"chip sug",title:"sensitive fields detected — review suggested minimization"},"review");sg.onclick=function(){openMinimize(u)};c2.appendChild(sg)}
     if(u.owner){var ow=el("span",{class:"chip owner"});ow.innerHTML='<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'+u.owner;c2.appendChild(ow)}
     var c3=el("div",{class:"mono",style:"font-size:12px;color:var(--ink-mid)"},u.tools!=null?String(u.tools):"—");
@@ -443,7 +446,7 @@ function openMenu(ev,u){
   m.innerHTML="";
   function item(label,fn,danger){var b=el("button",{class:danger?"danger":""},label);b.onclick=function(){closeMenu();fn()};m.appendChild(b)}
   item(u.read_only?"Allow writes":"Make read-only",function(){doReadOnly(u)});
-  item((u.minimize&&Object.keys(u.minimize).length)?"Edit field minimization":((u.minimize_suggested&&Object.keys(u.minimize_suggested).length)?"Minimize fields (suggested)…":"Minimize fields…"),function(){openMinimize(u)});
+  item((u.minimize&&Object.keys(u.minimize).length)?"Edit field minimization":((u.minimize_effective&&Object.keys(u.minimize_effective).length)?"Adjust field minimization":((u.minimize_suggested&&Object.keys(u.minimize_suggested).length)?"Minimize fields (suggested)…":"Minimize fields…")),function(){openMinimize(u)});
   item(u.owner?"Re-scope owner":"Scope to user",function(){openScope(u)});
   item("Re-authorize",function(){doReauth(u)});
   m.appendChild(el("div",{class:"div"}));
@@ -478,11 +481,14 @@ function doReauth(u){pickScopes(u.url,async function(scope){
 function openMinimize(u){
   var KNOWN=["account","card","ssn","email","phone","dob","address","name","secret","health"];
   var active=(u.minimize&&typeof u.minimize==="object")?u.minimize:{};
+  var effective=(u.minimize_effective&&typeof u.minimize_effective==="object")?u.minimize_effective:{};
   var suggested=(u.minimize_suggested&&typeof u.minimize_suggested==="object")?u.minimize_suggested:{};
-  // Seed rows from the active policy; if none is set, from the auto-detected
-  // suggestion (which the operator then reviews and Saves, or clears).
-  var fromSuggestion=Object.keys(active).length===0&&Object.keys(suggested).length>0;
-  var cur=Object.keys(active).length?active:suggested;
+  var hasExplicit=Object.keys(active).length>0;
+  var fromDefault=!hasExplicit&&Object.keys(effective).length>0; // protected by secure default
+  var fromSuggestion=!hasExplicit&&!fromDefault&&Object.keys(suggested).length>0;
+  // Seed rows from the explicit policy; if none, from the effective (secure-default)
+  // one; if none, from the auto-detected suggestion.
+  var cur=hasExplicit?active:(fromDefault?effective:suggested);
   var types=KNOWN.slice();
   Object.keys(cur).forEach(function(k){if(types.indexOf(k)<0)types.push(k)}); // keep custom keys
   var ACTIONS=[["","off"],["redact","redact"],["tokenize","tokenize"],["alert","alert"]];
@@ -491,11 +497,14 @@ function openMinimize(u){
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;border-top:.5px solid var(--ink-hairline)"><span class="mono" style="font-size:12px;color:var(--ink)">'+t+'</span><select class="inp mono" data-mtype="'+t+'" style="max-width:130px;font-size:11px">'+opts+'</select></div>';
   }).join("");
   var desc="Choose what happens to each sensitive field type in this connection's results before they reach the model. tokenize keeps a placeholder the model can use; redact masks it; alert leaves it but flags you. Detection is best-effort — it reduces exposure, it doesn't guarantee zero.";
-  if(fromSuggestion)desc="microagency detected these sensitive field types in this connection's tool schemas and pre-filled a suggestion — review and Save, or adjust. "+desc;
+  if(fromDefault)desc="This connection is protected by microagency's secure defaults — sensitive field types are minimized automatically. Loosen any of them below, set all to off to turn protection off, or keep as is. "+desc;
+  else if(fromSuggestion)desc="microagency detected these sensitive field types in this connection's tool schemas and pre-filled a suggestion — review and Save, or adjust. "+desc;
+  else if(hasExplicit)desc="You've set a custom policy for this connection. Adjust below, or Reset to secure defaults. "+desc;
+  var resetBtn=hasExplicit?'<div style="margin-top:14px"><button class="btn sm" id="mz-reset">Reset to secure defaults</button></div>':'';
   openDialog(
     "Minimize fields for "+u.name,
     desc,
-    '<div>'+rows+'</div>',
+    '<div>'+rows+'</div>'+resetBtn,
     "Save",
     async function(){
       var pol={};
@@ -506,6 +515,14 @@ function openMinimize(u){
       }catch(e){toast(e.message)}
       refresh();
     });
+  var rb=document.getElementById("mz-reset");
+  if(rb)rb.onclick=async function(){
+    closeDialog();
+    try{await api("POST","/admin/upstreams/"+encodeURIComponent(u.name)+"/minimize",{policy:null});
+      toast(u.name+": reset to secure defaults");
+    }catch(e){toast(e.message)}
+    refresh();
+  };
 }
 
 /* scope modal */

@@ -964,6 +964,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 		}
 		if len(chain) > 0 {
 			opts = append(opts, mcp.WithMinimizer(minimize.Pipeline{Modules: chain}, minimize.NewMemTokenStore()))
+			opts = append(opts, mcp.WithSecureDefault(true)) // protect detected sensitive fields by default; operator opts down
 		}
 	}
 	return mcp.NewServer(rt, opts...)

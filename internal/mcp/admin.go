@@ -264,11 +264,11 @@ func (s *Server) adminSetReadOnly(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "read_only": in.ReadOnly})
 }
 
-// adminSetMinimize sets (or, with an empty policy, clears) an upstream's
-// field-minimization policy — opaque module-defined JSON (a type→action map for the
-// bundled redactor, e.g. {"account":"tokenize","ssn":"alert"}). It takes effect
-// only when a minimizer is installed, but the endpoint accepts and persists the
-// policy regardless, so config survives across builds.
+// adminSetMinimize sets an upstream's field-minimization policy — opaque
+// module-defined JSON (a type→action map, e.g. {"account":"tokenize"}). With
+// secure-by-default, three inputs are distinct: a null/absent policy RESETS to the
+// secure default; an empty object {} is an explicit OPT-OUT (passthrough); any
+// other object is the explicit policy. Persisted so config survives across builds.
 func (s *Server) adminSetMinimize(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var in struct {
@@ -278,21 +278,21 @@ func (s *Server) adminSetMinimize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	policy := strings.TrimSpace(string(in.Policy))
-	if policy == "" || policy == "null" || policy == "{}" {
+	raw := strings.TrimSpace(string(in.Policy))
+	if raw == "" || raw == "null" {
+		// reset → the secure default (or passthrough if secure-default is off)
 		s.SetMinimizePolicy(name, nil)
 		s.persistMinimize(name, "")
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "minimize": nil})
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "minimize": nil, "reset": true})
 		return
 	}
-	// Must be a JSON object (module-agnostic check — the module interprets the keys).
 	var obj map[string]any
-	if err := json.Unmarshal(in.Policy, &obj); err != nil {
-		http.Error(w, "policy must be a JSON object (e.g. {\"account\":\"tokenize\"})", http.StatusBadRequest)
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		http.Error(w, "policy must be a JSON object (e.g. {\"account\":\"tokenize\"}), or null to reset", http.StatusBadRequest)
 		return
 	}
-	s.SetMinimizePolicy(name, []byte(policy))
-	s.persistMinimize(name, policy)
+	s.SetMinimizePolicy(name, []byte(raw)) // explicit — {} is a real opt-out
+	s.persistMinimize(name, raw)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "minimize": obj})
 }
 
