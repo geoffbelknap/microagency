@@ -355,6 +355,47 @@ func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
 	}
 }
 
+// Supplied creds OVERRIDE a previously stored client — the "I'm switching my OAuth
+// app" case (e.g. Google personal-account client -> Internal client). Without this,
+// a stored client would win and silently keep the old app.
+func TestConsoleOAuthSuppliedClientOverridesStored(t *testing.T) {
+	upURL := noDCRUpstream(t)
+	dir := t.TempDir()
+	store := secretstore.Open(dir, func(string) string { return "" }, nil)
+	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
+	admin := httptest.NewServer(srv.AdminHandler("op"))
+	defer admin.Close()
+
+	add := func(id, secret string) string {
+		body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL, "client_id": id, "client_secret": secret})
+		req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer op")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			AuthorizeURL string `json:"authorize_url"`
+		}
+		json.NewDecoder(resp.Body).Decode(&out)
+		au, err := url.Parse(out.AuthorizeURL)
+		if err != nil {
+			t.Fatalf("bad authorize_url: %v", err)
+		}
+		return au.Query().Get("client_id")
+	}
+
+	if got := add("old-personal-client", "s1"); got != "old-personal-client" {
+		t.Fatalf("first add: authorize client_id = %q", got)
+	}
+	// Re-add with a NEW client (the Internal one). It must win over the stored old one
+	// — the authorize URL now carries the new client_id, proving the swap took.
+	if got := add("new-internal-client", "s2"); got != "new-internal-client" {
+		t.Fatalf("supplied creds must override the stored client; got %q", got)
+	}
+}
+
 // A no-DCR AS with no supplied client fails with an actionable error, not a raw
 // registration failure.
 func TestConsoleOAuthAddNoDCRNoClientErrors(t *testing.T) {

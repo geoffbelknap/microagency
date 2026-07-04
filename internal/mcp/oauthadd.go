@@ -73,6 +73,18 @@ func clientKey(issuer string) string {
 // client fails with an actionable error telling the operator to supply credentials.
 func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata, callbackURL, suppliedID, suppliedSecret string) (string, string, error) {
 	key := clientKey(meta.Issuer)
+	// Operator-supplied client wins — including OVER a previously stored one. An
+	// explicit client_id/secret means "use these", so it must be able to REPLACE the
+	// stored client (e.g. switching a Google app from a personal-account client to an
+	// Internal one). Persist and use it, skipping registration entirely.
+	if suppliedID != "" {
+		if s.secrets != nil {
+			b, _ := json.Marshal(storedClient{ClientID: suppliedID, ClientSecret: suppliedSecret})
+			_ = s.secrets.Save(ctx, key, b)
+		}
+		return suppliedID, suppliedSecret, nil
+	}
+	// No supplied creds: reuse a stored client so retries/reauth don't re-register.
 	if s.secrets != nil {
 		if raw, err := s.secrets.Load(ctx, key); err == nil {
 			var c storedClient
@@ -80,15 +92,6 @@ func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata
 				return c.ClientID, c.ClientSecret, nil
 			}
 		}
-	}
-	// Operator-supplied client (the no-DCR case). Persist and use it, skipping
-	// registration entirely.
-	if suppliedID != "" {
-		if s.secrets != nil {
-			b, _ := json.Marshal(storedClient{ClientID: suppliedID, ClientSecret: suppliedSecret})
-			_ = s.secrets.Save(ctx, key, b)
-		}
-		return suppliedID, suppliedSecret, nil
 	}
 	if meta.RegistrationEndpoint == "" {
 		return "", "", fmt.Errorf("this authorization server does not support dynamic client registration; supply an OAuth client_id/client_secret when adding the connection")
