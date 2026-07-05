@@ -51,6 +51,25 @@ type upstream struct {
 	// invocation gate. This is what keeps one user's OAuth grant from being
 	// exercised by another user of a shared (--issuer) deployment.
 	owner string
+	// minimizeSuggested is the minimization policy auto-detected from this upstream's
+	// tool schemas, computed ONCE when tools are (re)loaded and cached here. Computing
+	// it lazily in UpstreamList would rescan attacker-controlled tool metadata on every
+	// /admin request under the lock — a DoS vector — so it is done at discovery instead.
+	minimizeSuggested json.RawMessage
+}
+
+// suggestionFor computes the cached minimization suggestion for a tool set. Done at
+// tool-(re)load time, off the admin read path, so a huge or repeated upstream tool
+// list can't drive repeated scans. nil when nothing is recognizable.
+func suggestionFor(tools []gateway.Tool) json.RawMessage {
+	sug := suggestMinimizePolicy(tools)
+	if len(sug) == 0 {
+		return nil
+	}
+	if b, err := json.Marshal(sug); err == nil {
+		return b
+	}
+	return nil
 }
 
 // UpstreamOption customizes a registration at add/discover time, applied inside
@@ -120,7 +139,7 @@ func (s *Server) AddUpstream(ctx context.Context, u *gateway.Upstream, opts ...U
 	if err != nil {
 		return err
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: true, provenance: "preloaded"}, opts...)
+	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: true, provenance: "preloaded", minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // AddDiscovered registers an upstream's tools WITHOUT connecting — discovered
@@ -134,7 +153,7 @@ func (s *Server) AddDiscovered(u *gateway.Upstream, tools []gateway.Tool, proven
 	if provenance == "" {
 		provenance = "discovered"
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: provenance}, opts...)
+	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: provenance, minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // DiscoverUpstream connects once to fetch an upstream's tool metadata and
@@ -153,7 +172,7 @@ func (s *Server) DiscoverUpstream(ctx context.Context, u *gateway.Upstream, opts
 	if err != nil {
 		return err
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: "discovered"}, opts...)
+	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: "discovered", minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // EnableUpstream connects a discovered upstream — verifying it's reachable and
@@ -172,6 +191,7 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	sug := suggestionFor(tools) // compute off the lock (scans tool metadata)
 	// Commit under the lock, re-validating against the live record: the upstream
 	// may have been removed or rebound to a new connection while we were on the
 	// network — enabling with tools listed from a stale connection would be wrong.
@@ -185,6 +205,7 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 		return fmt.Errorf("gateway: upstream %q changed while enabling; retry", name)
 	}
 	cur.tools = tools
+	cur.minimizeSuggested = sug
 	cur.enabled = true
 	return nil
 }
@@ -202,6 +223,7 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Ups
 	if err != nil {
 		return err
 	}
+	sug := suggestionFor(tools) // compute off the lock (scans tool metadata)
 	// Commit under the lock against the live record — it may have been removed
 	// while we were verifying the new connection.
 	s.mu.Lock()
@@ -212,6 +234,7 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Ups
 	}
 	rec.conn = u
 	rec.tools = tools
+	rec.minimizeSuggested = sug
 	return nil
 }
 
@@ -280,14 +303,12 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		}
 		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
-		// Suggest a policy from the schemas only when nothing is protecting the upstream
-		// (secure-default off and no explicit policy) — never applied on its own.
-		if len(effective) == 0 {
-			if sug := suggestMinimizePolicy(rec.tools); len(sug) > 0 {
-				if b, err := json.Marshal(sug); err == nil {
-					info.MinimizeSuggested = b
-				}
-			}
+		// Surface the schema-derived suggestion only when nothing is protecting the
+		// upstream (secure-default off and no explicit policy) — never applied on its
+		// own. Read from the cache computed at tool-load time; UpstreamList must not
+		// rescan attacker-controlled tool metadata on every admin request (a DoS vector).
+		if len(effective) == 0 && len(rec.minimizeSuggested) > 0 {
+			info.MinimizeSuggested = rec.minimizeSuggested
 		}
 		out = append(out, info)
 	}
@@ -379,8 +400,11 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	}
 	// Restore any tokenized-field placeholders the model authored back to their real
 	// values before this call is dialed (the return path for field minimization).
-	// No-op unless a minimizer previously tokenized a value the model is now echoing.
-	args = s.resolveOutbound(args)
+	// Scoped to this caller and THIS upstream: a placeholder from another upstream (or
+	// another principal) stays inert, so a secret tokenized out of upstream X can't be
+	// replayed by handing its placeholder to a different upstream. No-op unless a
+	// minimizer previously tokenized a value the model is now echoing back here.
+	args = s.resolveOutbound(ctx, upName, args)
 	runID := s.nextRunID()
 	start := time.Now()
 	upHost := hostFromURL(rec.conn.URL) // the egress target for calls that reach the upstream

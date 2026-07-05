@@ -337,6 +337,10 @@ svg{display:block}
 /* ---------- config / helpers ---------- */
 var $=function(s){return document.querySelector(s)};
 var el=function(t,a,h){var e=document.createElement(t);if(a)for(var k in a){if(k==="class")e.className=a[k];else if(k==="html")e.innerHTML=a[k];else e.setAttribute(k,a[k])}if(h!=null)e.textContent=h;return e};
+/* esc HTML-escapes untrusted strings before they go into an innerHTML string — an
+   upstream controls its advertised OAuth scopes and URL, so those must never be
+   concatenated into markup raw. */
+var esc=function(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})};
 var TOKKEY="microagency.token",THEMEKEY="mc.theme";
 var state={tab:"connections",token:localStorage.getItem(TOKKEY)||"",ups:[],runs:[],metrics:null,reg:[],runsFilter:"all",runsPage:0,expanded:{},liveTok:0,menuFor:null};
 var PER=8;
@@ -592,8 +596,8 @@ function pickScopes(url,submit){
     var scopes=(info&&info.scopes)||[];
     if(!info||!info.oauth||!scopes.length){submit("");return}
     var body='<p class="mono" style="font-size:11px;color:var(--ink-mid);margin:0 0 10px">Least privilege — request only what you need.</p>';
-    scopes.forEach(function(sc){body+='<label style="display:flex;gap:8px;padding:4px 0;cursor:pointer;font-size:13px"><input type="checkbox" value="'+sc+'"'+(/read/i.test(sc)?" checked":"")+'> <span class="mono">'+sc+'</span></label>'});
-    openDialog("Scopes for "+url,"",body,"Authorize",function(){var sel=[].slice.call($("#dialog").querySelectorAll('input[type=checkbox]')).filter(function(c){return c.checked}).map(function(c){return c.value}).join(" ");closeDialog();submit(sel)});
+    scopes.forEach(function(sc){body+='<label style="display:flex;gap:8px;padding:4px 0;cursor:pointer;font-size:13px"><input type="checkbox" value="'+esc(sc)+'"'+(/read/i.test(sc)?" checked":"")+'> <span class="mono">'+esc(sc)+'</span></label>'});
+    openDialog("Scopes for "+esc(url),"",body,"Authorize",function(){var sel=[].slice.call($("#dialog").querySelectorAll('input[type=checkbox]')).filter(function(c){return c.checked}).map(function(c){return c.value}).join(" ");closeDialog();submit(sel)});
   }).catch(function(e){toast(e.message)});
 }
 

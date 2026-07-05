@@ -73,13 +73,18 @@ func (s *Server) minimizeActive(upstream string) bool {
 
 // resolveOutbound restores tokenized placeholders in model-authored arguments to
 // their real values before the call is dialed — the return path for tokenized
-// fields. The audit records the resolved args (audit means audit); the model only
-// ever authored the placeholder.
-func (s *Server) resolveOutbound(args json.RawMessage) json.RawMessage {
+// fields. It resolves ONLY bindings scoped to this caller (principal) AND this
+// destination upstream: a placeholder minted from upstream X for principal P is
+// inert on a call to any other upstream or by any other principal, so a model can't
+// replay a secret it saw from X by handing the placeholder to upstream Y. The audit
+// records the resolved args (audit means audit); the model only authored the
+// placeholder.
+func (s *Server) resolveOutbound(ctx context.Context, upstream string, args json.RawMessage) json.RawMessage {
 	if s.tokens == nil || len(args) == 0 {
 		return args
 	}
-	return minimize.ResolvePlaceholders(args, s.tokens.Snapshot())
+	scope := minimize.TokenScope{Owner: principalOf(ctx).Subject, Upstream: upstream}
+	return minimize.ResolvePlaceholders(args, s.tokens.Snapshot(scope))
 }
 
 // scrubInbound runs the minimizer over an inline, model-bound proxy result. It
@@ -105,12 +110,17 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 		Tool:      tool,
 		Direction: minimize.ToModel,
 		Policy:    s.minimizePolicyFor(upstream),
+		Salt:      s.tokenSalt,
 	})
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	if s.tokens != nil && len(out.Tokens) > 0 {
-		_ = s.tokens.Put(out.Tokens)
+		// Scope the bindings to the principal this result is surfaced to and the
+		// upstream that produced them — so they resolve only on that principal's calls
+		// back to this same upstream.
+		scope := minimize.TokenScope{Owner: principalOf(ctx).Subject, Upstream: upstream}
+		_ = s.tokens.Put(scope, out.Tokens)
 	}
 	var scrubbed map[string]any
 	if err := json.Unmarshal(out.Transformed, &scrubbed); err != nil {

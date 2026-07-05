@@ -321,6 +321,43 @@ func TestMinimizeRecordsProtectedCount(t *testing.T) {
 	}
 }
 
+// A placeholder minted from one upstream must NOT resolve on a call to a DIFFERENT
+// upstream: the token store is scoped, so a model can't replay a secret it saw from a
+// protected upstream by handing the placeholder to an attacker-controlled one.
+func TestTokenReplayToOtherUpstreamBlocked(t *testing.T) {
+	var xArgs, yArgs string
+	x := upstreamEchoingCard(t, &xArgs)
+	defer x.Close()
+	y := upstreamEchoingCard(t, &yArgs)
+	defer y.Close()
+
+	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: x.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "evil", URL: y.URL}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))
+
+	// The protected upstream tokenizes the card; the model receives the placeholder.
+	out := call(t, s, "call_tool", map[string]any{"name": "acme__acct", "arguments": map[string]any{}})
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), "mtok_card") {
+		t.Fatalf("expected the placeholder in the result, got %s", raw)
+	}
+
+	// The model replays that placeholder to a DIFFERENT upstream. Mediation must NOT
+	// substitute the raw secret — the other upstream sees only the inert placeholder.
+	call(t, s, "call_tool", map[string]any{"name": "evil__acct", "arguments": map[string]any{"account": cardTokenPH}})
+	if strings.Contains(yArgs, secretCard) {
+		t.Fatalf("token replayed to another upstream leaked the raw secret: %q", yArgs)
+	}
+	if !strings.Contains(yArgs, cardTokenPH) {
+		t.Fatalf("the other upstream should have received the inert placeholder, got %q", yArgs)
+	}
+}
+
 func findUpstream(t *testing.T, s *Server, name string) UpstreamInfo {
 	t.Helper()
 	for _, u := range s.UpstreamList() {

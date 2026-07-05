@@ -82,3 +82,27 @@ func TestDoPurgeTier1Idempotent(t *testing.T) {
 		t.Fatalf("purge of empty dir should be a no-op, got %v", err)
 	}
 }
+
+// The --full guard fails closed when HOME can't be resolved: microagencyDir() then
+// falls back to os.TempDir(), and a full purge must never RemoveAll that.
+func TestVerifyFullPurgeTargetRejectsUnresolvableHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	// With HOME unset, microagencyDir() returns os.TempDir() — an unrelated dir that
+	// --full must refuse to delete.
+	if err := verifyFullPurgeTarget(os.TempDir()); err == nil {
+		t.Fatal("expected --full to refuse when the home dir can't be resolved")
+	}
+}
+
+// The guard also rejects any target that isn't exactly ~/.microagency, even with a
+// resolvable home.
+func TestVerifyFullPurgeTargetRejectsWrongDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := verifyFullPurgeTarget(filepath.Join(home, "something-else")); err == nil {
+		t.Fatal("expected --full to refuse a non-state directory")
+	}
+	if err := verifyFullPurgeTarget(filepath.Join(home, ".microagency")); err != nil {
+		t.Fatalf("the real state dir must be accepted, got %v", err)
+	}
+}

@@ -103,6 +103,49 @@ func TestDiscoverASPathAwareWithResourceIndicator(t *testing.T) {
 	}
 }
 
+// AS metadata whose issuer does NOT match the authorization-server URL it was fetched
+// from is rejected (RFC 8414 §3.3). Otherwise a malicious upstream could serve its
+// own AS document while claiming issuer = a legitimate provider, causing that
+// provider's stored client_secret to be sent to the attacker's token endpoint.
+func TestDiscoverASRejectsIssuerMismatch(t *testing.T) {
+	var ts *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization_servers":["` + ts.URL + `"],"resource":"` + ts.URL + `"}`))
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		// issuer claims a different provider than the AS URL microagency fetched from.
+		_, _ = w.Write([]byte(`{"issuer":"https://accounts.google.com","authorization_endpoint":"` + ts.URL + `/authorize","token_endpoint":"` + ts.URL + `/token"}`))
+	})
+	ts = httptest.NewServer(mux)
+	defer ts.Close()
+
+	if _, err := DiscoverAS(context.Background(), ts.Client(), ts.URL+"/.well-known/oauth-protected-resource"); err == nil {
+		t.Fatal("expected DiscoverAS to reject metadata whose issuer != authorization server URL")
+	}
+}
+
+// sameIssuer compares issuer identifiers per RFC 8414: trailing-slash and case
+// insensitive on scheme/host, exact on path.
+func TestSameIssuer(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://as.example", "https://as.example/", true},
+		{"https://AS.example", "https://as.example", true},
+		{"https://as.example/a/b", "https://as.example/a/b", true},
+		{"https://as.example", "https://evil.example", false},
+		{"https://as.example/a", "https://as.example/b", false},
+		{"not a url", "https://as.example", false},
+	}
+	for _, c := range cases {
+		if got := sameIssuer(c.a, c.b); got != c.want {
+			t.Errorf("sameIssuer(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 // The RFC 8707 resource indicator is sent on the authorize request when present,
 // and omitted when not — no vendor assumptions.
 func TestAuthorizeURLResourceIndicator(t *testing.T) {

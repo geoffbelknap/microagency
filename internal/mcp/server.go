@@ -8,6 +8,8 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,6 +77,10 @@ type Server struct {
 	// upstream = passthrough), guarded by mu.
 	minimizer        minimize.Module
 	tokens           minimize.TokenStore
+	// tokenSalt keys placeholder derivation in the minimizer (a per-session secret,
+	// never exposed to the model) so tokenized low-entropy values can't be brute-
+	// forced from their placeholders. Set when a minimizer is installed.
+	tokenSalt        string
 	minimizePolicies map[string][]byte
 	// secureDefault protects detected sensitive fields by DEFAULT: an upstream with
 	// no explicit policy gets defaultMinimizePolicy, and the operator opts DOWN by
@@ -183,7 +189,19 @@ func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
 // bindings. Without it, the proxy path is unchanged. Per-upstream policy is set
 // with SetMinimizePolicy; an upstream with no policy passes through untouched.
 func WithMinimizer(m minimize.Module, tokens minimize.TokenStore) Option {
-	return func(s *Server) { s.minimizer = m; s.tokens = tokens }
+	return func(s *Server) { s.minimizer = m; s.tokens = tokens; s.tokenSalt = newTokenSalt() }
+}
+
+// newTokenSalt returns a per-session secret used to key placeholder derivation. It
+// stays in memory and is never persisted or returned to the model. On the vanishing
+// chance the OS RNG fails, we return "" — placeholders are still per-session stable,
+// just not salted; the token store's scope check remains the primary defense.
+func newTokenSalt() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // WithSecureDefault turns on secure-by-default minimization: an upstream with no
