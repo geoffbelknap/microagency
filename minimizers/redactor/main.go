@@ -18,6 +18,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -36,6 +38,11 @@ type wireIn struct {
 	Tool      string          `json:"tool,omitempty"`
 	Direction string          `json:"direction,omitempty"`
 	Policy    json.RawMessage `json:"policy,omitempty"`
+	// Salt is a per-scan secret the host supplies (never shown to the model) so
+	// tokenized placeholders are a keyed hash of the value, not an unsalted digest an
+	// authenticated agent could brute-force for low-entropy values (SSNs, known
+	// cards). It stays host-side; only the placeholder crosses into model context.
+	Salt string `json:"salt,omitempty"`
 }
 
 type token struct {
@@ -67,6 +74,7 @@ type wireOut struct {
 type acc struct {
 	policy    map[string]string
 	upstream  string
+	salt      string // per-scan secret keying placeholder derivation (see wireIn.Salt)
 	tokens    []token
 	alerts    []alert
 	protected int // values redacted or tokenized (hidden from the model)
@@ -85,16 +93,21 @@ func main() {
 	if err != nil {
 		os.Exit(1)
 	}
-	a := &acc{policy: map[string]string{}, upstream: in.Upstream}
+	a := &acc{policy: map[string]string{}, upstream: in.Upstream, salt: in.Salt}
 	if len(in.Policy) > 0 {
 		_ = json.Unmarshal(in.Policy, &a.policy) // unknown types default to pass
 	}
 
 	var out string
 	// Structured path: if the payload is JSON, walk it so field NAMES are visible;
-	// otherwise treat it as free text and rely on content patterns alone.
+	// otherwise treat it as free text and rely on content patterns alone. Decode with
+	// UseNumber so numeric values keep their exact literal — a card or account number
+	// stored as a JSON number must be enforceable by field name, not silently skipped
+	// or mangled through float64.
 	var v interface{}
-	if json.Unmarshal(payload, &v) == nil {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err == nil && decodedFully(dec) {
 		v = a.walk(v, "")
 		b, _ := json.Marshal(v)
 		out = string(b)
@@ -111,34 +124,56 @@ func main() {
 	_, _ = os.Stdout.Write(b)
 }
 
-// walk recurses the decoded JSON, replacing sensitive string values in place. key
-// is the field name the current value sits under (the field-NAME signal).
+// decodedFully reports whether the decoder consumed the whole payload as a single
+// JSON value (only trailing whitespace left) — matching json.Unmarshal's rejection
+// of trailing garbage, so a non-JSON payload still falls through to content scanning.
+func decodedFully(dec *json.Decoder) bool {
+	_, err := dec.Token()
+	return err == io.EOF
+}
+
+// walk recurses the decoded JSON, replacing sensitive values in place. key is the
+// field name the current value sits under (the field-NAME signal).
+//
+// Field-name and content detection BOTH run: a field name that declares a type is
+// acted on, and — unless the whole value was hidden (redact/tokenize) — the value is
+// still content-scanned so a lying field name (e.g. an alert-only "ssn" field
+// carrying an email or card) can't smuggle other PII past the boundary.
 func (a *acc) walk(v interface{}, key string) interface{} {
 	switch val := v.(type) {
 	case string:
-		// FIELD-NAME rule: does the KEY declare this value's type, and is that type
-		// in the policy? If so, act on the value regardless of its format.
 		if typ := fieldType(key); typ != "" {
-			if action := a.policy[typ]; action != "" {
-				return a.apply(typ, action, val)
+			switch a.policy[typ] {
+			case "redact", "tokenize":
+				// The whole value is replaced, so any embedded PII goes with it.
+				return a.apply(typ, a.policy[typ], val)
+			case "alert":
+				// Record the field-declared signal, but the value stays model-visible —
+				// so still content-scan it for OTHER embedded PII (skip re-detecting typ).
+				a.apply(typ, "alert", val)
+				return a.scanEmbeddedOrText(val, key, typ)
+			}
+			// "pass"/unknown: fall through to a full content scan (the backstop still runs).
+		}
+		return a.scanEmbeddedOrText(val, key, "")
+	case json.Number:
+		// A sensitive value stored as a JSON number (a card or account number) is
+		// enforced by its field name, and content-scanned as a backstop; if nothing
+		// fires it stays a number.
+		skip := ""
+		if typ := fieldType(key); typ != "" {
+			switch a.policy[typ] {
+			case "redact", "tokenize":
+				return a.apply(typ, a.policy[typ], val.String())
+			case "alert":
+				a.apply(typ, "alert", val.String())
+				skip = typ
 			}
 		}
-		// EMBEDDED JSON: a double-encoded payload, or rows an MCP wrapped in
-		// explanatory prose + <untrusted-data> tags (Supabase, Cloudflare, …). Find
-		// the JSON value anywhere in the string — not only when the string starts with
-		// a bracket — walk it so field names inside are enforced, and re-splice it into
-		// the surrounding text (which is content-scanned in case it holds PII too).
-		if s, e, ok := embeddedJSON(val); ok {
-			var inner interface{}
-			if json.Unmarshal([]byte(val[s:e]), &inner) == nil {
-				inner = a.walk(inner, key)
-				if b, err := json.Marshal(inner); err == nil {
-					return a.scanText(val[:s], key) + string(b) + a.scanText(val[e:], key)
-				}
-			}
+		if scanned := a.scanText(val.String(), skip); scanned != val.String() {
+			return scanned
 		}
-		// CONTENT fallback: scan the string value for formatted PII.
-		return a.scanText(val, key)
+		return val
 	case map[string]interface{}:
 		for k, vv := range val {
 			val[k] = a.walk(vv, k)
@@ -152,6 +187,27 @@ func (a *acc) walk(v interface{}, key string) interface{} {
 	default:
 		return v
 	}
+}
+
+// scanEmbeddedOrText content-scans a free-text string value. It first splices out any
+// embedded JSON — a double-encoded payload, or rows an MCP wrapped in prose +
+// <untrusted-data> tags (Supabase, Cloudflare, …) — and walks it so nested field
+// names are enforced, re-splicing it into the surrounding text (itself content-
+// scanned). skipType, when set, is a type already acted on by the field name, so the
+// content pass doesn't flag it twice.
+func (a *acc) scanEmbeddedOrText(val, key, skipType string) string {
+	if s, e, ok := embeddedJSON(val); ok {
+		var inner interface{}
+		d := json.NewDecoder(bytes.NewReader([]byte(val[s:e])))
+		d.UseNumber()
+		if d.Decode(&inner) == nil {
+			inner = a.walk(inner, key)
+			if b, err := json.Marshal(inner); err == nil {
+				return a.scanText(val[:s], skipType) + string(b) + a.scanText(val[e:], skipType)
+			}
+		}
+	}
+	return a.scanText(val, skipType)
 }
 
 // embeddedJSON returns the [start,end) span of the first balanced JSON object or
@@ -206,7 +262,7 @@ func (a *acc) apply(typ, action, value string) string {
 		return mask(typ, value)
 	case "tokenize":
 		a.protected++
-		ph := placeholder(typ, value)
+		ph := a.placeholder(typ, value)
 		a.tokens = append(a.tokens, token{Placeholder: ph, Value: value, Type: typ})
 		return ph
 	case "alert":
@@ -230,8 +286,10 @@ var detectors = []detector{
 	{typ: "ssn", re: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
 	{typ: "card", re: regexp.MustCompile(`\b(?:\d[ -]?){13,19}\b`), valid: luhn},
 	// Secrets by VALUE — high-precision shapes only, so we don't flag every hash or
-	// base64 blob: PEM private keys, JWTs, and well-known key prefixes.
-	{typ: "secret", re: regexp.MustCompile(`-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----`)},
+	// base64 blob: PEM private keys, JWTs, and well-known key prefixes. The PEM match
+	// spans the WHOLE block (header, base64 body, footer) — matching only the header
+	// would leave the key material in the output.
+	{typ: "secret", re: regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)},
 	{typ: "secret", re: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)}, // JWT
 	{typ: "secret", re: regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},                                              // AWS access key id
 	{typ: "secret", re: regexp.MustCompile(`\b(?:sk|rk|pk)_[A-Za-z0-9]{16,}`)},                               // stripe/openai-style
@@ -245,11 +303,14 @@ type hit struct {
 }
 
 // scanText applies the content detectors to a string, honoring the policy, and
-// returns the transformed string. key is the field name (unused here, reserved for
-// per-field content policy later).
-func (a *acc) scanText(text, _ string) string {
+// returns the transformed string. skipType, when set, is a type already acted on by
+// the caller (the field-name path) so it isn't detected — and re-alerted — twice.
+func (a *acc) scanText(text, skipType string) string {
 	var hits []hit
 	for _, d := range detectors {
+		if skipType != "" && d.typ == skipType {
+			continue
+		}
 		for _, idx := range d.re.FindAllStringIndex(text, -1) {
 			val := text[idx[0]:idx[1]]
 			if d.valid != nil && !d.valid(val) {
@@ -380,9 +441,15 @@ func fieldTokens(s string) map[string]bool {
 
 // --- transforms ---
 
-func placeholder(typ, val string) string {
-	sum := sha256.Sum256([]byte(typ + ":" + val))
-	return "[[mtok_" + hex.EncodeToString(sum[:])[:10] + "]]"
+// placeholder derives the opaque token that stands in for a value. It is a KEYED
+// hash (HMAC-SHA256 under the host-supplied per-scan salt), so an agent that sees a
+// placeholder cannot brute-force a low-entropy value (an SSN, a known test card) by
+// hashing candidates — it doesn't hold the salt. Deterministic within a scan, so
+// repeated occurrences of one value collapse to one placeholder/token.
+func (a *acc) placeholder(typ, val string) string {
+	mac := hmac.New(sha256.New, []byte(a.salt))
+	mac.Write([]byte(typ + ":" + val))
+	return "[[mtok_" + hex.EncodeToString(mac.Sum(nil))[:16] + "]]"
 }
 
 func mask(typ, val string) string {

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"microagency/internal/auth"
@@ -63,6 +64,34 @@ func clientKey(issuer string) string {
 		host = u.Host
 	}
 	return "oauth-clients/" + host
+}
+
+// resourceAllowedForUpstream reports whether an RFC 8707 resource indicator is safe
+// to send when authorizing this upstream. An empty indicator is filled in by the
+// caller; a host-less one (a bare audience identifier like "microagency") is allowed
+// because it can't name some other host's API; a URL indicator MUST share the
+// upstream's origin, so a malicious authorization server can't audience-bind the
+// token to an unrelated victim resource.
+func resourceAllowedForUpstream(resource, upstreamURL string) bool {
+	ru, err := url.Parse(resource)
+	if err != nil {
+		return false
+	}
+	if ru.Host == "" {
+		return true // bare audience identifier, not a cross-origin URL
+	}
+	return sameOrigin(resource, upstreamURL)
+}
+
+// sameOrigin reports whether two URLs share a scheme and host. A parse failure or a
+// missing host is a fail-closed no-match.
+func sameOrigin(a, b string) bool {
+	ua, err1 := url.Parse(a)
+	ub, err2 := url.Parse(b)
+	if err1 != nil || err2 != nil || ua.Host == "" || ub.Host == "" {
+		return false
+	}
+	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
 }
 
 // loadOrRegisterClient returns the OAuth client to use for this AS. Precedence:
@@ -151,8 +180,15 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	if err != nil {
 		return "", err
 	}
+	// RFC 8707 resource indicator. Default to the upstream's canonical URL when the
+	// (attacker-controllable) protected-resource metadata names none. When it DOES name
+	// one, constrain it to the upstream's origin: an unconstrained resource lets a
+	// malicious upstream point the token's audience at an unrelated victim resource, so
+	// the access token microagency then sends to that upstream is valid elsewhere.
 	if meta.Resource == "" {
-		meta.Resource = url // RFC 8707 resource indicator: default to the upstream's canonical URL
+		meta.Resource = url
+	} else if !resourceAllowedForUpstream(meta.Resource, url) {
+		return "", fmt.Errorf("authorization server advertised resource indicator %q outside the upstream origin %q; refusing to bind a token to an unrelated resource", meta.Resource, url)
 	}
 	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL, suppliedClientID, suppliedClientSecret)
 	if err != nil {

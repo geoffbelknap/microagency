@@ -56,6 +56,12 @@ type ScanInput struct {
 	// Policy is opaque, module-defined configuration (e.g. a type→action map). The
 	// substrate passes it through verbatim.
 	Policy []byte
+	// Salt is a per-session secret the substrate supplies so a tokenizing module can
+	// derive placeholders as a KEYED hash of the value — unguessable to an agent that
+	// sees only the placeholder. It is never returned to the model. Stable within a
+	// session so the same value yields the same placeholder (the model can correlate);
+	// unknown to the model, so low-entropy values can't be brute-forced.
+	Salt string
 }
 
 // Token is a placeholder a module substituted for a raw value. Mediation persists
@@ -129,7 +135,7 @@ func (p Pipeline) Scan(ctx context.Context, in ScanInput) (ScanResult, error) {
 	for _, m := range p.Modules {
 		r, err := m.Scan(ctx, ScanInput{
 			Payload: cur, Upstream: in.Upstream, Tool: in.Tool,
-			Direction: in.Direction, Policy: in.Policy,
+			Direction: in.Direction, Policy: in.Policy, Salt: in.Salt,
 		})
 		if err != nil {
 			return ScanResult{}, fmt.Errorf("minimize: module %q: %w", m.Name(), err)
@@ -142,50 +148,75 @@ func (p Pipeline) Scan(ctx context.Context, in ScanInput) (ScanResult, error) {
 	return ScanResult{Transformed: cur, Tokens: tokens, Alerts: alerts, Protected: protected}, nil
 }
 
-// TokenStore persists placeholder→value bindings so the return path (model-authored
-// args → real values) can resolve them. Implementations are operator-side and
-// owner-scoped — the same custody model as the refstore (see #21). A binding is
-// idempotent: re-Putting the same placeholder→value is a no-op.
+// TokenScope binds a placeholder to the context it is valid in: the principal the
+// tokenized value was surfaced to, and the upstream that produced it. Resolution is
+// allowed ONLY on a call by the same principal back to the same upstream. This is
+// what stops a replay: a placeholder a model received from a protected upstream X is
+// inert in any other principal's context AND on a call to any other upstream, so the
+// model cannot hand it to an attacker-controlled upstream Y and have mediation
+// substitute the raw secret before egress.
+type TokenScope struct {
+	Owner    string // principal subject the value was surfaced to ("" = shared/local)
+	Upstream string // upstream that produced the value
+}
+
+// TokenStore persists placeholder→value bindings, scoped, so the return path
+// (model-authored args → real values) can resolve them only within the scope that
+// minted them. Implementations are operator-side and owner-scoped — the same custody
+// model as the refstore (see #21). A binding is idempotent within a scope.
 type TokenStore interface {
-	Put(tokens []Token) error
-	Resolve(placeholder string) (value string, ok bool)
-	// Snapshot returns a copy of the current bindings, for bulk resolution.
-	Snapshot() map[string]string
+	Put(scope TokenScope, tokens []Token) error
+	Resolve(scope TokenScope, placeholder string) (value string, ok bool)
+	// Snapshot returns a copy of the bindings VISIBLE TO scope, for bulk resolution.
+	Snapshot(scope TokenScope) map[string]string
 }
 
 // MemTokenStore is an in-memory TokenStore for the MVP; a persisted, encrypted,
 // owner-scoped store replaces it behind this interface without touching callers.
+// Bindings are keyed by (scope, placeholder) so the same value tokenized under two
+// scopes stays two independent bindings — resolving in one never reaches the other.
 type MemTokenStore struct {
 	mu sync.Mutex
-	m  map[string]string
+	m  map[string]map[string]string // scopeKey → placeholder → value
 }
 
 // NewMemTokenStore returns an empty store.
-func NewMemTokenStore() *MemTokenStore { return &MemTokenStore{m: map[string]string{}} }
+func NewMemTokenStore() *MemTokenStore { return &MemTokenStore{m: map[string]map[string]string{}} }
 
-func (s *MemTokenStore) Put(tokens []Token) error {
+// scopeKey is the map key for a scope. The NUL separator can't appear in a principal
+// subject or upstream name, so distinct scopes never collide.
+func scopeKey(sc TokenScope) string { return sc.Owner + "\x00" + sc.Upstream }
+
+func (s *MemTokenStore) Put(scope TokenScope, tokens []Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	k := scopeKey(scope)
+	bucket := s.m[k]
+	if bucket == nil {
+		bucket = map[string]string{}
+		s.m[k] = bucket
+	}
 	for _, t := range tokens {
 		if t.Placeholder != "" {
-			s.m[t.Placeholder] = t.Value
+			bucket[t.Placeholder] = t.Value
 		}
 	}
 	return nil
 }
 
-func (s *MemTokenStore) Resolve(placeholder string) (string, bool) {
+func (s *MemTokenStore) Resolve(scope TokenScope, placeholder string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v, ok := s.m[placeholder]
+	v, ok := s.m[scopeKey(scope)][placeholder]
 	return v, ok
 }
 
-func (s *MemTokenStore) Snapshot() map[string]string {
+func (s *MemTokenStore) Snapshot(scope TokenScope) map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]string, len(s.m))
-	for k, v := range s.m {
+	bucket := s.m[scopeKey(scope)]
+	out := make(map[string]string, len(bucket))
+	for k, v := range bucket {
 		out[k] = v
 	}
 	return out

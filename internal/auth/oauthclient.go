@@ -84,6 +84,12 @@ func DiscoverAS(ctx context.Context, hc *http.Client, resourceMetadataURL string
 // discoverASMetadata fetches an authorization server's RFC 8414 metadata, trying
 // each well-known location in spec-preferred order until one yields a document
 // with the endpoints we need. The first non-404 with valid endpoints wins.
+//
+// The metadata's issuer MUST match the issuer identifier we discovered from (RFC 8414
+// §3.3). This is load-bearing for credential safety: stored OAuth clients are keyed by
+// issuer host, so without this check a malicious upstream could point discovery at its
+// own AS document while claiming issuer = a legitimate provider, causing that
+// provider's stored client_secret to be sent to the attacker's token endpoint.
 func discoverASMetadata(ctx context.Context, hc *http.Client, issuer string) (*ASMetadata, error) {
 	var lastErr error
 	for _, candidate := range asMetadataURLs(issuer) {
@@ -96,9 +102,28 @@ func discoverASMetadata(ctx context.Context, hc *http.Client, issuer string) (*A
 			lastErr = fmt.Errorf("%s: metadata missing authorization/token endpoints", candidate)
 			continue
 		}
+		if !sameIssuer(m.Issuer, issuer) {
+			lastErr = fmt.Errorf("%s: metadata issuer %q does not match authorization server %q", candidate, m.Issuer, issuer)
+			continue
+		}
 		return &m, nil
 	}
 	return nil, fmt.Errorf("authorization-server metadata: %w", lastErr)
+}
+
+// sameIssuer reports whether two issuer identifiers are equal per RFC 8414: compared
+// as URLs, ignoring only a trailing slash on the path. A mismatch (or an unparseable
+// issuer) is a fail-closed no-match.
+func sameIssuer(a, b string) bool {
+	ua, err1 := url.Parse(a)
+	ub, err2 := url.Parse(b)
+	if err1 != nil || err2 != nil || ua.Host == "" || ub.Host == "" {
+		return false
+	}
+	norm := func(u *url.URL) string {
+		return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.Path, "/")
+	}
+	return norm(ua) == norm(ub)
 }
 
 // asMetadataURLs lists the AS-metadata locations to try, most-correct first: the

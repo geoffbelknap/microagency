@@ -452,6 +452,14 @@ func runPurge(args []string) {
 	}
 	dir := microagencyDir()
 	if full {
+		// A full purge recursively removes `dir`. microagencyDir() falls back to
+		// os.TempDir() when the home directory can't be resolved (HOME unset) — deleting
+		// that would wipe an unrelated directory the user pointed TMPDIR at. Require a
+		// resolvable, correctly-named state dir before doing anything destructive.
+		if err := verifyFullPurgeTarget(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "microagency: refusing --full purge: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "This PERMANENTLY deletes the entire %s directory:\n", dir)
 		fmt.Fprintln(os.Stderr, "  • parked data (refs) and all run/audit history")
 		fmt.Fprintln(os.Stderr, "  • stored upstream credentials — you will re-authenticate every connection")
@@ -532,6 +540,22 @@ func microagencyDir() string {
 		return os.TempDir()
 	}
 	return filepath.Join(home, ".microagency")
+}
+
+// verifyFullPurgeTarget guards the recursive `purge --full` deletion. It fails closed
+// unless the home directory resolves AND the target is exactly the "~/.microagency"
+// state dir — so an unset HOME (which makes microagencyDir fall back to os.TempDir())
+// or any unexpected path can never be handed to os.RemoveAll.
+func verifyFullPurgeTarget(dir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home directory could not be resolved (is $HOME set?); resolve it and retry")
+	}
+	want := filepath.Join(home, ".microagency")
+	if filepath.Clean(dir) != filepath.Clean(want) {
+		return fmt.Errorf("target %q is not the expected state directory %q", dir, want)
+	}
+	return nil
 }
 
 type httpConfig struct {

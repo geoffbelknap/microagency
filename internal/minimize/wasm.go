@@ -71,6 +71,9 @@ type wireIn struct {
 	Tool      string          `json:"tool,omitempty"`
 	Direction string          `json:"direction,omitempty"`
 	Policy    json.RawMessage `json:"policy,omitempty"`
+	// Salt keys placeholder derivation host-side; it never leaves the sandbox and is
+	// never returned to the model (see ScanInput.Salt).
+	Salt string `json:"salt,omitempty"`
 }
 
 type wireOut struct {
@@ -106,6 +109,7 @@ func (m *WasmModule) Scan(ctx context.Context, in ScanInput) (ScanResult, error)
 		Tool:      in.Tool,
 		Direction: string(in.Direction),
 		Policy:    policy,
+		Salt:      in.Salt,
 	})
 	if err != nil {
 		return ScanResult{}, fmt.Errorf("minimize: module %q: encode request: %w", m.name, err)

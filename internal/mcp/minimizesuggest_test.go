@@ -15,7 +15,9 @@ func TestSuggestMinimizePolicyValues(t *testing.T) {
 		{Name: "place_order", InputSchema: json.RawMessage(`{"type":"object","properties":{"card_number":{"type":"string"},"customer_email":{"type":"string"}}}`)},
 		{Name: "kyc", InputSchema: json.RawMessage(`{"type":"object","properties":{"ssn":{"type":"string"},"billing_address":{"type":"string"}}}`)},
 	}
-	want := map[string]string{"account": "tokenize", "card": "tokenize", "email": "redact", "ssn": "alert", "address": "redact"}
+	// SSN is suggested as redact, not alert: accepting the suggestion must protect the
+	// value, not merely flag it while leaving it visible to the model.
+	want := map[string]string{"account": "tokenize", "card": "tokenize", "email": "redact", "ssn": "redact", "address": "redact"}
 	assertPolicy(t, suggestMinimizePolicy(tools), want)
 }
 
@@ -65,8 +67,8 @@ func TestSuggestFromDescriptions(t *testing.T) {
 		},
 	}
 	assertPolicy(t, suggestMinimizePolicy(tools), map[string]string{
-		"ssn":   "alert",
-		"dob":   "alert",
+		"ssn":   "redact",
+		"dob":   "redact",
 		"email": "redact",
 	})
 }

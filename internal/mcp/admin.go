@@ -333,7 +333,31 @@ func (s *Server) adminOAuthScopes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"oauth": true, "scopes": []string{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"oauth": true, "scopes": meta.ScopesSupported})
+	writeJSON(w, http.StatusOK, map[string]any{"oauth": true, "scopes": sanitizeScopes(meta.ScopesSupported)})
+}
+
+// sanitizeScopes drops any advertised scope that isn't a well-formed OAuth scope
+// token (RFC 6749 §3.3: visible ASCII except space, double-quote, and backslash).
+// The upstream's metadata is attacker-controlled; this keeps a malicious scope value
+// (e.g. one carrying markup for the console's scope picker) from ever reaching the
+// browser, complementing the console's own output escaping.
+func sanitizeScopes(scopes []string) []string {
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if sc != "" && isScopeToken(sc) {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+func isScopeToken(s string) bool {
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || r == '"' || r == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // adminProviderParams reports the curated scoping knobs for the known provider a

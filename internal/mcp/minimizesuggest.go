@@ -89,8 +89,8 @@ var fieldSignals = []fieldSignal{
 			(t["insurance"] && hasAny(t, "member", "policy", "claim")) ||
 			t["allergy"] || t["allergies"] || t["immunization"] || t["vaccine"] || t["prognosis"]
 	}},
-	{"ssn", "alert", func(t map[string]bool) bool { return t["ssn"] || (t["social"] && t["security"]) }},
-	{"dob", "alert", func(t map[string]bool) bool { return t["dob"] || t["birthdate"] || (t["birth"] && t["date"]) }},
+	{"ssn", "redact", func(t map[string]bool) bool { return t["ssn"] || (t["social"] && t["security"]) }},
+	{"dob", "redact", func(t map[string]bool) bool { return t["dob"] || t["birthdate"] || (t["birth"] && t["date"]) }},
 	{"account", "tokenize", func(t map[string]bool) bool {
 		return (hasAny(t, "account", "acct") && hasAny(t, "number", "no", "num", "nbr")) || t["iban"] || (t["routing"] && t["number"])
 	}},
@@ -125,8 +125,8 @@ type phraseSignal struct {
 var phraseSignals = []phraseSignal{
 	{"secret", "redact", []string{"api key", "secret key", "access token", "bearer token", "refresh token", "session token", "private key", "client secret", "credential", "password", "passphrase", "auth cookie"}},
 	{"health", "redact", []string{"medical record", "diagnosis", "diagnoses", "medication", "prescription", "mental health", "clinical notes", "health record", "protected health", "patient record", "medical history"}},
-	{"ssn", "alert", []string{"social security", "social-security"}},
-	{"dob", "alert", []string{"date of birth", "birth date", "birthdate", "born on"}},
+	{"ssn", "redact", []string{"social security", "social-security"}},
+	{"dob", "redact", []string{"date of birth", "birth date", "birthdate", "born on"}},
 	{"account", "tokenize", []string{"account number", "bank account", "brokerage account", "routing number", "iban"}},
 	{"card", "tokenize", []string{"credit card", "debit card", "payment card", "card number", "security code", "card expiration"}},
 	{"email", "redact", []string{"email address", "e-mail", "email"}},
@@ -135,11 +135,21 @@ var phraseSignals = []phraseSignal{
 	{"name", "redact", []string{"full name", "first name", "last name", "person's name", "customer name", "legal name"}},
 }
 
+// maxProseScan bounds how much of a single upstream-supplied description the prose
+// classifier reads. Tool metadata is attacker-controlled and capped only by the
+// 64 MiB upstream response ceiling; a sensitive-field phrase worth matching sits in
+// the first few hundred bytes, so scanning past a few KiB only buys an upstream a way
+// to burn CPU. Truncation is deterministic and per-description.
+const maxProseScan = 8 << 10 // 8 KiB
+
 // classifyProse is the "trust the prose" classifier: a natural-language blob in, the
 // sensitive types it names out. Phrase matching with a light negation guard for now.
 // This is the SEAM a model classifier can replace — same signature — if phrases
 // aren't enough.
 var classifyProse = func(text string) map[string]string {
+	if len(text) > maxProseScan {
+		text = text[:maxProseScan]
+	}
 	low := strings.ToLower(text)
 	out := map[string]string{}
 	for _, sig := range phraseSignals {
@@ -188,14 +198,33 @@ func hasNegation(window string) bool {
 var unboundedInputTokens = map[string]bool{"query": true, "sql": true, "lcql": true, "search": true, "q": true}
 
 // unboundedOutputDefault is the starter policy suggested for arbitrary-output tools,
-// limited to what the bundled content detector can actually enforce on free text.
-var unboundedOutputDefault = map[string]string{"email": "redact", "ssn": "alert", "card": "tokenize", "secret": "redact"}
+// limited to what the bundled content detector can actually enforce on free text. All
+// actions PROTECT the value (redact/tokenize) — a suggestion the operator accepts
+// must not leave a detected identifier visible, so no "alert" here.
+var unboundedOutputDefault = map[string]string{"email": "redact", "ssn": "redact", "card": "tokenize", "secret": "redact"}
+
+// suggestableTypes is the number of distinct sensitive types any signal can suggest.
+// Once a scan has proposed an action for every one AND seen an unbounded-output tool,
+// more scanning can't change the result — the saturation early-exit that bounds work
+// over an upstream advertising a huge tool list.
+var suggestableTypes = func() int {
+	seen := map[string]bool{}
+	for _, s := range fieldSignals {
+		seen[s.typ] = true
+	}
+	return len(seen)
+}()
 
 // suggestMinimizePolicy returns a suggested type→action policy from the tool
-// schemas. Empty when nothing recognizable is found.
+// schemas. Empty when nothing recognizable is found. Callers compute this ONCE at
+// tool-discovery time and cache it on the upstream record (never per admin request),
+// so an upstream's attacker-controlled metadata can't force repeated scans; this
+// function additionally bounds a single pass (per-description truncation in
+// classifyProse + the saturation early-exit below).
 func suggestMinimizePolicy(tools []gateway.Tool) map[string]string {
 	pol := map[string]string{}
 	unbounded := false
+	saturated := func() bool { return unbounded && len(pol) >= suggestableTypes }
 	merge := func(m map[string]string) {
 		for k, v := range m {
 			if _, ok := pol[k]; !ok {
@@ -220,6 +249,9 @@ func suggestMinimizePolicy(tools []gateway.Tool) map[string]string {
 		}
 	}
 	for _, tl := range tools {
+		if saturated() {
+			break // every type already suggested + unbounded seen; nothing left to learn
+		}
 		scanName(tl.Name)                    // field NAME tokens (+ unbounded)
 		merge(classifyProse(tl.Description)) // TRUST the tool's prose
 		for _, f := range schemaProperties(tl.InputSchema) {

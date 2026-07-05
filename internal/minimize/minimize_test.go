@@ -53,14 +53,23 @@ func TestPipelineFailsClosed(t *testing.T) {
 // the model is restored on the way back to the upstream.
 func TestResolvePlaceholders(t *testing.T) {
 	store := NewMemTokenStore()
-	_ = store.Put([]Token{{Placeholder: "<mtok_ab>", Value: "5PY89921"}, {Placeholder: "<mtok_abcd>", Value: "long"}})
+	scope := TokenScope{Owner: "u1", Upstream: "acme"}
+	_ = store.Put(scope, []Token{{Placeholder: "<mtok_ab>", Value: "5PY89921"}, {Placeholder: "<mtok_abcd>", Value: "long"}})
 	// Longest-first: <mtok_abcd> must not be clobbered by the <mtok_ab> prefix.
-	got := ResolvePlaceholders([]byte(`{"acct":"<mtok_ab>","other":"<mtok_abcd>"}`), store.Snapshot())
+	got := ResolvePlaceholders([]byte(`{"acct":"<mtok_ab>","other":"<mtok_abcd>"}`), store.Snapshot(scope))
 	if want := `{"acct":"5PY89921","other":"long"}`; string(got) != want {
 		t.Fatalf("resolved = %q, want %q", got, want)
 	}
-	if v, ok := store.Resolve("<mtok_ab>"); !ok || v != "5PY89921" {
+	if v, ok := store.Resolve(scope, "<mtok_ab>"); !ok || v != "5PY89921" {
 		t.Fatalf("Resolve = %q,%v", v, ok)
+	}
+	// A different scope (another upstream) must NOT see the binding — this is what
+	// blocks replaying a token to an upstream that didn't mint it.
+	if _, ok := store.Resolve(TokenScope{Owner: "u1", Upstream: "other"}, "<mtok_ab>"); ok {
+		t.Fatal("binding leaked across upstream scopes")
+	}
+	if _, ok := store.Resolve(TokenScope{Owner: "u2", Upstream: "acme"}, "<mtok_ab>"); ok {
+		t.Fatal("binding leaked across principal scopes")
 	}
 }
 
@@ -82,6 +91,7 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 	payload := []byte(fmt.Sprintf(`{"email":"a@b.com","card":"%s","ssn":"123-45-6789"}`, card))
 
 	store := NewMemTokenStore()
+	scope := TokenScope{Upstream: "acme"}
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -108,14 +118,14 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 			if len(res.Alerts) != 1 || res.Alerts[0].Type != "ssn" {
 				t.Errorf("want 1 ssn alert, got %+v", res.Alerts)
 			}
-			_ = store.Put(res.Tokens)
+			_ = store.Put(scope, res.Tokens)
 		}()
 	}
 	wg.Wait()
 
 	// The tokenized card resolves back to the raw value on the return path.
 	res, _ := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: policy})
-	restored := ResolvePlaceholders(res.Transformed, store.Snapshot())
+	restored := ResolvePlaceholders(res.Transformed, store.Snapshot(scope))
 	if !strings.Contains(string(restored), card) {
 		t.Fatalf("card did not round-trip back: %s", restored)
 	}
@@ -273,6 +283,120 @@ func TestWasmRedactorHealth(t *testing.T) {
 	}
 	if !strings.Contains(out, "p-1") {
 		t.Errorf("patient_id (reference key) must survive: %s", out)
+	}
+}
+
+// A PEM private key must be redacted as a WHOLE block — header, base64 body, and
+// footer — not just its BEGIN line, which would leave the key material behind.
+func TestWasmRedactorPEMPrivateKeyWholeBlock(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDbogusKEYmaterial"
+	pem := "-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----"
+	envelope, _ := json.Marshal(map[string]string{"note": "here it is: " + pem})
+	res, err := m.Scan(ctx, ScanInput{Payload: envelope, Direction: ToModel, Policy: []byte(`{"secret":"redact"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	if strings.Contains(out, body) {
+		t.Fatalf("PEM key material leaked (only the header was redacted): %s", out)
+	}
+	if strings.Contains(out, "END PRIVATE KEY") {
+		t.Fatalf("PEM footer survived — the block was not fully matched: %s", out)
+	}
+}
+
+// A field whose NAME declares a type but whose policy action leaves the value
+// visible (alert) must still be content-scanned, so other PII embedded in it
+// (an email, a card) can't ride through under that field name.
+func TestWasmRedactorFieldAlertStillScansEmbedded(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	payload := []byte(`{"ssn":"contact a@b.com or card 4111111111111111"}`)
+	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"ssn":"alert","email":"redact","card":"tokenize"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Transformed)
+	if strings.Contains(out, "a@b.com") {
+		t.Errorf("email inside an alert-only ssn field must still be redacted: %s", out)
+	}
+	if strings.Contains(out, "4111111111111111") {
+		t.Errorf("card inside an alert-only ssn field must still be tokenized: %s", out)
+	}
+	if len(res.Alerts) == 0 {
+		t.Error("the field-declared ssn signal should still raise an alert")
+	}
+}
+
+// A sensitive value stored as a JSON NUMBER (not a string) must be enforced by its
+// field name, not silently passed through because it isn't a string.
+func TestWasmRedactorNumericFieldValue(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	res, err := m.Scan(ctx, ScanInput{Payload: []byte(`{"card_number":4111111111111111}`), Direction: ToModel, Policy: []byte(`{"card":"tokenize"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(res.Transformed), "4111111111111111") {
+		t.Fatalf("a card number stored as a JSON number must be tokenized, got %s", res.Transformed)
+	}
+	if len(res.Tokens) != 1 || res.Tokens[0].Value != "4111111111111111" {
+		t.Fatalf("want one card token for the numeric value, got %+v", res.Tokens)
+	}
+}
+
+// The placeholder is a KEYED hash of the value: with a secret per-session salt, the
+// same value tokenizes to DIFFERENT placeholders under different salts, so an agent
+// that sees a placeholder can't brute-force a low-entropy value by hashing candidates.
+func TestWasmRedactorSaltedPlaceholders(t *testing.T) {
+	mod := buildWasip1(t, "../../minimizers/redactor")
+	ctx := context.Background()
+	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(ctx)
+
+	payload := []byte(`{"account_number":"5PY89921"}`)
+	policy := []byte(`{"account":"tokenize"}`)
+	r1, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: policy, Salt: "salt-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: policy, Salt: "salt-two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1.Tokens) != 1 || len(r2.Tokens) != 1 {
+		t.Fatalf("expected one token each, got %d and %d", len(r1.Tokens), len(r2.Tokens))
+	}
+	if r1.Tokens[0].Placeholder == r2.Tokens[0].Placeholder {
+		t.Fatal("placeholders must differ under different salts (unsalted → brute-forceable)")
+	}
+	// Same salt → same placeholder (stable within a session, so the model can correlate).
+	r3, _ := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: policy, Salt: "salt-one"})
+	if r3.Tokens[0].Placeholder != r1.Tokens[0].Placeholder {
+		t.Fatal("placeholders must be stable for the same value+salt")
 	}
 }
 
