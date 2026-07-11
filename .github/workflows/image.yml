@@ -34,24 +34,23 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # microagent provides the Docker-free image build (create + commit). The
-      # tap formula pulls in its Linux build deps (e2fsprogs for mke2fs/debugfs,
-      # passt) automatically.
+      # microagent provides the Docker-free image build (create + commit), which
+      # needs only the CLI plus e2fsprogs (mke2fs/debugfs, preinstalled on the
+      # runner) — no VM boot. Install the CLI pinned to a commit that includes
+      # the idempotent-blob commit fix, so one build can be tagged with several
+      # refs (:sha and :latest). Move this pin to a release tag once microagent
+      # cuts a stable release that carries the fix.
       - name: Install microagent
         run: |
-          # Homebrew ships on the runner but is not on PATH by default.
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          brew install geoffbelknap/tap/microagent
-          # Expose the brew bin (where microagent is linked) to later steps.
-          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          go install github.com/geoffbelknap/microagent/cmd/microagent@475e704df2f6
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           microagent version
 
       # `make image` runs the whole build (static binary + create + commit), so
       # pull requests exercise and validate the entire path. Merges to main and
-      # version tags authenticate and commit-with-push to the destination tag.
-      # One tag per event: committing the same rootfs to a second tag needs an
-      # idempotent-blob commit (microagent >= the release that dedupes existing
-      # OCI-layout blobs); add an immutable :sha tag here once that ships.
+      # version tags authenticate and commit-with-push to a moving tag (:latest
+      # on main, :<tag> on version tags) plus an immutable :sha-<sha> tag, both
+      # committed from the one build.
       - name: Build and publish image
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -65,4 +64,4 @@ jobs:
           case "${{ github.ref }}" in
             refs/tags/*) ref="$REPO_IMAGE:${GITHUB_REF_NAME}" ;;
           esac
-          make image PUSH=1 IMAGE_REF="$ref"
+          make image PUSH=1 IMAGE_REF="$ref" EXTRA_REFS="$REPO_IMAGE:sha-${{ github.sha }}"
