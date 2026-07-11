@@ -1,5 +1,5 @@
 // Package sandbox is the execution seam: "run this code in an isolated,
-// strict-egress (deny-all) compute-only sandbox; give me its output and the
+// deny-all-egress compute-only sandbox; give me its output and the
 // egress audit." MicroagentProvider is the v1 implementation over microagent; a
 // pooled or WASM provider can replace it behind the Provider interface without
 // the router knowing. This is the ONLY microagency package that imports microagent.
