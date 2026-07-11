@@ -19,11 +19,20 @@ RUN make engines minimizers \
 	&& CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags "-s -w" \
 		-o /out/microagency ./cmd/microagency
 
-FROM gcr.io/distroless/static-debian12:nonroot
-# distroless nonroot is uid 65532 with a writable /home/nonroot; microagency
-# keeps its state (refs, upstream tokens) under $HOME/.microagency, which on
-# microplane rides the guest filesystem into the (encrypted) hibernation
-# snapshot.
+# A slim Debian base — NOT distroless: microagent's entrypoint drops to the
+# workload user with `su ... -s /bin/sh`, so the image needs a shell and su.
+# ca-certificates lets microagency reach upstreams over TLS.
+FROM debian:bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& rm -rf /var/lib/apt/lists/* \
+	# A non-root user (uid 65532) with a writable home. microagency keeps its
+	# state (refs, upstream tokens) under $HOME/.microagency, which on microplane
+	# rides the guest filesystem into the (encrypted) hibernation snapshot.
+	# Appended directly so the image doesn't depend on useradd being present.
+	&& echo 'nonroot:x:65532:65532::/home/nonroot:/bin/sh' >> /etc/passwd \
+	&& echo 'nonroot:x:65532:' >> /etc/group \
+	&& install -d -o 65532 -g 65532 /home/nonroot
 ENV HOME=/home/nonroot
 COPY --from=build /out/microagency /usr/local/bin/microagency
 EXPOSE 8080
