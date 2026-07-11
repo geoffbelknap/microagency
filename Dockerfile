@@ -24,15 +24,15 @@ RUN make engines minimizers \
 # ca-certificates lets microagency reach upstreams over TLS.
 FROM debian:bookworm-slim
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& apt-get install -y --no-install-recommends ca-certificates passwd \
 	&& rm -rf /var/lib/apt/lists/* \
 	# A non-root user (uid 65532) with a writable home. microagency keeps its
 	# state (refs, upstream tokens) under $HOME/.microagency, which on microplane
 	# rides the guest filesystem into the (encrypted) hibernation snapshot.
-	# Appended directly so the image doesn't depend on useradd being present.
-	&& echo 'nonroot:x:65532:65532::/home/nonroot:/bin/sh' >> /etc/passwd \
-	&& echo 'nonroot:x:65532:' >> /etc/group \
-	&& install -d -o 65532 -g 65532 /home/nonroot
+	# useradd (not a hand-written passwd line) so the matching shadow entry
+	# exists — the runtime's `su` drop authenticates through PAM, which rejects a
+	# user with no shadow record.
+	&& useradd --system --create-home --home-dir /home/nonroot --shell /bin/sh --uid 65532 nonroot
 ENV HOME=/home/nonroot
 COPY --from=build /out/microagency /usr/local/bin/microagency
 EXPOSE 8080
