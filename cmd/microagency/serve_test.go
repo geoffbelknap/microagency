@@ -33,7 +33,7 @@ func TestEffectiveAdminAddr(t *testing.T) {
 // serve the operator surface — /admin/* and /console 404 — while the separate
 // loopback admin listener serves both.
 func TestTunnelIsolatesOperatorSurface(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, "127.0.0.1:8765")
+	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "agent-tok"}
 
 	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, "op-tok")
@@ -103,7 +103,7 @@ func TestTunnelIsolatesOperatorSurface(t *testing.T) {
 // Without a tunnel or --admin-addr everything shares the single loopback
 // listener — the local default is unchanged.
 func TestOperatorSurfaceSharesListenerByDefault(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, "127.0.0.1:8765")
+	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", token: "agent-tok"} // bearer mode: no signer/issuer I/O
 
 	mcpMux, adminMux, _, _ := buildMuxes(srv, cfg, "op-tok")

@@ -127,6 +127,24 @@ func TestRouterRejectsEmptyName(t *testing.T) {
 	}
 }
 
+// TestRouterSurfacesUnavailableProvider: with the microVM path disabled
+// (--reduce-engines-only), a code reduce through the router fails with a
+// clear ErrProviderUnavailable rather than silently succeeding. No VM.
+func TestRouterSurfacesUnavailableProvider(t *testing.T) {
+	r := Router{
+		Provider: sandbox.UnavailableProvider{Reason: "engines-only"},
+		Gate:     budget.Gate{MaxBytes: 4096, Store: refstore.NewMemStore()},
+		CodePath: "/app/run.py",
+	}
+	_, err := r.Run(context.Background(), Request{Name: "x", Code: "print(1)"})
+	if err == nil {
+		t.Fatal("expected an error when the microVM provider is unavailable")
+	}
+	if !errors.Is(err, sandbox.ErrProviderUnavailable) {
+		t.Fatalf("error should wrap ErrProviderUnavailable, got %v", err)
+	}
+}
+
 // TestRouterInlineSmallResult: a small result comes back inline.
 func TestRouterInlineSmallResult(t *testing.T) {
 	requireVM(t)
