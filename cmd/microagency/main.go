@@ -121,6 +121,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "    --engine name=path    add a query engine (a wasip1 module)")
 	fmt.Fprintln(os.Stderr, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
 	fmt.Fprintln(os.Stderr, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
+	fmt.Fprintln(os.Stderr, "    --reduce-engines-only disable the microVM reduce path (wasm engines only; for hosts without nested virt)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  Add MCP servers from the console (http://<addr>/console), not here.")
 }
@@ -142,6 +143,11 @@ func run(args []string) {
 	maxInlineBytes := 8192
 	stdio, public, noRegister, foreground := false, false, false, false
 	persistRefs := false // opt-in: persist reffed payloads (encrypted, TTL'd) so refs survive restart
+	// reduceEnginesOnly disables the microVM reduce path (arbitrary-code reduce),
+	// leaving only the in-process wasm engines. Required where there is no nested
+	// virtualization to run a microVM in — e.g. microagency itself running inside
+	// a microVM.
+	reduceEnginesOnly := false
 	var engineSpecs []string
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -191,6 +197,8 @@ func run(args []string) {
 			public = true
 		case args[i] == "--persist-refs":
 			persistRefs = true
+		case args[i] == "--reduce-engines-only":
+			reduceEnginesOnly = true
 		case args[i] == "--no-register":
 			noRegister = true
 		case args[i] == "--foreground":
@@ -243,7 +251,7 @@ func run(args []string) {
 		}
 	}
 
-	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, consoleAddr(cfg))
+	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, reduceEnginesOnly, consoleAddr(cfg))
 
 	if stdio {
 		if err := srv.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
@@ -640,7 +648,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 		// interactively (refresh is silent), short enough that a leaked bearer has a
 		// bounded life. (Was 12h — a long-lived bearer with no revocation path.)
 		as := auth.NewAuthServer(signer, issuer, audience, 2*time.Hour)
-		as.Subject = localSubject() // attribute runs to the real OS user, not a generic "operator"
+		as.Subject = localSubject()        // attribute runs to the real OS user, not a generic "operator"
 		as.LoadClients(oauthClientsPath()) // remember DCR client_ids across restarts (no re-auth)
 		as.Register(mcpMux)
 		rs := &auth.ResourceServer{Issuer: issuer, Audience: audience, Keys: signer.KeySet()}
@@ -908,7 +916,7 @@ func loadOrCreateRefsKey(path string) ([]byte, error) {
 	return key, nil
 }
 
-func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs bool, consoleAddr string) *mcp.Server {
+func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly bool, consoleAddr string) *mcp.Server {
 	// One refstore backs the budget gate for both substrates AND the proxy path, so
 	// a reffed result is resolvable regardless of which produced it. maxInlineBytes
 	// (operator-set via --max-inline-bytes) is the single context budget everywhere.
@@ -924,8 +932,17 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 		}
 	}
 	gate := budget.Gate{MaxBytes: maxInlineBytes, Store: store}
+	// The microVM reduce path (arbitrary code) needs nested virtualization;
+	// where there is none, disable it and keep only the in-process wasm
+	// engines. A reduce that would have used the microVM then fails with a
+	// clear error instead of silently degrading.
+	var provider sandbox.Provider = sandbox.MicroagentProvider{}
+	if reduceEnginesOnly {
+		provider = sandbox.UnavailableProvider{Reason: "microagency is running with --reduce-engines-only (no microVM sandbox)"}
+		log.Printf("microagency: microVM reduce disabled (--reduce-engines-only); wasm engines only")
+	}
 	rt := router.Router{
-		Provider: sandbox.MicroagentProvider{},
+		Provider: provider,
 		Gate:     gate,
 		Image:    "docker.io/library/python:3.13-slim",
 		CodePath: "/app/run.py",
