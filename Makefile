@@ -21,7 +21,8 @@ test:
 # Build the workload OCI image with microagent (no Docker). Stages a static
 # binary (wasm engines embedded) + a CA bundle into dist/, bakes them onto the
 # base rootfs via image/microagency.microagent.yaml, and commits the result to
-# $(IMAGE_REF). Set PUSH=1 to publish (authenticate first with
+# $(IMAGE_REF) plus any $(EXTRA_REFS) (space-separated) from the same build.
+# Set PUSH=1 to publish (authenticate first with
 # `microagent registry login <registry> -u <user> --password-stdin`). Building
 # never boots a VM — the rootfs is assembled and extracted on the host
 # (mke2fs/debugfs) — so it runs anywhere microagent is installed.
@@ -33,7 +34,9 @@ image: engines minimizers
 	cp "$(CA_BUNDLE)" dist/ca-certificates.crt
 	microagent delete -y $(IMAGE_WORKSPACE) 2>/dev/null || true
 	microagent create -name $(IMAGE_WORKSPACE) -file image/microagency.microagent.yaml
-	microagent commit $(IMAGE_WORKSPACE) $(IMAGE_REF) $(if $(PUSH),--push,)
+	for ref in $(IMAGE_REF) $(EXTRA_REFS); do \
+		microagent commit $(IMAGE_WORKSPACE) $$ref $(if $(PUSH),--push,); \
+	done
 	microagent delete -y $(IMAGE_WORKSPACE)
 
 # Build the wasm-compute engines (wasip1) into the embed dir (cmd/microagency/
