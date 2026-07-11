@@ -2,8 +2,9 @@ package mcp
 
 import "testing"
 
-// A resource indicator that is a URL on a DIFFERENT origin than the upstream is
-// rejected; the upstream's own origin and a host-less audience identifier are allowed.
+// A non-empty resource indicator must be an absolute URL on the upstream's origin.
+// Host-less, opaque, and cross-origin values are rejected so attacker-controlled
+// protected-resource metadata cannot select a token audience unrelated to the upstream.
 func TestResourceAllowedForUpstream(t *testing.T) {
 	const up = "https://mcp.example.com/mcp"
 	cases := []struct {
@@ -12,10 +13,12 @@ func TestResourceAllowedForUpstream(t *testing.T) {
 	}{
 		{"https://mcp.example.com/mcp", true},       // exact
 		{"https://mcp.example.com", true},           // same origin, different path
-		{"microagency", true},                       // bare audience identifier (no host)
-		{"", true},                                  // empty parses to no host → allowed (caller fills it)
+		{"", true},                                  // empty is allowed only because the caller fills it
+		{"microagency", false},                      // bare audience identifier
+		{"urn:example:resource", false},             // opaque absolute URI with no host
+		{"/mcp", false},                             // relative URL
 		{"https://victim.example.com/api", false},   // cross-origin URL — the attack
-		{"http://mcp.example.com/mcp", false},       // scheme mismatch
+		{"http://mcp.example.com/mcp", false},       // same host, different scheme
 		{"https://mcp.example.com.evil.com", false}, // look-alike host
 	}
 	for _, c := range cases {

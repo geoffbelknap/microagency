@@ -68,17 +68,16 @@ func clientKey(issuer string) string {
 
 // resourceAllowedForUpstream reports whether an RFC 8707 resource indicator is safe
 // to send when authorizing this upstream. An empty indicator is filled in by the
-// caller; a host-less one (a bare audience identifier like "microagency") is allowed
-// because it can't name some other host's API; a URL indicator MUST share the
-// upstream's origin, so a malicious authorization server can't audience-bind the
-// token to an unrelated victim resource.
+// caller; any non-empty indicator must be an absolute URL on the upstream's origin.
+// A host-less or opaque audience identifier is attacker-controlled metadata too, and
+// could ask the AS for a token scoped to some resource unrelated to this MCP server.
 func resourceAllowedForUpstream(resource, upstreamURL string) bool {
-	ru, err := url.Parse(resource)
-	if err != nil {
-		return false
+	if resource == "" {
+		return true
 	}
-	if ru.Host == "" {
-		return true // bare audience identifier, not a cross-origin URL
+	ru, err := url.Parse(resource)
+	if err != nil || ru.Scheme == "" || ru.Host == "" {
+		return false
 	}
 	return sameOrigin(resource, upstreamURL)
 }
@@ -188,7 +187,7 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	if meta.Resource == "" {
 		meta.Resource = url
 	} else if !resourceAllowedForUpstream(meta.Resource, url) {
-		return "", fmt.Errorf("authorization server advertised resource indicator %q outside the upstream origin %q; refusing to bind a token to an unrelated resource", meta.Resource, url)
+		return "", fmt.Errorf("authorization server advertised resource indicator %q that is not an absolute URL on the upstream origin %q; refusing to bind a token to an unrelated resource", meta.Resource, url)
 	}
 	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL, suppliedClientID, suppliedClientSecret)
 	if err != nil {

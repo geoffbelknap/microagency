@@ -33,7 +33,13 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
 	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
-	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata("microagency", asURL))
+	var upstreamResource string
+	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              upstreamResource,
+			"authorization_servers": []string{asURL},
+		})
+	})
 	asTS.Config.Handler = asMux
 	asTS.Start()
 	defer asTS.Close()
@@ -53,6 +59,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer upTS.Close()
+	upstreamResource = upTS.URL
 
 	// microagency's admin API, with a plain client so it can reach the loopback mocks.
 	dir := t.TempDir()
@@ -177,7 +184,13 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
 	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
-	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata("microagency", asURL))
+	var upstreamResource string
+	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              upstreamResource,
+			"authorization_servers": []string{asURL},
+		})
+	})
 	asTS.Config.Handler = asMux
 	asTS.Start()
 	defer asTS.Close()
@@ -191,6 +204,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer upTS.Close()
+	upstreamResource = upTS.URL
 
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
@@ -219,6 +233,58 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	}
 }
 
+func TestConsoleOAuthAddRejectsHostlessResourceIndicator(t *testing.T) {
+	asTS := httptest.NewUnstartedServer(nil)
+	asURL := "http://" + asTS.Listener.Addr().String()
+	asMux := http.NewServeMux()
+	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              "victim-api",
+			"authorization_servers": []string{asURL},
+		})
+	})
+	asMux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 asURL,
+			"authorization_endpoint": asURL + "/authorize",
+			"token_endpoint":         asURL + "/token",
+		})
+	})
+	asTS.Config.Handler = asMux
+	asTS.Start()
+	defer asTS.Close()
+
+	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+asURL+`/.well-known/oauth-protected-resource"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer upTS.Close()
+
+	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
+	admin := httptest.NewServer(srv.AdminHandler("op"))
+	defer admin.Close()
+
+	body, _ := json.Marshal(map[string]any{"name": "evil", "url": upTS.URL})
+	req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer op")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("add upstream = %d, want 502", resp.StatusCode)
+	}
+	msg, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(msg), "resource indicator") || !strings.Contains(string(msg), "victim-api") {
+		t.Fatalf("expected resource-indicator rejection, got: %s", msg)
+	}
+}
+
 // TestConsoleReauthUpstream: re-auth of an already-registered upstream returns an
 // authorize URL carrying the newly-requested scope (change-scope-later path).
 func TestConsoleReauthUpstream(t *testing.T) {
@@ -230,7 +296,13 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
 	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
-	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata("microagency", asURL))
+	var upstreamResource string
+	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              upstreamResource,
+			"authorization_servers": []string{asURL},
+		})
+	})
 	asTS.Config.Handler = asMux
 	asTS.Start()
 	defer asTS.Close()
@@ -240,12 +312,16 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/oauth-protected-resource" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"resource":"x","authorization_servers":["` + asURL + `"]}`))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              upstreamResource,
+				"authorization_servers": []string{asURL},
+			})
 			return
 		}
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer upTS.Close()
+	upstreamResource = upTS.URL
 
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
@@ -305,8 +381,8 @@ func noDCRUpstream(t *testing.T) string {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	t.Cleanup(upTS.Close)
-	// The PR metadata (served by the AS host) points back at that AS.
-	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata("microagency", asURL))
+	// The PR metadata is served by the AS host, but names the upstream resource.
+	asMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(upTS.URL, asURL))
 	return upTS.URL
 }
 
@@ -438,15 +514,20 @@ func TestAdminOAuthScopesDiscovery(t *testing.T) {
 	defer asTS.Close()
 
 	// LimaCharlie-shaped upstream: public, advertises OAuth via well-known.
+	var upstreamResource string
 	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/oauth-protected-resource" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"resource":"x","authorization_servers":["` + asURL + `"]}`))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              upstreamResource,
+				"authorization_servers": []string{asURL},
+			})
 			return
 		}
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer upTS.Close()
+	upstreamResource = upTS.URL
 
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
