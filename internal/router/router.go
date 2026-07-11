@@ -1,5 +1,5 @@
 // Package router is the deterministic control plane: it validates a request,
-// runs the caller's code in a strict-egress (deny-all) compute-only sandbox via
+// runs the caller's code in a deny-all-egress compute-only sandbox via
 // the SandboxProvider seam over an optional Input payload, and passes the result
 // through the budget gate before it can reach the model. It does NOT import
 // microagent — all microVM specifics live behind the sandbox seam.
@@ -17,7 +17,7 @@ import (
 )
 
 // Request is a unit of work submitted to the router. Code is caller-authored
-// Python, run compute-only (strict deny-all egress) over zero or more Input
+// Python, run compute-only (deny-all egress) over zero or more Input
 // payload files made available to the guest at their Paths.
 type Request struct {
 	Name   string
@@ -85,13 +85,13 @@ func (r Router) Run(ctx context.Context, req Request) (Decision, error) {
 	}
 
 	res, err := r.Provider.Run(ctx, sandbox.Spec{
-		Name:           req.Name,
-		Image:          r.Image,
-		Code:           req.Code,
-		CodePath:       r.CodePath,
-		Command:        "python " + r.CodePath,
-		Inputs:         req.Inputs,
-		Timeout:        r.Timeout,
+		Name:     req.Name,
+		Image:    r.Image,
+		Code:     req.Code,
+		CodePath: r.CodePath,
+		Command:  "python " + r.CodePath,
+		Inputs:   req.Inputs,
+		Timeout:  r.Timeout,
 	})
 	if err != nil {
 		return Decision{}, err

@@ -11,8 +11,8 @@ import (
 )
 
 // MicroagentProvider runs a Spec as a microagent microVM. It always enforces
-// EgressMode=strict; the caller cannot disable it. StateDir defaults to
-// workspace.DefaultOptions().StateDir.
+// deny-all egress (broker mode with a locked, empty allowlist); the caller
+// cannot disable it. StateDir defaults to workspace.DefaultOptions().StateDir.
 type MicroagentProvider struct {
 	StateDir string // optional override; "" uses the workspace default
 }
@@ -59,7 +59,15 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	}
 	// microagent resolves its own guest binaries (relative to the installed
 	// microagent, not our binary) — we don't reach into its install layout.
-	opts.EgressMode = "strict" // always — callers cannot disable; no allowlist ⇒ deny-all (compute-only)
+	// Deny-all egress for compute-only reduce: mitm mode transparently
+	// mediates ALL egress (arbitrary reduce code won't cooperate with a
+	// forward proxy), and a LOCKED, empty allowlist reaches no destination
+	// while auditing every attempt. This is strict's faithful successor
+	// after the egress vocabulary change (strict → mitm + locked allowlist;
+	// broker is a cooperative forward proxy and would not intercept a direct
+	// connection). Callers cannot disable it.
+	opts.EgressMode = "mitm"
+	opts.EgressAllowlistLocked = true
 	opts.Files = []workspace.File{{SourcePath: codeFile, Path: spec.CodePath}}
 	// Optional input payloads (e.g. a reduce over one or more stored references):
 	// inject each as a guest file the script reads. They never leave the sandbox.
