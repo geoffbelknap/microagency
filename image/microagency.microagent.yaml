@@ -1,0 +1,24 @@
+# microagency workload image — built with microagent (no Docker).
+#
+# `make image` stages the statically-linked microagency binary (wasm reduce
+# engines embedded) and a CA bundle into ./dist, then `microagent create`
+# bakes them onto this base rootfs and `microagent commit` snapshots it into an
+# OCI image. Building never boots a VM: the rootfs is assembled and extracted on
+# the host (mke2fs/debugfs), so it runs anywhere microagent is installed.
+#
+# ubuntu:24.04 already carries /bin/sh, su, and a shadow-backed `ubuntu` user,
+# so the runtime's su-based user drop works with no in-guest useradd/apt. Run
+# the workload as `ubuntu` with HOME=/home/ubuntu; microagency keeps its state
+# (refs, upstream tokens) under $HOME/.microagency, which on microplane rides
+# the guest filesystem into the (encrypted) hibernation snapshot.
+name: microagency
+image: docker.io/library/ubuntu:24.04
+# src paths are resolved relative to THIS spec file's directory; `make image`
+# stages the artifacts into the repo-root dist/ (one level up).
+files:
+  - src: ../dist/microagency
+    dst: /usr/local/bin/microagency
+    mode: "0755"
+  - src: ../dist/ca-certificates.crt
+    dst: /etc/ssl/certs/ca-certificates.crt
+    mode: "0644"

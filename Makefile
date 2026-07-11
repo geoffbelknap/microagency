@@ -1,6 +1,11 @@
-.PHONY: build install test engines jq-engine text-engine html-engine sql-engine minimizers redactor-minimizer
+.PHONY: build install test image engines jq-engine text-engine html-engine sql-engine minimizers redactor-minimizer
 
 BUNDLED := cmd/microagency/bundled
+
+# Image build (no Docker). Override the destination or CA source as needed.
+IMAGE_REF ?= ghcr.io/geoffbelknap/microagency:latest
+CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
+IMAGE_WORKSPACE := microagency-image-build
 
 # build/install bundle the engines AND minimizers into the binary, so `microagency
 # up` works with nothing else to install.
@@ -12,6 +17,24 @@ install: engines minimizers
 
 test:
 	go test ./...
+
+# Build the workload OCI image with microagent (no Docker). Stages a static
+# binary (wasm engines embedded) + a CA bundle into dist/, bakes them onto the
+# base rootfs via image/microagency.microagent.yaml, and commits the result to
+# $(IMAGE_REF). Set PUSH=1 to publish (authenticate first with
+# `microagent registry login <registry> -u <user> --password-stdin`). Building
+# never boots a VM — the rootfs is assembled and extracted on the host
+# (mke2fs/debugfs) — so it runs anywhere microagent is installed.
+image: engines minimizers
+	@command -v microagent >/dev/null 2>&1 || { echo "microagent not found on PATH (brew install geoffbelknap/tap/microagent)"; exit 1; }
+	@test -r "$(CA_BUNDLE)" || { echo "CA bundle not readable: $(CA_BUNDLE) (set CA_BUNDLE=<path to ca-certificates.crt>)"; exit 1; }
+	mkdir -p dist
+	CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags "-s -w" -o dist/microagency ./cmd/microagency
+	cp "$(CA_BUNDLE)" dist/ca-certificates.crt
+	microagent delete -y $(IMAGE_WORKSPACE) 2>/dev/null || true
+	microagent create -name $(IMAGE_WORKSPACE) -file image/microagency.microagent.yaml
+	microagent commit $(IMAGE_WORKSPACE) $(IMAGE_REF) $(if $(PUSH),--push,)
+	microagent delete -y $(IMAGE_WORKSPACE)
 
 # Build the wasm-compute engines (wasip1) into the embed dir (cmd/microagency/
 # bundled/), so the binary ships with the declarative query engines.

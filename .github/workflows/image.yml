@@ -1,9 +1,10 @@
 name: Image
 
-# Build and publish the microagency container image to GHCR on every merge to
-# main and on version tags. The image is a self-contained MCP gateway (wasm
-# reduce engines embedded); platforms without nested virtualization run it
-# with --reduce-engines-only.
+# Build and publish the microagency workload OCI image with microagent (no
+# Docker). Building never boots a VM — microagent assembles the rootfs from the
+# base image plus the spec's baked files and extracts it on the host
+# (mke2fs/debugfs) — so it runs on a stock runner. Pull requests build only, to
+# validate the whole path; merges to main and version tags publish to GHCR.
 on:
   push:
     branches: [main]
@@ -22,33 +23,49 @@ concurrency:
 jobs:
   image:
     runs-on: ubuntu-latest
+    env:
+      REPO_IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # On PRs, build only (validate the Dockerfile) — no login, no push.
-      - name: Log in to GHCR
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # microagent provides the Docker-free image build (create + commit). The
+      # tap formula pulls in its Linux build deps (e2fsprogs for mke2fs/debugfs,
+      # passt) automatically.
+      - name: Install microagent
+        run: |
+          # Homebrew ships on the runner but is not on PATH by default.
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install geoffbelknap/tap/microagent
+          # Expose the brew bin (where microagent is linked) to later steps.
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          microagent version
+
+      # Always build (this validates the spec, the static binary, and the whole
+      # create/commit path on every PR). Commits to a throwaway local tag; the
+      # publish step re-tags and pushes it.
+      - name: Build image
+        run: make image IMAGE_REF="$REPO_IMAGE:ci-build"
+
+      - name: Publish to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=long
-            type=ref,event=tag
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | microagent registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          publish() {
+            microagent image tag "$REPO_IMAGE:ci-build" "$1"
+            microagent image push "$1"
+          }
+          publish "$REPO_IMAGE:sha-${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            publish "$REPO_IMAGE:latest"
+          fi
+          case "${{ github.ref }}" in
+            refs/tags/*) publish "$REPO_IMAGE:${GITHUB_REF_NAME}" ;;
+          esac
