@@ -46,26 +46,23 @@ jobs:
           echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
           microagent version
 
-      # Always build (this validates the spec, the static binary, and the whole
-      # create/commit path on every PR). Commits to a throwaway local tag; the
-      # publish step re-tags and pushes it.
-      - name: Build image
-        run: make image IMAGE_REF="$REPO_IMAGE:ci-build"
-
-      - name: Publish to GHCR
-        if: github.event_name != 'pull_request'
+      # `make image` runs the whole build (static binary + create + commit), so
+      # pull requests exercise and validate the entire path. Merges to main and
+      # version tags authenticate and commit-with-push to the destination tag.
+      # One tag per event: committing the same rootfs to a second tag needs an
+      # idempotent-blob commit (microagent >= the release that dedupes existing
+      # OCI-layout blobs); add an immutable :sha tag here once that ships.
+      - name: Build and publish image
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "$GHCR_TOKEN" | microagent registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          publish() {
-            microagent image tag "$REPO_IMAGE:ci-build" "$1"
-            microagent image push "$1"
-          }
-          publish "$REPO_IMAGE:sha-${{ github.sha }}"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            publish "$REPO_IMAGE:latest"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            make image IMAGE_REF="$REPO_IMAGE:ci-validate"
+            exit 0
           fi
+          echo "$GHCR_TOKEN" | microagent registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ref="$REPO_IMAGE:latest"
           case "${{ github.ref }}" in
-            refs/tags/*) publish "$REPO_IMAGE:${GITHUB_REF_NAME}" ;;
+            refs/tags/*) ref="$REPO_IMAGE:${GITHUB_REF_NAME}" ;;
           esac
+          make image PUSH=1 IMAGE_REF="$ref"
