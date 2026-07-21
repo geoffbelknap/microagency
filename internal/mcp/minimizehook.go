@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	"microagency/internal/minimize"
 	"microagency/internal/sandbox"
@@ -120,7 +121,12 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 		// upstream that produced them — so they resolve only on that principal's calls
 		// back to this same upstream.
 		scope := minimize.TokenScope{Owner: principalOf(ctx).Subject, Upstream: upstream}
-		_ = s.tokens.Put(scope, out.Tokens)
+		if err := s.tokens.Put(scope, out.Tokens); err != nil {
+			// A dropped binding means a placeholder the model later echoes back won't
+			// resolve to its real value on the outbound call — surface it rather than
+			// fail silently at a distance.
+			log.Printf("microagency: persist minimizer token bindings for %s: %v", upstream, err)
+		}
 	}
 	var scrubbed map[string]any
 	if err := json.Unmarshal(out.Transformed, &scrubbed); err != nil {
