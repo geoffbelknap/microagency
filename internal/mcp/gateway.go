@@ -657,22 +657,33 @@ var truncationMarkers = []string{"--- truncated", "truncated ---", "[truncated",
 
 // truncatedNotice reports whether payload is a truncation/notice rather than the
 // clean data the ref/reduce path assumes, returning the message to surface. It fires
-// on (a) a known truncation marker, or (b) a payload that CLAIMS to be JSON (starts
-// with { or [) but does not parse — a response cut mid-structure. A payload that
-// isn't claiming to be JSON (a prose document) is never flagged, so real documents
-// still ref normally.
+// on (a) a known truncation marker in the tail, or (b) a payload that CLAIMS to be
+// JSON (starts with { or [) but does not parse — a response cut mid-structure.
+//
+// Well-formed JSON is exempt first: a complete JSON result is data even when a
+// string value inside it ends with a phrase like "...output truncated" (a
+// log-search hit, say), so the marker there is content, not an appended cut notice
+// — flagging it would DISCARD a valid result. A genuine truncation cut mid-structure
+// won't parse (or has the marker appended after the close, which also won't parse),
+// so it still falls to the branches below. A non-JSON prose document with no marker
+// is likewise never flagged, so real documents ref normally.
 func truncatedNotice(payload string) (string, bool) {
+	if tr := strings.TrimSpace(payload); len(tr) > 0 && (tr[0] == '{' || tr[0] == '[') && json.Valid([]byte(tr)) {
+		return "", false
+	}
 	low := strings.ToLower(payload)
 	for _, m := range truncationMarkers {
 		// A real truncation marker is APPENDED at the END of the payload. A document
-		// that merely MENTIONS the marker (e.g. this backlog page documenting the
+		// that merely MENTIONS the marker (e.g. a backlog page documenting the
 		// Cloudflare incident) has it mid-content — so only treat it as truncation
 		// when it sits in the tail. Use the last occurrence + a tight tail window.
+		// (This runs before the generic invalid-JSON message so the upstream's own
+		// guidance is surfaced even for JSON cut mid-structure with a marker.)
 		if i := strings.LastIndex(low, m); i >= 0 && len(payload)-i <= 512 {
 			return truncationTail(payload, i), true
 		}
 	}
-	if tr := strings.TrimSpace(payload); len(tr) > 0 && (tr[0] == '{' || tr[0] == '[') && !json.Valid([]byte(tr)) {
+	if tr := strings.TrimSpace(payload); len(tr) > 0 && (tr[0] == '{' || tr[0] == '[') {
 		return "the upstream returned malformed or truncated JSON (it did not parse)", true
 	}
 	return "", false

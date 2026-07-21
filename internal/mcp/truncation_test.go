@@ -28,6 +28,10 @@ func TestTruncatedNotice(t *testing.T) {
 		{"prose document", "Here is the result of view for the Page. Lots of real content follows.", false},
 		{"doc mentioning the marker mid-content", `{"text":"The Cloudflare MCP appended --- TRUNCATED --- to the response. ` + strings.Repeat("More documentation about the incident. ", 40) + `"}`, false},
 		{"marker in the tail", `{"result":"partial data...` + strings.Repeat("x", 100) + " --- TRUNCATED --- narrow your query.", true},
+		// A COMPLETE JSON result whose own content ends with a marker phrase is data,
+		// not a cut notice — it must not be discarded (regression for the false positive).
+		{"valid JSON ending in a marker string", `[{"line":"connection reset"},{"line":"output truncated"}]`, false},
+		{"valid JSON object with marker value", `{"log":"stream ended: response truncated"}`, false},
 		{"empty", "", false},
 	}
 	for _, c := range cases {
@@ -104,6 +108,27 @@ func TestTruncatedPayloadSurfacedNotReffed(t *testing.T) {
 	// The broken 7KB blob must not have been parked as a ref.
 	if blob, _ := json.Marshal(out); strings.Contains(string(blob), "example.com") {
 		t.Fatal("the broken payload rode inline instead of just the notice")
+	}
+}
+
+// A large, VALID result whose CONTENT ends with a truncation marker phrase (a log
+// search returning a line that literally reads "output truncated") must still ref —
+// the marker is data, not an appended cut notice, so it must not be discarded.
+func TestValidJSONContainingMarkerStillReffed(t *testing.T) {
+	valid := `[` + strings.Repeat(`{"line":"connection reset by peer"},`, 200) +
+		`{"line":"upstream response: output truncated"}]`
+	up := textUpstream(t, valid)
+	defer up.Close()
+	rs := refstore.NewMemStore()
+	s := truncTestServer(t, up, rs)
+
+	out := call(t, s, "call_tool", map[string]any{"name": "u__get", "arguments": map[string]any{}})
+	inner := toolContentJSON(t, out)
+	if tr, _ := inner["truncated"].(bool); tr {
+		t.Fatalf("valid JSON containing a marker phrase was wrongly flagged as truncated: %v", inner)
+	}
+	if r, _ := inner["reffed"].(bool); !r {
+		t.Fatalf("valid result containing a marker should still ref: %v", inner)
 	}
 }
 

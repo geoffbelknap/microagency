@@ -93,6 +93,11 @@ type Server struct {
 	// the caller gave up.
 	inflight *inflight
 
+	// persistMu serializes the read-modify-write of upstreams.json so concurrent
+	// admin handlers and the OAuth callback can't interleave and lose a persisted
+	// registration. It guards on-disk state only, independent of mu (in-memory maps).
+	persistMu sync.Mutex
+
 	mu         sync.Mutex
 	auditMu    sync.Mutex // serializes audit appends (the hash chain must not fork)
 	auditHash  string     // last written chain hash; "" before the first chained line

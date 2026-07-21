@@ -84,128 +84,147 @@ func (s *Server) loadRegistrations() []upstreamReg {
 	return regs
 }
 
+// writeRegistrations persists regs atomically: write a sibling temp file, then
+// rename it over upstreams.json so a crash mid-write can't leave a torn or empty
+// registry. Callers hold persistMu (via updateRegistrations).
 func (s *Server) writeRegistrations(regs []upstreamReg) {
 	if err := os.MkdirAll(s.stateDir, 0o700); err != nil {
 		log.Printf("microagency: persist upstream registration: %v", err)
 		return
 	}
 	b, _ := json.Marshal(regs)
-	if err := os.WriteFile(s.registrationsPath(), b, 0o600); err != nil {
+	tmp, err := os.CreateTemp(s.stateDir, "upstreams-*.json.tmp")
+	if err != nil {
 		log.Printf("microagency: persist upstream registration: %v", err)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		log.Printf("microagency: persist upstream registration: %v", err)
+		return
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		log.Printf("microagency: persist upstream registration: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		log.Printf("microagency: persist upstream registration: %v", err)
+		return
+	}
+	if err := os.Rename(tmpName, s.registrationsPath()); err != nil {
+		log.Printf("microagency: persist upstream registration: %v", err)
+	}
+}
+
+// updateRegistrations applies fn to the persisted registrations under persistMu
+// and writes the result atomically when fn reports a change. Serializing the whole
+// load-modify-write is what makes the six mutators below safe against concurrent
+// admin handlers and the OAuth callback — an unlocked read-modify-write can drop a
+// registration whose write interleaved with another. A no-op without a stateDir.
+func (s *Server) updateRegistrations(fn func([]upstreamReg) ([]upstreamReg, bool)) {
+	if s.stateDir == "" {
+		return
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	next, changed := fn(s.loadRegistrations())
+	if changed {
+		s.writeRegistrations(next)
 	}
 }
 
 // persistRegistration records (or updates) an upstream registration so it reloads
 // across restarts. Best-effort; a no-op without a stateDir.
 func (s *Server) persistRegistration(name, url string, discover bool, authKind, owner string) {
-	if s.stateDir == "" {
-		return
-	}
-	reg := upstreamReg{Name: name, URL: url, Discover: discover, Auth: authKind, Owner: owner}
-	regs := s.loadRegistrations()
-	updated := false
-	for i := range regs {
-		if regs[i].Name == name {
-			reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
-			if reg.Owner == "" {
-				reg.Owner = regs[i].Owner // preserve owner scoping across re-registration (e.g. reauth)
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		reg := upstreamReg{Name: name, URL: url, Discover: discover, Auth: authKind, Owner: owner}
+		for i := range regs {
+			if regs[i].Name == name {
+				reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
+				if reg.Owner == "" {
+					reg.Owner = regs[i].Owner // preserve owner scoping across re-registration (e.g. reauth)
+				}
+				regs[i] = reg
+				return regs, true
 			}
-			regs[i] = reg
-			updated = true
-			break
 		}
-	}
-	if !updated {
-		regs = append(regs, reg)
-	}
-	s.writeRegistrations(regs)
+		return append(regs, reg), true
+	})
 }
 
 // persistOwner updates just the owner scoping of a persisted registration, so a
 // reassignment survives restart independently of the add/enable path.
 func (s *Server) persistOwner(name, owner string) {
-	if s.stateDir == "" {
-		return
-	}
-	regs := s.loadRegistrations()
-	for i := range regs {
-		if regs[i].Name == name {
-			regs[i].Owner = owner
-			s.writeRegistrations(regs)
-			return
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].Owner = owner
+				return regs, true
+			}
 		}
-	}
+		return regs, false
+	})
 }
 
 // persistReadOnly updates just the read-only flag of a persisted registration, so
 // the setting survives restart independently of the add/enable path.
 func (s *Server) persistReadOnly(name string, ro bool) {
-	if s.stateDir == "" {
-		return
-	}
-	regs := s.loadRegistrations()
-	for i := range regs {
-		if regs[i].Name == name {
-			regs[i].ReadOnly = ro
-			s.writeRegistrations(regs)
-			return
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].ReadOnly = ro
+				return regs, true
+			}
 		}
-	}
+		return regs, false
+	})
 }
 
 // persistMinimize updates just the field-minimization policy of a persisted
 // registration, so it survives restart independently of the add/enable path. An
 // empty policy clears it.
 func (s *Server) persistMinimize(name, policy string) {
-	if s.stateDir == "" {
-		return
-	}
-	regs := s.loadRegistrations()
-	for i := range regs {
-		if regs[i].Name == name {
-			regs[i].Minimize = policy
-			s.writeRegistrations(regs)
-			return
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].Minimize = policy
+				return regs, true
+			}
 		}
-	}
+		return regs, false
+	})
 }
 
 // markRegistrationEnabled flips a persisted registration's discover flag off, so an
 // upstream the operator enabled reloads as enabled (invocable), not discovered. A
 // no-op if the upstream was never persisted.
 func (s *Server) markRegistrationEnabled(name string) {
-	if s.stateDir == "" {
-		return
-	}
-	regs := s.loadRegistrations()
-	changed := false
-	for i := range regs {
-		if regs[i].Name == name && regs[i].Discover {
-			regs[i].Discover = false
-			changed = true
-			break
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name && regs[i].Discover {
+				regs[i].Discover = false
+				return regs, true
+			}
 		}
-	}
-	if changed {
-		s.writeRegistrations(regs)
-	}
+		return regs, false
+	})
 }
 
 // removeRegistration deletes an upstream's persisted registration and any stored
 // credential, so a removed upstream stays gone across restarts. Best-effort.
 func (s *Server) removeRegistration(ctx context.Context, name string) {
-	if s.stateDir != "" {
-		regs := s.loadRegistrations()
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
 		kept := make([]upstreamReg, 0, len(regs))
 		for _, r := range regs {
 			if r.Name != name {
 				kept = append(kept, r)
 			}
 		}
-		if len(kept) != len(regs) {
-			s.writeRegistrations(kept)
-		}
-	}
+		return kept, len(kept) != len(regs)
+	})
 	if s.secrets != nil {
 		if err := s.secrets.Delete(ctx, tokenKey(name)); err != nil && err != secretstore.ErrNotFound {
 			log.Printf("microagency: remove upstream %q secret: %v", name, err)
