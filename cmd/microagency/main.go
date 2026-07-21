@@ -692,11 +692,14 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	}
 
 	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, operatorToken, mcpBearer)
+
+	mcpSrv := newHTTPServer(cfg.addr, mcpMux)
+	var adminSrv *http.Server
 	if adminMux != mcpMux {
-		adminAddr := effectiveAdminAddr(cfg)
+		adminSrv = newHTTPServer(effectiveAdminAddr(cfg), adminMux)
 		go func() {
-			if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
-				log.Fatalf("microagency: admin listener %s: %v", adminAddr, err)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("microagency: admin listener %s: %v", adminSrv.Addr, err)
 			}
 		}()
 	}
@@ -705,24 +708,59 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 
 	// A tunnel exposes the loopback bind publicly so a web app can reach it. We run
 	// the user's installed provider; we never operate a tunnel ourselves.
+	var tun *tunnel.Tunnel
 	if cfg.tunnel != "" {
-		tun, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
+		t, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
 		if err != nil {
 			log.Fatalf("microagency: %v", err)
 		}
-		go func() {
-			c := make(chan os.Signal, 1)
-			signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-			<-c
-			_ = tun.Close()
-			os.Exit(0)
-		}()
+		tun = t
 		fmt.Fprintf(os.Stderr, "  Public URL     %s/mcp  (paste into a web app's connector)\n\n", tun.PublicURL)
 	}
 
-	if err := http.ListenAndServe(cfg.addr, mcpMux); err != nil {
+	// Graceful shutdown: on SIGINT/SIGTERM (what `microagency down` sends) stop
+	// accepting, drain in-flight calls and their audit appends within a bounded
+	// window, and close the tunnel — instead of the old os.Exit(0) that dropped
+	// requests and half-written audit lines mid-flight.
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+		if tun != nil {
+			_ = tun.Close()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if adminSrv != nil {
+			_ = adminSrv.Shutdown(ctx)
+		}
+		_ = mcpSrv.Shutdown(ctx) // unblocks ListenAndServe below → clean return
+	}()
+
+	if err := mcpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "microagency: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// shutdownGrace bounds how long a SIGTERM drain waits for in-flight requests
+// before the process exits. `microagency down` doesn't block on it, so it can be
+// generous enough to let a normal call finish without stalling shutdown for a
+// long-running reduce.
+const shutdownGrace = 10 * time.Second
+
+// newHTTPServer builds a listener with timeouts instead of the bare
+// http.ListenAndServe. ReadHeaderTimeout is the slowloris defense on the public
+// tunneled bind; IdleTimeout reaps idle keep-alives. Read/WriteTimeout are
+// deliberately unset — a reduce or a slow upstream tool can legitimately stream
+// for minutes (the upstream client caps at 5m), and a write deadline would sever
+// those mid-response.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
