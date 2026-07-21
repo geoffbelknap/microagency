@@ -108,7 +108,11 @@ func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata
 	if suppliedID != "" {
 		if s.secrets != nil {
 			b, _ := json.Marshal(storedClient{ClientID: suppliedID, ClientSecret: suppliedSecret})
-			_ = s.secrets.Save(ctx, key, b)
+			if err := s.secrets.Save(ctx, key, b); err != nil {
+				// Not fatal — the supplied client is used this session — but a failed
+				// persist means it won't survive a restart, so surface it.
+				log.Printf("microagency: persist OAuth client for %s: %v", meta.Issuer, err)
+			}
 		}
 		return suppliedID, suppliedSecret, nil
 	}
@@ -130,7 +134,11 @@ func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata
 	}
 	if s.secrets != nil {
 		b, _ := json.Marshal(storedClient{ClientID: id, ClientSecret: secret})
-		_ = s.secrets.Save(ctx, key, b)
+		if err := s.secrets.Save(ctx, key, b); err != nil {
+			// A dynamically-registered client that fails to persist re-registers a fresh
+			// app on the next add/reauth (a duplicate on the AS side), so surface it.
+			log.Printf("microagency: persist registered OAuth client for %s: %v", meta.Issuer, err)
+		}
 	}
 	return id, secret, nil
 }

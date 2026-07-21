@@ -2,11 +2,46 @@ package refstore
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// A failed ref write must be LOGGED (not swallowed): otherwise Put hands back a
+// live-looking handle whose Get later fails with "unknown reference" — a confusing
+// failure at a distance.
+func TestFileStorePutLogsWriteError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("a write-permission failure can't be forced as root")
+	}
+	dir := filepath.Join(t.TempDir(), "refs")
+	fs, err := NewFileStore(dir, testKey(), 0, 0)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	// Make the store directory read+execute but not writable, so mintLocked can still
+	// stat (the ref file is absent → IsNotExist → mint proceeds) but writeLocked's
+	// WriteFile fails deterministically.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	ref, _ := fs.Put("payload that can't be written")
+	if _, ok := fs.Get(ref); ok {
+		t.Fatal("Get should fail after the write failed")
+	}
+	if !strings.Contains(buf.String(), "persist ref") {
+		t.Fatalf("write failure was not logged: %q", buf.String())
+	}
+}
 
 func testKey() []byte {
 	k := make([]byte, 32)

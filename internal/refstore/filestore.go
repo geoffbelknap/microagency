@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,7 +57,12 @@ func (s *FileStore) Put(payload string) (Ref, Summary) {
 	defer s.mu.Unlock()
 	ref, name := s.mintLocked()
 	if name != "" {
-		_ = s.writeLocked(name, payload)
+		if err := s.writeLocked(name, payload); err != nil {
+			// Put's signature can't return this, but a silent failure hands back a
+			// live-looking ref whose Get later fails with "unknown reference" — a
+			// confusing failure at a distance. Surface it here, at the source.
+			log.Printf("microagency: persist ref %s: %v", ref, err)
+		}
 	}
 	s.sweepLocked() // after the write, so the cap counts the new entry (never evicts it — it's newest)
 	return ref, Summary{Bytes: len(payload)}
