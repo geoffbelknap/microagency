@@ -36,7 +36,7 @@ func TestTunnelIsolatesOperatorSurface(t *testing.T) {
 	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "agent-tok"}
 
-	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, "op-tok", "")
 	if mode != "bearer" || bearer != "agent-tok" {
 		t.Fatalf("mode/bearer = %q/%q, want bearer/agent-tok", mode, bearer)
 	}
@@ -100,13 +100,51 @@ func TestTunnelIsolatesOperatorSurface(t *testing.T) {
 	}
 }
 
+// A tunnel with no --token must serve /mcp behind a DISTINCT bearer, never the
+// operator token — otherwise the credential pasted into a public web connector is
+// also the one gating /admin + /console. The operator token must not authenticate
+// the agent plane.
+func TestTunnelBearerIsDistinctFromOperatorToken(t *testing.T) {
+	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
+	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare"} // no --token
+
+	mcpMux, _, mode, bearer := buildMuxes(srv, cfg, "op-tok", "mcp-bearer-tok")
+	if mode != "bearer" {
+		t.Fatalf("mode = %q, want bearer", mode)
+	}
+	if bearer == "op-tok" {
+		t.Fatal("the tunnel /mcp bearer must NOT be the operator token")
+	}
+	if bearer != "mcp-bearer-tok" {
+		t.Fatalf("bearer = %q, want the distinct mcp bearer", bearer)
+	}
+
+	// The operator token must be rejected at /mcp (planes use different secrets).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer op-tok")
+	mcpMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/mcp with the operator token = %d, want 401 (operator token must not reach the agent plane)", rec.Code)
+	}
+
+	// The distinct bearer authenticates /mcp (past auth → not 401).
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req2.Header.Set("Authorization", "Bearer mcp-bearer-tok")
+	mcpMux.ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusUnauthorized {
+		t.Fatal("/mcp with the distinct bearer = 401, want authenticated")
+	}
+}
+
 // Without a tunnel or --admin-addr everything shares the single loopback
 // listener — the local default is unchanged.
 func TestOperatorSurfaceSharesListenerByDefault(t *testing.T) {
 	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", token: "agent-tok"} // bearer mode: no signer/issuer I/O
 
-	mcpMux, adminMux, _, _ := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, _, _ := buildMuxes(srv, cfg, "op-tok", "")
 	if adminMux != mcpMux {
 		t.Fatal("without a tunnel or --admin-addr, the operator surface should share the agent listener")
 	}

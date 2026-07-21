@@ -229,8 +229,12 @@ The tunnel exposes only `/mcp` and the OAuth endpoints. The operator surface
 (`/admin` and the console) moves to its own loopback listener,
 `127.0.0.1:8766` by default or wherever `--admin-addr` points, so it isn't
 network-reachable from the public bind at all. It's also gated by the
-separate operator token, so an agent's OAuth token can never reach admin. If
-you front `--issuer` with your own reverse proxy instead of a tunnel, set
+operator token — which is a **different secret** from the `/mcp` bearer: a
+tunnel with no `--token` mints a distinct MCP bearer at
+`~/.microagency/mcp-bearer` for the connector, so the token you paste into a
+public web app is not the one that gates `/admin`. Both the network split and
+the credential split hold, so an agent's bearer can never reach admin. If you
+front `--issuer` with your own reverse proxy instead of a tunnel, set
 `--admin-addr` yourself to keep the operator surface off the proxied
 listener.
 
@@ -273,5 +277,8 @@ The guarantees, and where each one is enforced:
   just the operator who holds the private one. Wholesale tail truncation still
   needs an external anchor; see "The audit chain".
 - Plane separation. The operator surface (admin API and console) uses its own
-  token, and in public mode it moves to a loopback listener the tunnel never
-  exposes. An agent's OAuth token can never reach admin.
+  token — distinct from the agent's `/mcp` bearer, including the tunnel path,
+  which mints a dedicated MCP bearer rather than reusing the operator token —
+  and in public mode it moves to a loopback listener the tunnel never exposes.
+  Neither the credential split nor the network split alone is load-bearing: an
+  agent's bearer can never reach admin.

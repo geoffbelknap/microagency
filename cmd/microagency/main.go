@@ -609,7 +609,7 @@ func consoleAddr(cfg httpConfig) string {
 // two muxes are distinct and the agent plane cannot route to the operator
 // surface at all; otherwise both share one mux. mode and bearer feed the
 // connect banner.
-func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, adminMux *http.ServeMux, mode, bearer string) {
+func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string) (mcpMux, adminMux *http.ServeMux, mode, bearer string) {
 	audience := cfg.audience
 	if audience == "" {
 		audience = "microagency"
@@ -630,9 +630,14 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 	case cfg.token != "" || cfg.tunnel != "":
 		// Static bearer: explicit --token, or a tunnel (a web connector UI needs a
 		// pasteable token; OAuth-over-tunnel needs a public issuer — a follow-up).
+		// A tunnel with no --token uses a DISTINCT persisted MCP bearer, never the
+		// operator token: the connector token is pasted into a public web app, and
+		// reusing the operator token would put the /admin + /console credential on the
+		// public tunnel. The loopback admin bind is then defense in depth, not the only
+		// thing separating the planes.
 		bearer = cfg.token
 		if bearer == "" {
-			bearer = operatorToken
+			bearer = mcpBearer
 		}
 		mcpMux.Handle("/mcp", srv.HTTPHandler(bearer))
 		mode = "bearer"
@@ -679,8 +684,14 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 // /admin + /console always sit behind a persistent operator token.
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
+	// A tunnel with no --token needs a pasteable /mcp bearer that is NOT the operator
+	// token. Mint/read a distinct one; its file is what the connect banner points at.
+	mcpBearer, mcpBearerFile := "", ""
+	if cfg.tunnel != "" && cfg.token == "" {
+		mcpBearer, mcpBearerFile = persistentMCPBearer()
+	}
 
-	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, operatorToken)
+	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, operatorToken, mcpBearer)
 	if adminMux != mcpMux {
 		adminAddr := effectiveAdminAddr(cfg)
 		go func() {
@@ -690,7 +701,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		}()
 	}
 
-	announce(srv, cfg, mode, bearer, opTokenFile)
+	announce(srv, cfg, mode, bearer, mcpBearerFile, opTokenFile)
 
 	// A tunnel exposes the loopback bind publicly so a web app can reach it. We run
 	// the user's installed provider; we never operate a tunnel ourselves.
@@ -719,7 +730,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 // login flow, so we hand over no token — we auto-register just the URL with Claude
 // Code (no token in argv either) and the client opens the one-click approve page.
 // For bearer the token reaches Claude Code via the subprocess, never the shell.
-func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string) {
+func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, bearerFile, opTokenFile string) {
 	url := "http://" + cfg.addr + "/mcp"
 
 	// Auto-register with Claude Code — a side effect that runs regardless of whether
@@ -750,17 +761,17 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string)
 			fmt.Fprintf(os.Stderr, "  Auth           OAuth (issuer %s)\n", cfg.issuer)
 		}
 	case "bearer":
-		manualFile := opTokenFile
-		if cfg.token != "" {
-			manualFile = "" // explicit --token: the user knows it; don't point at the wrong file
-		}
+		// The pasteable /mcp bearer lives in bearerFile (the distinct MCP bearer for a
+		// tunnel with no --token); "" for an explicit --token the user already knows.
+		// Never point the connector at the operator token file.
+		manualFile := bearerFile
 		if registered {
 			fmt.Fprintf(os.Stderr, "  Connected      Claude Code (project scope). Remove with: claude mcp remove microagency\n")
 		} else {
 			printManualConnect(url, manualFile)
 		}
 		if cfg.tunnel != "" && manualFile != "" {
-			fmt.Fprintf(os.Stderr, "  Public note    a web connector UI needs the token: cat %s\n", opTokenFile)
+			fmt.Fprintf(os.Stderr, "  Public note    a web connector UI needs the bearer: cat %s\n", manualFile)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "  Console        http://%s/console   (operator token: cat %s)\n", consoleAddr(cfg), opTokenFile)
@@ -871,12 +882,25 @@ func oauthClientsPath() string {
 // persistentToken reads-or-mints a stable bearer token at ~/.microagency/token
 // (0600), so the client config and any auto-registration survive restarts. file is
 // "" only when there is no home directory.
-func persistentToken() (token, file string) {
+// persistentToken is the OPERATOR token: it gates /admin + /console. It must
+// never double as the agent-facing /mcp bearer (see persistentMCPBearer).
+func persistentToken() (token, file string) { return persistentTokenAt("token") }
+
+// persistentMCPBearer is the agent-facing /mcp bearer for the static-bearer path
+// (a tunnel with no --token). It is DISTINCT from the operator token so a
+// connector token disclosed to a public web app can never reach the operator
+// plane — even before the loopback admin bind is the only thing between them.
+func persistentMCPBearer() (token, file string) { return persistentTokenAt("mcp-bearer") }
+
+// persistentTokenAt reads (or mints and 0600-persists) a random token in
+// ~/.microagency/<name>, so it survives restarts. A missing home dir falls back
+// to an ephemeral token (no file).
+func persistentTokenAt(name string) (token, file string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return randomToken(), ""
 	}
-	file = filepath.Join(home, ".microagency", "token")
+	file = filepath.Join(home, ".microagency", name)
 	if b, err := os.ReadFile(file); err == nil {
 		if t := strings.TrimSpace(string(b)); t != "" {
 			return t, file
