@@ -75,8 +75,8 @@ type Server struct {
 	// the placeholder→value bindings for tokenized fields, resolved back on the way
 	// to the upstream. minimizePolicies is the per-upstream policy (nil policy for an
 	// upstream = passthrough), guarded by mu.
-	minimizer        minimize.Module
-	tokens           minimize.TokenStore
+	minimizer minimize.Module
+	tokens    minimize.TokenStore
 	// tokenSalt keys placeholder derivation in the minimizer (a per-session secret,
 	// never exposed to the model) so tokenized low-entropy values can't be brute-
 	// forced from their placeholders. Set when a minimizer is installed.
@@ -104,15 +104,28 @@ type Server struct {
 	// but a key-less attacker who recomputes hashes is not stopped).
 	auditSigner auditSigner
 
-	mu         sync.Mutex
-	auditMu    sync.Mutex // serializes audit appends (the hash chain must not fork)
-	auditHash  string     // last written chain hash; "" before the first chained line
-	seq        int
+	mu        sync.Mutex
+	auditMu   sync.Mutex // serializes audit appends (the hash chain must not fork)
+	auditHash string     // last written chain hash; "" before the first chained line
+	seq       int
+	// runs is a BOUNDED window of the most recent runs (the durable audit log on
+	// disk is the complete record). runOrder tracks insertion order so the oldest is
+	// evicted once maxRuns is reached — without a cap, a long-lived daemon's map grew
+	// forever and every /admin/runs poll and Metrics scan walked all of it under mu.
 	runs       map[string]runRecord
+	runOrder   []string
+	maxRuns    int
+	runsTotal  int                   // all-time run count (survives window eviction), for Metrics.TotalRuns
+	impact     Impact                // all-time cumulative impact, accumulated as runs are recorded
 	upstreams  map[string]*upstream  // aggregated MCP servers (enabled or discovered), by name
 	toolUsage  map[string]int        // per-tool invocation counts, a find_tools ranking signal
 	oauthFlows map[string]*oauthFlow // pending console OAuth-add flows, keyed by state
 }
+
+// defaultMaxRuns bounds the in-memory recent-run window. The complete history
+// lives in the durable audit log; this is what /admin/runs and the by-substrate
+// metrics breakdown scan, so it must stay bounded.
+const defaultMaxRuns = 5000
 
 // Option configures a Server.
 type Option func(*Server)
@@ -142,8 +155,8 @@ type runRecord struct {
 	Bytes       int    `json:"bytes"`
 	// Protected is the count of sensitive field values minimized (redacted or
 	// tokenized) on this proxy call — the field-level minimization impact.
-	Protected int    `json:"protected,omitempty"`
-	ExitCode  int    `json:"exit_code"`
+	Protected int `json:"protected,omitempty"`
+	ExitCode  int `json:"exit_code"`
 	// Stderr is the guest's captured stderr (or console log on a guest failure),
 	// bounded — OPERATOR-BOUND diagnostics surfaced via /admin/runs. It is never
 	// part of the agent-facing tool result: guest output over the input can echo
@@ -156,8 +169,9 @@ type runRecord struct {
 
 func NewServer(r Runner, opts ...Option) *Server {
 	s := &Server{
-		runner:     r,
+		runner:           r,
 		runs:             map[string]runRecord{},
+		maxRuns:          defaultMaxRuns,
 		toolUsage:        map[string]int{},
 		oauthFlows:       map[string]*oauthFlow{},
 		minimizePolicies: map[string][]byte{},
@@ -181,6 +195,12 @@ func WithSecretStore(s2 secretstore.Store) Option { return func(s *Server) { s.s
 // WithStateDir sets the directory for non-secret persisted state (the upstream
 // registrations index), so OAuth upstreams reload across restarts.
 func WithStateDir(dir string) Option { return func(s *Server) { s.stateDir = dir } }
+
+// WithMaxRuns bounds the in-memory recent-run window (0 = unbounded). The durable
+// audit log keeps the complete history regardless; this caps what /admin/runs and
+// the metrics breakdown scan. Applied before the audit replay, so a restart honors
+// it too.
+func WithMaxRuns(n int) Option { return func(s *Server) { s.maxRuns = n } }
 
 // auditSigner signs and verifies audit-chain hashes. *auth.Signer (ES256/P-256)
 // satisfies it; kept as a narrow interface so the audit log doesn't import auth
@@ -381,9 +401,45 @@ func (s *Server) putRun(id string, rec runRecord) {
 		rec.Timestamp = time.Now()
 	}
 	s.mu.Lock()
-	s.runs[id] = rec
+	s.addRunLocked(id, rec)
 	s.mu.Unlock()
 	s.appendAudit(id, rec) // durable, append-only — the audit outlives the process
+}
+
+// addRunLocked records a run in the bounded in-memory window and folds it into the
+// all-time cumulative counters, evicting the oldest window entry past maxRuns. The
+// cumulative impact/total are accumulated on first insert (so they stay complete
+// even after the window evicts a run), and recomputed from the durable log on
+// restart via loadAudit. Caller holds s.mu.
+func (s *Server) addRunLocked(id string, rec runRecord) {
+	if _, exists := s.runs[id]; !exists {
+		s.runOrder = append(s.runOrder, id)
+		s.runsTotal++
+		s.accumulateImpactLocked(rec)
+	}
+	s.runs[id] = rec
+	for s.maxRuns > 0 && len(s.runOrder) > s.maxRuns {
+		oldest := s.runOrder[0]
+		s.runOrder = s.runOrder[1:]
+		delete(s.runs, oldest)
+	}
+}
+
+// accumulateImpactLocked folds one run into the all-time impact totals, mirroring
+// the per-run logic in Metrics so the cumulative figures match a full scan. Caller
+// holds s.mu.
+func (s *Server) accumulateImpactLocked(rec runRecord) {
+	if rec.Kind == "materialize" { // operator out-of-band pull, not a model-context call
+		return
+	}
+	s.impact.Calls++
+	if rec.Reffed {
+		s.impact.Parked++
+		s.impact.BytesKeptOut += int64(rec.Bytes)
+	} else {
+		s.impact.BytesToContext += int64(rec.OutputBytes)
+	}
+	s.impact.FieldsProtected += rec.Protected
 }
 
 func (s *Server) getRun(id string) (runRecord, bool) {

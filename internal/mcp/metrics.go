@@ -54,24 +54,18 @@ func (s *Server) Metrics() MetricsSummary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := MetricsSummary{
-		TotalRuns:   len(s.runs),
+		// TotalRuns and Impact are ALL-TIME cumulative (they survive the bounded
+		// window's eviction), accumulated as runs are recorded and rebuilt from the
+		// durable log on restart. The by-substrate/engine/latency breakdown below is
+		// over the retained recent window — a bounded scan, and recent latency is the
+		// useful signal anyway.
+		TotalRuns:   s.runsTotal,
+		Impact:      s.impact,
 		BySubstrate: map[string]*SubstrateStats{},
 		ByEngine:    map[string]int{},
 	}
 	lat := map[string][]int64{}
 	for _, rec := range s.runs {
-		// Materialize is the OPERATOR pulling data out-of-band — not the model's
-		// context — so it never counts toward the impact figures.
-		if rec.Kind != "materialize" {
-			m.Impact.Calls++
-			if rec.Reffed {
-				m.Impact.Parked++
-				m.Impact.BytesKeptOut += int64(rec.Bytes)
-			} else {
-				m.Impact.BytesToContext += int64(rec.OutputBytes)
-			}
-			m.Impact.FieldsProtected += rec.Protected
-		}
 		// by_substrate is "where reduce ran" — only reduce runs land on a substrate
 		// (wasm/microvm). Proxy calls have none, so they don't belong in this
 		// breakdown (otherwise they pile up under a bogus "unknown" substrate).
