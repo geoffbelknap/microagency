@@ -23,6 +23,9 @@ type Request struct {
 	Name   string
 	Code   string
 	Inputs []sandbox.Input // optional payload files (e.g. /app/input, or /app/input_1..N)
+	// Owner is the subject the result ref is bound to, so only that principal can
+	// reduce over it later. "" for a single-principal deployment.
+	Owner string
 }
 
 // maxStderrBytes caps how many bytes of stderr are retained in a Decision.
@@ -97,7 +100,7 @@ func (r Router) Run(ctx context.Context, req Request) (Decision, error) {
 		return Decision{}, err
 	}
 
-	out := r.Gate.Apply(res.Stdout)
+	out := r.Gate.Apply(res.Stdout, req.Owner)
 	return Decision{
 		Reffed:   out.Reffed,
 		Inline:   out.Inline,

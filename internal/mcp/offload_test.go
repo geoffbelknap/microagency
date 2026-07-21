@@ -112,7 +112,7 @@ func TestOffloadURLRehydratedNotLeaked(t *testing.T) {
 		t.Fatalf("offload URL leaked to the agent: %s", blob)
 	}
 	// The ref holds the decompressed real payload, not the pointer.
-	data, ok := rs.Get(refstore.Ref(inner["ref"].(string)))
+	data, _, ok := rs.Get(refstore.Ref(inner["ref"].(string)))
 	if !ok || !strings.Contains(data, "gb-desktop") {
 		t.Fatalf("ref does not hold the rehydrated payload (ok=%v)", ok)
 	}

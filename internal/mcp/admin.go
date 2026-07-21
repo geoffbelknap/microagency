@@ -122,7 +122,9 @@ func (s *Server) adminMaterializeRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := r.PathValue("ref")
-	payload, ok := s.budget.Store.Get(refstore.Ref(ref))
+	// The operator (this is behind the operator token) may materialize ANY ref
+	// out-of-band; owner binding gates the AGENT's reduce path, not the operator.
+	payload, _, ok := s.budget.Store.Get(refstore.Ref(ref))
 	if !ok {
 		http.Error(w, "unknown reference", http.StatusNotFound)
 		return

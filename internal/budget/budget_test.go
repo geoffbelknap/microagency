@@ -9,7 +9,7 @@ import (
 
 func TestApplyUnderBudgetReturnsInline(t *testing.T) {
 	g := Gate{MaxBytes: 2048, Store: refstore.NewMemStore()}
-	out := g.Apply("small result")
+	out := g.Apply("small result", "")
 	if out.Reffed {
 		t.Fatal("under-budget payload was reffed")
 	}
@@ -23,7 +23,7 @@ func TestApplyOverBudgetRefsAndStores(t *testing.T) {
 	g := Gate{MaxBytes: 16, Store: store}
 	big := strings.Repeat("x", 100)
 
-	out := g.Apply(big)
+	out := g.Apply(big, "")
 
 	if !out.Reffed {
 		t.Fatal("over-budget payload was returned inline (S4 violation)")
@@ -39,7 +39,7 @@ func TestApplyOverBudgetRefsAndStores(t *testing.T) {
 	}
 	// The full payload must be retrievable from the store via the ref —
 	// nothing was lost, it just didn't go to the model.
-	got, ok := store.Get(out.Ref)
+	got, _, ok := store.Get(out.Ref)
 	if !ok || got != big {
 		t.Fatalf("store.Get(%q) round-trip failed (ok=%v)", out.Ref, ok)
 	}
@@ -47,7 +47,7 @@ func TestApplyOverBudgetRefsAndStores(t *testing.T) {
 
 func TestApplyExactlyAtBudgetIsInline(t *testing.T) {
 	g := Gate{MaxBytes: 5, Store: refstore.NewMemStore()}
-	out := g.Apply("12345") // len == MaxBytes
+	out := g.Apply("12345", "") // len == MaxBytes
 	if out.Reffed {
 		t.Fatal("payload exactly at budget was reffed; boundary should be inclusive")
 	}

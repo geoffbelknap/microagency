@@ -64,7 +64,7 @@ func TestLargeResultReffedDespiteSmallStructuredContent(t *testing.T) {
 		t.Fatalf("large content leaked inline: %.100s", blob)
 	}
 	// The ref must hold the LARGE content (lossless), not the "short" summary.
-	data, ok := rs.Get(refstore.Ref(inner["ref"].(string)))
+	data, _, ok := rs.Get(refstore.Ref(inner["ref"].(string)))
 	if !ok || !strings.Contains(data, "PAGEDATA") {
 		t.Fatalf("ref does not hold the large content (ok=%v, %.80s)", ok, data)
 	}

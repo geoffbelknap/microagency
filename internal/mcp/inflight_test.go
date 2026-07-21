@@ -1,9 +1,9 @@
 package mcp
 
 import (
-	"errors"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,7 +84,7 @@ func TestInflightSingleFlightsIdenticalReads(t *testing.T) {
 
 	out := make(chan map[string]any, 2)
 	go func() { out <- callCtx(t, s, context.Background(), "u__get-data", map[string]any{}) }()
-	waitFor(t, 1, &calls) // first call reached the upstream
+	waitFor(t, 1, &calls)                                                                       // first call reached the upstream
 	go func() { out <- callCtx(t, s, context.Background(), "u__get-data", map[string]any{}) }() // must JOIN, not re-dial
 	time.Sleep(30 * time.Millisecond)
 	close(release)
@@ -158,7 +158,6 @@ func TestInflightDoesNotCacheWrites(t *testing.T) {
 		t.Fatalf("writes must not be single-flighted: %d upstream calls (want 2)", n)
 	}
 }
-
 
 // A failed read is delivered to its waiters but NOT cached: an identical retry
 // re-runs instead of being served the stale failure for the rest of the TTL.

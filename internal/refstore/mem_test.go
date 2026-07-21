@@ -9,16 +9,19 @@ import (
 
 func TestMemStorePutGetRoundTrip(t *testing.T) {
 	s := NewMemStore()
-	ref, sum := s.Put("hello world")
+	ref, sum := s.Put("hello world", "alice")
 	if _, ok := refToken(ref); !ok {
 		t.Fatalf("ref %q is not a well-formed handle", ref)
 	}
 	if sum.Bytes != len("hello world") {
 		t.Fatalf("summary bytes = %d, want %d", sum.Bytes, len("hello world"))
 	}
-	got, ok := s.Get(ref)
+	got, owner, ok := s.Get(ref)
 	if !ok || got != "hello world" {
 		t.Fatalf("Get(%q) = (%q,%v), want (hello world,true)", ref, got, ok)
+	}
+	if owner != "alice" {
+		t.Fatalf("Get owner = %q, want alice (the creating subject)", owner)
 	}
 }
 
@@ -26,8 +29,8 @@ func TestMemStorePutGetRoundTrip(t *testing.T) {
 // ref can't reveal the existence of others and the space can't be walked.
 func TestMemStoreRefsAreUnguessable(t *testing.T) {
 	s := NewMemStore()
-	r1, _ := s.Put("a")
-	r2, _ := s.Put("b")
+	r1, _ := s.Put("a", "")
+	r2, _ := s.Put("b", "")
 	if r1 == r2 {
 		t.Fatalf("two Puts returned the same handle %q", r1)
 	}
@@ -51,7 +54,7 @@ func TestMemStoreRefsAreUnguessable(t *testing.T) {
 // the values-free structural one computed at the gateway.
 func TestMemStoreSummaryCarriesNoPayloadBytes(t *testing.T) {
 	s := NewMemStore()
-	_, sum := s.Put("abcdefgh")
+	_, sum := s.Put("abcdefgh", "")
 	if sum.Bytes != 8 {
 		t.Fatalf("bytes = %d, want 8", sum.Bytes)
 	}
@@ -62,7 +65,7 @@ func TestMemStoreSummaryCarriesNoPayloadBytes(t *testing.T) {
 
 func TestMemStoreGetUnknownRef(t *testing.T) {
 	s := NewMemStore()
-	if _, ok := s.Get("<ref_99>"); ok {
+	if _, _, ok := s.Get("<ref_99>"); ok {
 		t.Fatal("Get on unknown ref returned ok=true")
 	}
 }
@@ -73,11 +76,11 @@ func TestBoundedMemStoreEvictsOldest(t *testing.T) {
 	s := NewBoundedMemStore(0, 3) // no TTL, cap 3
 	refs := make([]Ref, 5)
 	for i := range refs {
-		refs[i], _ = s.Put(string(rune('a' + i)))
+		refs[i], _ = s.Put(string(rune('a'+i)), "")
 	}
 	// The two oldest are evicted; the three newest remain.
 	for i, ref := range refs {
-		_, ok := s.Get(ref)
+		_, _, ok := s.Get(ref)
 		if i < 2 && ok {
 			t.Fatalf("ref %d (%q) should have been evicted", i, ref)
 		}
@@ -92,12 +95,12 @@ func TestBoundedMemStoreTTLExpiry(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := NewBoundedMemStore(time.Minute, 0)
 	s.now = func() time.Time { return now }
-	ref, _ := s.Put("data")
-	if _, ok := s.Get(ref); !ok {
+	ref, _ := s.Put("data", "")
+	if _, _, ok := s.Get(ref); !ok {
 		t.Fatal("fresh entry must be present")
 	}
 	now = now.Add(2 * time.Minute) // advance past the TTL
-	if _, ok := s.Get(ref); ok {
+	if _, _, ok := s.Get(ref); ok {
 		t.Fatal("expired entry must not be returned")
 	}
 }
@@ -107,10 +110,10 @@ func TestMemStoreUnboundedByDefault(t *testing.T) {
 	s := NewMemStore()
 	refs := make([]Ref, 50)
 	for i := range refs {
-		refs[i], _ = s.Put("x")
+		refs[i], _ = s.Put("x", "")
 	}
 	for _, ref := range refs {
-		if _, ok := s.Get(ref); !ok {
+		if _, _, ok := s.Get(ref); !ok {
 			t.Fatalf("unbounded store dropped %q", ref)
 		}
 	}
