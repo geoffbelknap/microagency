@@ -311,7 +311,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			// ~60s call cancellation, since the engine runs synchronously inside the
 			// tool call) on MB-scale data — so make the steer size-aware and concrete.
 			if len(payload) >= largeReduceThreshold && engineName == "jq" {
-				return toolError("reduce: the jq engine failed over ~%s of data (%v). At MB scale jq is the wrong substrate — reformulate as %s.", mbOf(len(payload)), err, s.largeReduceAlt(refs[0]))
+				return toolError("reduce: the jq engine failed over ~%s of data (%v). At MB scale jq is the wrong substrate — reformulate as %s.", mbOf(len(payload)), err, s.largeReduceAlt(selfRef))
 			}
 			return toolError("reduce: the %q engine failed (%v). For large data, regex, or complex logic, run it as code instead — reduce(%s, code=<python that reads /app/input>).", engineName, err, selfRef)
 		}
@@ -380,12 +380,14 @@ func mbOf(n int) string { return fmt.Sprintf("%.1f MB", float64(n)/(1<<20)) }
 
 // largeReduceAlt names the substrate(s) to reformulate a large jq reduce as, in a
 // ready-to-run shape: a sql SELECT when the columnar engine is configured, else
-// code. Both keep the referenced data off-context.
-func (s *Server) largeReduceAlt(ref string) string {
+// code. Both keep the referenced data off-context. selfRef is a pre-formatted
+// self-reference token (either `ref="<handle>"` or `data=<your inline data>`), so
+// this works on both the reffed and the inline-data reduce paths.
+func (s *Server) largeReduceAlt(selfRef string) string {
 	if _, ok := s.wasm["sql"]; ok {
-		return fmt.Sprintf("a sql SELECT — reduce(ref=%q, engine=\"sql\", query=<SELECT ... FROM data ...>) — or code — reduce(ref=%q, code=<python that reads /app/input>)", ref, ref)
+		return fmt.Sprintf("a sql SELECT — reduce(%s, engine=\"sql\", query=<SELECT ... FROM data ...>) — or code — reduce(%s, code=<python that reads /app/input>)", selfRef, selfRef)
 	}
-	return fmt.Sprintf("code — reduce(ref=%q, code=<python that reads /app/input>)", ref)
+	return fmt.Sprintf("code — reduce(%s, code=<python that reads /app/input>)", selfRef)
 }
 
 // largeReduceHint returns a concise, non-breaking advisory for a jq reduce that

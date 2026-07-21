@@ -272,6 +272,32 @@ func TestReduceLargeJqTimeoutSteer(t *testing.T) {
 	}
 }
 
+// TestReduceLargeJqTimeoutSteerInlineData is the inline-data twin of the steer
+// above: a large inline payload (no ref) that fails on jq must produce the same
+// size-aware steer WITHOUT panicking. Regression for indexing refs[0] on the
+// inline path, where refs is empty.
+func TestReduceLargeJqTimeoutSteerInlineData(t *testing.T) {
+	store := refstore.NewMemStore()
+	// MaxBytes above the large-reduce threshold so the big inline payload is
+	// accepted (not rejected as too large) and reaches the size-aware branch.
+	s := newTestServer(t, fakeRunner{},
+		WithBudgetGate(budget.Gate{MaxBytes: largeReduceThreshold * 2, Store: store}),
+		WithWasmEngine("jq", failingEngine{}),
+		WithWasmEngine("sql", namedEngine{"sql"}))
+
+	out := call(t, s, "reduce", map[string]any{"data": bigPayload(), "query": "keys"})
+	if isErr, _ := out["isError"].(bool); !isErr {
+		t.Fatal("a failing engine must surface an error")
+	}
+	raw, _ := json.Marshal(out)
+	// The steer references the inline data (data=...), not a ref handle.
+	for _, want := range []string{"MB", "sql", "code", "data="} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("large inline jq steer must mention %q, got %s", want, raw)
+		}
+	}
+}
+
 // errText extracts the single text block from a tool error result.
 func errText(t *testing.T, out map[string]any) string {
 	t.Helper()

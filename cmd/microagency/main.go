@@ -916,6 +916,23 @@ func loadOrCreateRefsKey(path string) ([]byte, error) {
 	return key, nil
 }
 
+// orderEngineNames returns bundled engine names in a deterministic registration
+// order: jq first (the preferred default), then the rest alphabetically. The
+// first engine registered becomes the default (see mcp.WithWasmEngine), so a
+// stable order keeps the default from flipping between restarts under Go's
+// randomized map iteration — an un-inferable, jq-shaped query would otherwise
+// route to a different engine each boot.
+func orderEngineNames(names []string) []string {
+	out := append([]string(nil), names...)
+	sort.Slice(out, func(i, j int) bool {
+		if (out[i] == "jq") != (out[j] == "jq") {
+			return out[i] == "jq"
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
 func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly bool, consoleAddr string) *mcp.Server {
 	// One refstore backs the budget gate for both substrates AND the proxy path, so
 	// a reffed result is resolvable regardless of which produced it. maxInlineBytes
@@ -966,8 +983,20 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 			MaxMemoryPages: uint32(wasmMaxMemMB) * 16, // 64 KiB pages → MiB
 		}))
 	}
-	for name, mod := range bundledEngines() {
-		addEngine(name, mod)
+	// Register bundled engines in a deterministic order so the default engine
+	// (the first one registered — see mcp.WithWasmEngine) is stable across
+	// restarts rather than whatever Go's randomized map iteration yields. jq is
+	// preferred as the default when present: an engine-less query is almost
+	// always jq-shaped (sql's SELECT/WITH and jq's .[{( are inferred; anything
+	// else falls through to the default), and a stable default keeps the same
+	// reduce request from succeeding one restart and failing the next.
+	bundled := bundledEngines()
+	bundledNames := make([]string, 0, len(bundled))
+	for name := range bundled {
+		bundledNames = append(bundledNames, name)
+	}
+	for _, name := range orderEngineNames(bundledNames) {
+		addEngine(name, bundled[name])
 	}
 	for _, spec := range engineSpecs {
 		name, path, ok := strings.Cut(spec, "=")

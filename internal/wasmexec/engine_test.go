@@ -1,6 +1,7 @@
 package wasmexec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -165,6 +166,35 @@ func TestSandboxEngineRunsHtmlQuery(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(hrefs)); got != "/a\n/b" {
 		t.Fatalf("html hrefs = %q, want both", got)
+	}
+}
+
+func TestHtmlEngineRejectsInvalidSelector(t *testing.T) {
+	// A malformed CSS selector must be a bad-query error (exit 2), not a silent
+	// zero-match success — otherwise the agent can't tell a typo from no matches.
+	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/html")}
+	_, err := eng.Run(context.Background(), "a[href", []byte("<a href='/x'>x</a>"))
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("want *ExitError for a bad selector, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode != 2 {
+		t.Fatalf("bad selector exit = %d, want 2", exitErr.ExitCode)
+	}
+}
+
+func TestTextEngineFailsClosedOnOversizedLine(t *testing.T) {
+	// A line past the 16 MiB scanner cap stops the scan with an error; the engine
+	// must fail closed (non-zero exit) rather than exit 0 with truncated matches.
+	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/text")}
+	huge := bytes.Repeat([]byte("a"), 17*1024*1024)
+	_, err := eng.Run(context.Background(), "a", huge)
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("want *ExitError for an oversized line, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode != 1 {
+		t.Fatalf("oversized-line exit = %d, want 1", exitErr.ExitCode)
 	}
 }
 
