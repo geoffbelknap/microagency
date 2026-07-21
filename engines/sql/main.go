@@ -8,9 +8,14 @@
 // xwb1989/sqlparser and executes a focused subset itself — pure compute over the
 // bytes the host fetched cred-blind, with no storage backend.
 //
-// Supported: SELECT (columns, *, and the aggregates count/sum/avg/min/max),
-// WHERE (= != < > <= >= combined with AND/OR/NOT/parens), GROUP BY, ORDER BY,
-// LIMIT. Input is a JSON array of objects (or a single object).
+// Supported: SELECT (columns, *, DISTINCT, and the aggregates
+// count/sum/avg/min/max, including count(DISTINCT col)), WHERE (= != < > <= >=
+// with AND/OR/NOT/parens and SQL three-valued NULL logic), GROUP BY, HAVING,
+// ORDER BY, LIMIT, and OFFSET. Input is a JSON array of objects (or a single
+// object). Value comparison uses numeric affinity: numbers, bools, and
+// numeric-looking strings compare numerically (see compareVals). A clause the
+// parser accepts but this engine can't execute faithfully is rejected, never
+// silently ignored.
 package main
 
 import (
@@ -48,7 +53,7 @@ func main() {
 	}
 	result, err := execSelect(sel, rows)
 	if err != nil {
-		die(1, "sql: %v", err)
+		die(2, "sql: %v", err) // an execSelect error is a bad/unsupported query
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		die(1, "sql: encode: %v", err)
@@ -86,11 +91,11 @@ func execSelect(sel *sqlparser.Select, rows []map[string]any) ([]map[string]any,
 	if sel.Where != nil {
 		kept := make([]map[string]any, 0, len(rows))
 		for _, r := range rows {
-			ok, err := evalBool(sel.Where.Expr, r)
+			t, err := evalBoolWith(sel.Where.Expr, rowResolver(r))
 			if err != nil {
 				return nil, err
 			}
-			if ok {
+			if t == triTrue { // NULL/UNKNOWN rows are excluded, per SQL
 				kept = append(kept, r)
 			}
 		}
@@ -100,21 +105,53 @@ func execSelect(sel *sqlparser.Select, rows []map[string]any) ([]map[string]any,
 	var out []map[string]any
 	var err error
 	if selectHasAggregate(sel.SelectExprs) || len(sel.GroupBy) > 0 {
-		out, err = aggregate(sel, rows)
+		if out, err = aggregate(sel, rows); err != nil { // includes HAVING
+			return nil, err
+		}
 	} else {
-		out, err = project(sel.SelectExprs, rows)
-	}
-	if err != nil {
-		return nil, err
+		if sel.Having != nil {
+			return nil, fmt.Errorf("HAVING requires GROUP BY or an aggregate")
+		}
+		if out, err = project(sel.SelectExprs, rows); err != nil {
+			return nil, err
+		}
+		if sel.Distinct != "" {
+			out = distinctRows(out)
+		}
 	}
 
+	// ORDER BY resolves against the projected output row (ordering runs after
+	// projection), so the sort column must be one the query produced.
 	if len(sel.OrderBy) > 0 {
 		if err := orderBy(out, sel.OrderBy); err != nil {
 			return nil, err
 		}
 	}
-	if sel.Limit != nil && sel.Limit.Rowcount != nil {
-		n, err := intVal(sel.Limit.Rowcount)
+	return applyLimit(sel.Limit, out)
+}
+
+// applyLimit applies OFFSET then LIMIT: skip the first Offset rows, then keep at
+// most Rowcount. Both are optional and must be non-negative integers. (OFFSET was
+// previously parsed and ignored — a silently wrong window.)
+func applyLimit(limit *sqlparser.Limit, out []map[string]any) ([]map[string]any, error) {
+	if limit == nil {
+		return out, nil
+	}
+	if limit.Offset != nil {
+		off, err := intVal(limit.Offset)
+		if err != nil {
+			return nil, err
+		}
+		if off < 0 {
+			return nil, fmt.Errorf("OFFSET must be non-negative")
+		}
+		if off >= len(out) {
+			return []map[string]any{}, nil
+		}
+		out = out[off:]
+	}
+	if limit.Rowcount != nil {
+		n, err := intVal(limit.Rowcount)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +192,26 @@ func project(exprs sqlparser.SelectExprs, rows []map[string]any) ([]map[string]a
 	return out, nil
 }
 
+// distinctRows drops duplicate projected rows, keeping first-seen order. Canonical
+// JSON (encoding/json sorts map keys) makes the identity comparison exact.
+// (SELECT DISTINCT was previously parsed and ignored.)
+func distinctRows(rows []map[string]any) []map[string]any {
+	seen := make(map[string]bool, len(rows))
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		b, _ := json.Marshal(r)
+		if !seen[string(b)] {
+			seen[string(b)] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func aggregate(sel *sqlparser.Select, rows []map[string]any) ([]map[string]any, error) {
+	if sel.Distinct != "" {
+		return nil, fmt.Errorf("SELECT DISTINCT with GROUP BY/aggregates is not supported")
+	}
 	groupCols := make([]string, 0, len(sel.GroupBy))
 	for _, g := range sel.GroupBy {
 		col, ok := g.(*sqlparser.ColName)
@@ -207,6 +263,15 @@ func aggregate(sel *sqlparser.Select, rows []map[string]any) ([]map[string]any, 
 			}
 			o[name] = val
 		}
+		if sel.Having != nil { // filter groups by their aggregate (was parsed and ignored)
+			t, err := evalBoolWith(sel.Having.Expr, havingResolver(g.cols, g.rows))
+			if err != nil {
+				return nil, err
+			}
+			if t != triTrue { // exclude groups that are false OR unknown
+				continue
+			}
+		}
 		out = append(out, o)
 	}
 	return out, nil
@@ -222,7 +287,7 @@ func evalAggOrCol(ae *sqlparser.AliasedExpr, groupCols map[string]any, rows []ma
 		if name == "" {
 			name = sqlparser.String(e)
 		}
-		v, err := computeAgg(e.Name.Lowered(), e.Exprs, rows)
+		v, err := computeAgg(e.Name.Lowered(), e.Exprs, e.Distinct, rows)
 		return name, v, err
 	case *sqlparser.ColName:
 		col := e.Name.String()
@@ -234,7 +299,7 @@ func evalAggOrCol(ae *sqlparser.AliasedExpr, groupCols map[string]any, rows []ma
 	return "", nil, fmt.Errorf("SELECT with GROUP BY supports group columns and aggregates")
 }
 
-func computeAgg(fn string, exprs sqlparser.SelectExprs, rows []map[string]any) (any, error) {
+func computeAgg(fn string, exprs sqlparser.SelectExprs, distinct bool, rows []map[string]any) (any, error) {
 	star, col := false, ""
 	if len(exprs) == 1 {
 		switch a := exprs[0].(type) {
@@ -248,22 +313,44 @@ func computeAgg(fn string, exprs sqlparser.SelectExprs, rows []map[string]any) (
 			col = c.Name.String()
 		}
 	}
+	if star && distinct {
+		return nil, fmt.Errorf("%s(DISTINCT *) is not supported", fn)
+	}
+	// values gathers the non-null column values the aggregate folds over,
+	// de-duplicated when DISTINCT is set (count(DISTINCT col) etc. — previously the
+	// DISTINCT was parsed and ignored). count(*) is handled separately.
+	values := func() []any {
+		var vs []any
+		var seen map[string]bool
+		if distinct {
+			seen = map[string]bool{}
+		}
+		for _, r := range rows {
+			v := r[col]
+			if v == nil {
+				continue
+			}
+			if distinct {
+				k, _ := json.Marshal(v)
+				if seen[string(k)] {
+					continue
+				}
+				seen[string(k)] = true
+			}
+			vs = append(vs, v)
+		}
+		return vs
+	}
 	switch fn {
 	case "count":
 		if star {
-			return float64(len(rows)), nil
+			return float64(len(rows)), nil // count(*) counts rows, nulls included
 		}
-		n := 0
-		for _, r := range rows {
-			if r[col] != nil {
-				n++
-			}
-		}
-		return float64(n), nil
+		return float64(len(values())), nil
 	case "sum", "avg":
 		sum, n := 0.0, 0
-		for _, r := range rows {
-			if f, ok := toFloat(r[col]); ok {
+		for _, v := range values() {
+			if f, ok := toFloat(v); ok {
 				sum += f
 				n++
 			}
@@ -277,11 +364,7 @@ func computeAgg(fn string, exprs sqlparser.SelectExprs, rows []map[string]any) (
 		return sum, nil
 	case "min", "max":
 		var best any
-		for _, r := range rows {
-			v := r[col]
-			if v == nil {
-				continue
-			}
+		for _, v := range values() {
 			if best == nil {
 				best = v
 				continue
@@ -296,62 +379,153 @@ func computeAgg(fn string, exprs sqlparser.SelectExprs, rows []map[string]any) (
 	return nil, fmt.Errorf("unsupported aggregate %q", fn)
 }
 
-func evalBool(expr sqlparser.Expr, r map[string]any) (bool, error) {
+// tri is SQL three-valued logic: TRUE, FALSE, or UNKNOWN (a comparison touching
+// NULL). WHERE and HAVING keep only TRUE; NOT UNKNOWN is UNKNOWN, so collapsing
+// NULL to false (as the old code did) made `col != 'x'` wrongly keep rows where
+// col is absent.
+type tri uint8
+
+const (
+	triFalse tri = iota
+	triTrue
+	triUnknown
+)
+
+func (t tri) not() tri {
+	switch t {
+	case triTrue:
+		return triFalse
+	case triFalse:
+		return triTrue
+	default:
+		return triUnknown
+	}
+}
+
+func andTri(a, b tri) tri {
+	if a == triFalse || b == triFalse {
+		return triFalse
+	}
+	if a == triUnknown || b == triUnknown {
+		return triUnknown
+	}
+	return triTrue
+}
+
+func orTri(a, b tri) tri {
+	if a == triTrue || b == triTrue {
+		return triTrue
+	}
+	if a == triUnknown || b == triUnknown {
+		return triUnknown
+	}
+	return triFalse
+}
+
+// resolver evaluates a leaf expression (a column, literal, or — for HAVING — an
+// aggregate) to a concrete value. WHERE and HAVING share evalBoolWith and differ
+// only in how leaves resolve.
+type resolver func(sqlparser.Expr) (any, error)
+
+func rowResolver(r map[string]any) resolver {
+	return func(expr sqlparser.Expr) (any, error) {
+		if col, ok := expr.(*sqlparser.ColName); ok {
+			return r[col.Name.String()], nil
+		}
+		return literalVal(expr)
+	}
+}
+
+func havingResolver(groupCols map[string]any, rows []map[string]any) resolver {
+	return func(expr sqlparser.Expr) (any, error) {
+		switch e := expr.(type) {
+		case *sqlparser.FuncExpr:
+			return computeAgg(e.Name.Lowered(), e.Exprs, e.Distinct, rows)
+		case *sqlparser.ColName:
+			return groupCols[e.Name.String()], nil // HAVING may reference group columns
+		}
+		return literalVal(expr)
+	}
+}
+
+func evalBoolWith(expr sqlparser.Expr, val resolver) (tri, error) {
 	switch e := expr.(type) {
 	case *sqlparser.AndExpr:
-		l, err := evalBool(e.Left, r)
-		if err != nil || !l {
-			return false, err
+		l, err := evalBoolWith(e.Left, val)
+		if err != nil {
+			return triFalse, err
 		}
-		return evalBool(e.Right, r)
+		if l == triFalse {
+			return triFalse, nil
+		}
+		r, err := evalBoolWith(e.Right, val)
+		if err != nil {
+			return triFalse, err
+		}
+		return andTri(l, r), nil
 	case *sqlparser.OrExpr:
-		l, err := evalBool(e.Left, r)
-		if err != nil || l {
-			return l, err
+		l, err := evalBoolWith(e.Left, val)
+		if err != nil {
+			return triFalse, err
 		}
-		return evalBool(e.Right, r)
+		if l == triTrue {
+			return triTrue, nil
+		}
+		r, err := evalBoolWith(e.Right, val)
+		if err != nil {
+			return triFalse, err
+		}
+		return orTri(l, r), nil
 	case *sqlparser.ParenExpr:
-		return evalBool(e.Expr, r)
+		return evalBoolWith(e.Expr, val)
 	case *sqlparser.NotExpr:
-		v, err := evalBool(e.Expr, r)
-		return !v, err
+		v, err := evalBoolWith(e.Expr, val)
+		return v.not(), err
 	case *sqlparser.ComparisonExpr:
-		return evalComparison(e, r)
+		return evalComparison(e, val)
 	}
-	return false, fmt.Errorf("unsupported WHERE expression")
+	return triFalse, fmt.Errorf("unsupported boolean expression")
 }
 
-func evalComparison(e *sqlparser.ComparisonExpr, r map[string]any) (bool, error) {
-	l, err := evalVal(e.Left, r)
+func evalComparison(e *sqlparser.ComparisonExpr, val resolver) (tri, error) {
+	l, err := val(e.Left)
 	if err != nil {
-		return false, err
+		return triFalse, err
 	}
-	rt, err := evalVal(e.Right, r)
+	rt, err := val(e.Right)
 	if err != nil {
-		return false, err
+		return triFalse, err
+	}
+	if l == nil || rt == nil { // any comparison with NULL is UNKNOWN
+		return triUnknown, nil
 	}
 	c := compareVals(l, rt)
+	var b bool
 	switch e.Operator {
 	case sqlparser.EqualStr:
-		return c == 0, nil
+		b = c == 0
 	case sqlparser.NotEqualStr:
-		return c != 0, nil
+		b = c != 0
 	case sqlparser.LessThanStr:
-		return c < 0, nil
+		b = c < 0
 	case sqlparser.GreaterThanStr:
-		return c > 0, nil
+		b = c > 0
 	case sqlparser.LessEqualStr:
-		return c <= 0, nil
+		b = c <= 0
 	case sqlparser.GreaterEqualStr:
-		return c >= 0, nil
+		b = c >= 0
+	default:
+		return triFalse, fmt.Errorf("unsupported operator %q", e.Operator)
 	}
-	return false, fmt.Errorf("unsupported operator %q", e.Operator)
+	if b {
+		return triTrue, nil
+	}
+	return triFalse, nil
 }
 
-func evalVal(expr sqlparser.Expr, r map[string]any) (any, error) {
+// literalVal evaluates a non-column literal: a number, string, NULL, or bool.
+func literalVal(expr sqlparser.Expr) (any, error) {
 	switch e := expr.(type) {
-	case *sqlparser.ColName:
-		return r[e.Name.String()], nil
 	case *sqlparser.SQLVal:
 		if e.Type == sqlparser.IntVal || e.Type == sqlparser.FloatVal {
 			return strconv.ParseFloat(string(e.Val), 64)
@@ -362,7 +536,7 @@ func evalVal(expr sqlparser.Expr, r map[string]any) (any, error) {
 	case sqlparser.BoolVal:
 		return bool(e), nil
 	}
-	return nil, fmt.Errorf("unsupported value in WHERE")
+	return nil, fmt.Errorf("unsupported value in WHERE/HAVING")
 }
 
 func orderBy(rows []map[string]any, ob sqlparser.OrderBy) error {
@@ -397,7 +571,7 @@ func orderBy(rows []map[string]any, ob sqlparser.OrderBy) error {
 func intVal(expr sqlparser.Expr) (int, error) {
 	v, ok := expr.(*sqlparser.SQLVal)
 	if !ok || v.Type != sqlparser.IntVal {
-		return 0, fmt.Errorf("LIMIT must be an integer")
+		return 0, fmt.Errorf("LIMIT/OFFSET must be an integer")
 	}
 	return strconv.Atoi(string(v.Val))
 }
@@ -414,7 +588,8 @@ func selectHasAggregate(exprs sqlparser.SelectExprs) bool {
 }
 
 // compareVals orders two values: numerically when both are numeric (numbers,
-// numeric strings, or bools), otherwise as strings.
+// numeric strings, or bools), otherwise as strings. Numeric affinity is
+// intentional — see TestNumericStringCoercion.
 func compareVals(a, b any) int {
 	if af, ok := toFloat(a); ok {
 		if bf, ok := toFloat(b); ok {
