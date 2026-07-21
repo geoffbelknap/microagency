@@ -857,6 +857,18 @@ func oauthKeyPath() string {
 	return filepath.Join(home, ".microagency", "oauth-key")
 }
 
+// auditKeyPath is where the audit-log signing key lives (0600), so the audit
+// chain stays signed and offline-verifiable across restarts. Distinct from the
+// OAuth key so audit integrity holds in every auth mode (built-in AS, external
+// issuer, or static bearer), not just when the AS is running.
+func auditKeyPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "microagency-audit-key")
+	}
+	return filepath.Join(home, ".microagency", "audit-key")
+}
+
 // oauthClientsPath is where dynamic client registrations persist (0600), so a
 // client's cached client_id stays known across restarts (no spurious re-auth).
 func oauthClientsPath() string {
@@ -996,6 +1008,14 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	// calls) goes through reference-by-default minimization and the reffed results
 	// are reducible off-context.
 	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate), mcp.WithVersion(version), mcp.WithConsoleAddr(consoleAddr)}
+	// Sign the audit chain (ES256) so a record can't be forged or edited without the
+	// key and the log verifies offline from the public key. Best-effort: if the key
+	// can't be loaded, the chain stays integrity-only rather than blocking startup.
+	if auditSigner, err := auth.LoadOrCreateSigner(auditKeyPath()); err == nil {
+		opts = append(opts, mcp.WithAuditSigner(auditSigner))
+	} else {
+		log.Printf("microagency: audit signing disabled (%v); chain is integrity-only", err)
+	}
 	// The wasm engines back reduce (a declarative reduction over a ref is computed
 	// in the selected engine instead of running Python in a microVM). The engines
 	// BUNDLED into the binary are registered automatically; each `--engine name=path`
