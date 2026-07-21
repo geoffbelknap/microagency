@@ -197,7 +197,7 @@ func TestRouterRefsLargeResult(t *testing.T) {
 		t.Fatalf("summary bytes = %d, want >= 5000", dec.Summary.Bytes)
 	}
 	// The full payload is retrievable from the store but never reached the caller.
-	full, ok := store.Get(dec.Ref)
+	full, _, ok := store.Get(dec.Ref)
 	if !ok || !strings.Contains(full, strings.Repeat("R", 5000)) {
 		t.Fatalf("stored payload not retrievable/complete via %q (ok=%v)", dec.Ref, ok)
 	}

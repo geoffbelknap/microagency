@@ -176,8 +176,8 @@ func TestSchemaGapsIsConservative(t *testing.T) {
 	}{
 		{"valid", `{"a":"x"}`, false},
 		{"missing required", `{}`, true},
-		{"scalar coercion not flagged", `{"a":5}`, false},          // string declared, number given — upstream may coerce
-		{"unknown field not flagged", `{"a":"x","zzz":1}`, false},  // no additionalProperties:false
+		{"scalar coercion not flagged", `{"a":5}`, false},         // string declared, number given — upstream may coerce
+		{"unknown field not flagged", `{"a":"x","zzz":1}`, false}, // no additionalProperties:false
 		{"object given scalar flagged", `{"a":"x","obj":"no"}`, true},
 		{"array given scalar flagged", `{"a":"x","arr":"no"}`, true},
 		{"null value not flagged", `{"a":"x","obj":null}`, false},

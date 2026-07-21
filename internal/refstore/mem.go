@@ -23,6 +23,7 @@ type MemStore struct {
 
 type memItem struct {
 	payload string
+	owner   string
 	created time.Time
 }
 
@@ -42,11 +43,11 @@ func NewBoundedMemStore(ttl time.Duration, maxEntries int) *MemStore {
 	return s
 }
 
-func (s *MemStore) Put(payload string) (Ref, Summary) {
+func (s *MemStore) Put(payload, owner string) (Ref, Summary) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ref := s.mintLocked()
-	s.items[ref] = memItem{payload: payload, created: s.now()}
+	s.items[ref] = memItem{payload: payload, owner: owner, created: s.now()}
 	s.sweepLocked() // after the write, so the cap counts the new entry (never evicts it — it's newest)
 	return ref, Summary{Bytes: len(payload)}
 }
@@ -62,18 +63,18 @@ func (s *MemStore) mintLocked() Ref {
 	}
 }
 
-func (s *MemStore) Get(ref Ref) (string, bool) {
+func (s *MemStore) Get(ref Ref) (string, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	it, ok := s.items[ref]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	if s.ttl > 0 && s.now().Sub(it.created) > s.ttl {
 		delete(s.items, ref) // expired — drop it
-		return "", false
+		return "", "", false
 	}
-	return it.payload, true
+	return it.payload, it.owner, true
 }
 
 // sweepLocked drops expired entries and, if over the cap, the oldest — bounding

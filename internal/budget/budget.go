@@ -23,10 +23,10 @@ type Gate struct {
 
 // Apply returns the payload inline if it is within MaxBytes (inclusive),
 // otherwise stores it and returns a ref + summary.
-func (g Gate) Apply(payload string) Outcome {
+func (g Gate) Apply(payload, owner string) Outcome {
 	if len(payload) <= g.MaxBytes {
 		return Outcome{Inline: payload}
 	}
-	ref, sum := g.Store.Put(payload)
+	ref, sum := g.Store.Put(payload, owner)
 	return Outcome{Reffed: true, Ref: ref, Summary: sum}
 }

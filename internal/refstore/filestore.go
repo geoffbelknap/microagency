@@ -52,12 +52,12 @@ func NewFileStore(dir string, key []byte, ttl time.Duration, maxEntries int) (*F
 	return &FileStore{dir: dir, aead: aead, ttl: ttl, maxEntries: maxEntries, now: time.Now, newID: randRef}, nil
 }
 
-func (s *FileStore) Put(payload string) (Ref, Summary) {
+func (s *FileStore) Put(payload, owner string) (Ref, Summary) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ref, name := s.mintLocked()
 	if name != "" {
-		if err := s.writeLocked(name, payload); err != nil {
+		if err := s.writeLocked(name, owner, payload); err != nil {
 			// Put's signature can't return this, but a silent failure hands back a
 			// live-looking ref whose Get later fails with "unknown reference" — a
 			// confusing failure at a distance. Surface it here, at the source.
@@ -83,45 +83,75 @@ func (s *FileStore) mintLocked() (Ref, string) {
 	}
 }
 
-func (s *FileStore) Get(ref Ref) (string, bool) {
+func (s *FileStore) Get(ref Ref) (string, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name, ok := safeRefFile(ref)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	path := filepath.Join(s.dir, name)
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) < 8+s.aead.NonceSize() {
-		return "", false
+		return "", "", false
 	}
 	created := int64(binary.BigEndian.Uint64(data[:8]))
 	if s.ttl > 0 && s.now().UnixNano()-created > int64(s.ttl) {
 		_ = os.Remove(path) // expired — drop it
-		return "", false
+		return "", "", false
 	}
 	nonce := data[8 : 8+s.aead.NonceSize()]
 	pt, err := s.aead.Open(nil, nonce, data[8+s.aead.NonceSize():], nil)
 	if err != nil {
-		return "", false // tampered / wrong key
+		return "", "", false // tampered / wrong key
 	}
-	return string(pt), true
+	owner, payload, ok := unframeOwner(pt)
+	if !ok {
+		return "", "", false // unframed (e.g. a pre-owner record) — treat as absent
+	}
+	return payload, owner, true
 }
 
-// writeLocked encrypts payload and writes it 0600 as: created(8, big-endian unixnano)
-// || nonce || ciphertext. created is cleartext (not sensitive) so TTL can be checked
-// without decrypting.
-func (s *FileStore) writeLocked(name, payload string) error {
+// writeLocked encrypts the owner-framed payload and writes it 0600 as: created(8,
+// big-endian unixnano) || nonce || ciphertext. created is cleartext (not sensitive)
+// so TTL can be checked without decrypting; the owner is INSIDE the ciphertext, so
+// file access alone doesn't reveal who owns each ref.
+func (s *FileStore) writeLocked(name, owner, payload string) error {
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	ct := s.aead.Seal(nil, nonce, []byte(payload), nil)
+	ct := s.aead.Seal(nil, nonce, frameOwner(owner, payload), nil)
 	buf := make([]byte, 8+len(nonce)+len(ct))
 	binary.BigEndian.PutUint64(buf[:8], uint64(s.now().UnixNano()))
 	copy(buf[8:], nonce)
 	copy(buf[8+len(nonce):], ct)
 	return os.WriteFile(filepath.Join(s.dir, name), buf, 0o600)
+}
+
+// frameOwner prefixes the plaintext with a 2-byte big-endian owner length + the
+// owner bytes, so Get can split the creating subject back out from the payload.
+// Owner subjects are short identifiers, well within 2 bytes.
+func frameOwner(owner, payload string) []byte {
+	if len(owner) > 0xffff {
+		owner = owner[:0xffff]
+	}
+	buf := make([]byte, 2+len(owner)+len(payload))
+	binary.BigEndian.PutUint16(buf[:2], uint16(len(owner)))
+	copy(buf[2:], owner)
+	copy(buf[2+len(owner):], payload)
+	return buf
+}
+
+func unframeOwner(pt []byte) (owner, payload string, ok bool) {
+	if len(pt) < 2 {
+		return "", "", false
+	}
+	n := int(binary.BigEndian.Uint16(pt[:2]))
+	if 2+n > len(pt) {
+		return "", "", false
+	}
+	return string(pt[2 : 2+n]), string(pt[2+n:]), true
 }
 
 // sweepLocked drops expired entries and, if over the cap, the oldest — bounding

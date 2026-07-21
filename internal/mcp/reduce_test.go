@@ -29,7 +29,7 @@ func (c *capturingRunner) Run(_ context.Context, req router.Request) (router.Dec
 
 func TestReduceSingleRefUsesAppInput(t *testing.T) {
 	store := refstore.NewMemStore()
-	a, _ := store.Put(`{"x":1}`)
+	a, _ := store.Put(`{"x":1}`, "local")
 	runner := &capturingRunner{}
 	s := newTestServer(t, runner, WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 	call(t, s, "reduce", map[string]any{"ref": string(a), "code": "print(1)"})
@@ -40,8 +40,8 @@ func TestReduceSingleRefUsesAppInput(t *testing.T) {
 
 func TestReduceMultiRefJoinsInputsInCode(t *testing.T) {
 	store := refstore.NewMemStore()
-	a, _ := store.Put(`[{"id":1}]`)
-	b, _ := store.Put(`[{"id":2}]`)
+	a, _ := store.Put(`[{"id":1}]`, "local")
+	b, _ := store.Put(`[{"id":2}]`, "local")
 	runner := &capturingRunner{}
 	s := newTestServer(t, runner, WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 	out := call(t, s, "reduce", map[string]any{"refs": []string{string(a), string(b)}, "code": "print('x')"})
@@ -62,8 +62,8 @@ func TestReduceMultiRefJoinsInputsInCode(t *testing.T) {
 
 func TestReduceMultiRefQueryRejectedSteerToCode(t *testing.T) {
 	store := refstore.NewMemStore()
-	a, _ := store.Put(`[1]`)
-	b, _ := store.Put(`[2]`)
+	a, _ := store.Put(`[1]`, "local")
+	b, _ := store.Put(`[2]`, "local")
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 		WithWasmEngine("jq", fakeEngine{}))
@@ -111,7 +111,7 @@ func TestReduceInlineDataWasm(t *testing.T) {
 
 func TestReduceInlineDataAndRefsRejected(t *testing.T) {
 	store := refstore.NewMemStore()
-	a, _ := store.Put(`[1]`)
+	a, _ := store.Put(`[1]`, "local")
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 	out := call(t, s, "reduce", map[string]any{"ref": string(a), "data": "x", "code": "print(1)"})
 	if isErr, _ := out["isError"].(bool); !isErr {
@@ -134,7 +134,7 @@ func TestReduceInlineDataTooLargeRejected(t *testing.T) {
 
 func TestReduceUnknownRefInListFailsClosed(t *testing.T) {
 	store := refstore.NewMemStore()
-	a, _ := store.Put(`[1]`)
+	a, _ := store.Put(`[1]`, "local")
 	runner := &capturingRunner{}
 	s := newTestServer(t, runner, WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 	out := call(t, s, "reduce", map[string]any{"refs": []string{string(a), "<ref_nope>"}, "code": "print(1)"})
@@ -181,7 +181,7 @@ func bigPayload() string { return strings.Repeat("x", largeReduceThreshold+1) }
 func TestReduceDoesNotRerouteBySize(t *testing.T) {
 	newSrv := func(t *testing.T, payload string) (*Server, refstore.Ref) {
 		store := refstore.NewMemStore()
-		ref, _ := store.Put(payload)
+		ref, _ := store.Put(payload, "local")
 		// jq registered first → wasmDefault is jq (the ambiguous/default case).
 		s := newTestServer(t, fakeRunner{},
 			WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
@@ -224,7 +224,7 @@ func TestReduceDoesNotRerouteBySize(t *testing.T) {
 func TestReduceLargeJqAdvisory(t *testing.T) {
 	newSrv := func(t *testing.T, payload string) (*Server, refstore.Ref) {
 		store := refstore.NewMemStore()
-		ref, _ := store.Put(payload)
+		ref, _ := store.Put(payload, "local")
 		s := newTestServer(t, fakeRunner{},
 			WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 			WithWasmEngine("jq", namedEngine{"jq"}),
@@ -254,7 +254,7 @@ func TestReduceLargeJqAdvisory(t *testing.T) {
 // error is size-aware and names sql/code as the reformulation, not a generic timeout.
 func TestReduceLargeJqTimeoutSteer(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(bigPayload())
+	ref, _ := store.Put(bigPayload(), "local")
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 		WithWasmEngine("jq", failingEngine{}),
@@ -328,7 +328,7 @@ func auditStderrOf(t *testing.T, s *Server) (runID, stderr string) {
 func TestReduceCodeFailureKeepsStderrOutOfContext(t *testing.T) {
 	const secret = `Traceback (most recent call last):\n  KeyError: 'MRN-8675309'`
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`{"mrn":"MRN-8675309"}`)
+	ref, _ := store.Put(`{"mrn":"MRN-8675309"}`, "local")
 	s := newTestServer(t, fakeRunner{dec: router.Decision{ExitCode: 1, Stderr: secret}},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 
@@ -354,7 +354,7 @@ func TestReduceCodeFailureKeepsStderrOutOfContext(t *testing.T) {
 // A successful run's stderr (warnings) is recorded for the operator too.
 func TestReduceCodeSuccessRecordsStderrInAudit(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[1]`)
+	ref, _ := store.Put(`[1]`, "local")
 	s := newTestServer(t, fakeRunner{dec: router.Decision{Inline: "ok", ExitCode: 0, Stderr: "DeprecationWarning: x"}},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 	out := call(t, s, "reduce", map[string]any{"ref": string(ref), "code": "print(1)"})
@@ -385,7 +385,7 @@ func (e exitingEngine) Run(_ context.Context, _ string, _ []byte) ([]byte, error
 func TestReduceWasmEngineExitKeepsStderrOutOfContext(t *testing.T) {
 	const secret = `jq: error: cannot index "MRN-8675309"`
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[{"mrn":"MRN-8675309"}]`)
+	ref, _ := store.Put(`[{"mrn":"MRN-8675309"}]`, "local")
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 		WithWasmEngine("jq", exitingEngine{code: 5, stderr: secret}))
@@ -414,7 +414,7 @@ func TestReduceWasmEngineExitKeepsStderrOutOfContext(t *testing.T) {
 func TestReduceGuestFailureKeepsSerialLogOutOfContext(t *testing.T) {
 	const serial = "microagent-init: booted\npython: MRN-8675309"
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`{"mrn":"MRN-8675309"}`)
+	ref, _ := store.Put(`{"mrn":"MRN-8675309"}`, "local")
 	s := newTestServer(t, fakeRunner{err: &sandbox.GuestFailureError{Name: "reduce-run_1", SerialLog: serial}},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
 
@@ -496,7 +496,7 @@ func TestProxySmallResultStaysInline(t *testing.T) {
 
 func TestReduceOverRefWasm(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[{"a":1},{"a":2},{"a":3}]`)
+	ref, _ := store.Put(`[{"a":1},{"a":2},{"a":3}]`, "local")
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 2048, Store: store}),
 		WithWasmEngine("jq", fakeEngine{}))
@@ -513,7 +513,7 @@ func TestReduceOverRefWasm(t *testing.T) {
 
 func TestMaterializeRefDeliversToOperator(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put("198.51.100.7\n203.0.113.9\n") // PII the run kept off the model
+	ref, _ := store.Put("198.51.100.7\n203.0.113.9\n", "local") // PII the run kept off the model
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 1, Store: store}))
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/refs/x", nil)
@@ -598,7 +598,7 @@ func TestEngineFromQuery(t *testing.T) {
 
 func TestReduceInfersEngineFromQuery(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[{"mrn":"MRN1"}]`)
+	ref, _ := store.Put(`[{"mrn":"MRN1"}]`, "local")
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 2048, Store: store}),
 		WithWasmEngine("jq", fakeEngine{}))
@@ -629,7 +629,7 @@ func TestFinalizeReduceInlinesSmallReref(t *testing.T) {
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 2048, Store: store}))
 
 	small := strings.Repeat("x", 3000) // > 2048 (would ref as a raw result), < 16 KiB
-	out := s.finalizeReduce(s.budget.Apply(small))
+	out := s.finalizeReduce(s.budget.Apply(small, "local"))
 	if out.Reffed {
 		t.Fatal("a ~3 KB reduce output must inline, not re-ref (un-viewable band)")
 	}
@@ -638,7 +638,7 @@ func TestFinalizeReduceInlinesSmallReref(t *testing.T) {
 	}
 
 	big := strings.Repeat("y", (16<<10)+1) // > reduceInlineBytes → still parked
-	if out2 := s.finalizeReduce(s.budget.Apply(big)); !out2.Reffed {
+	if out2 := s.finalizeReduce(s.budget.Apply(big, "local")); !out2.Reffed {
 		t.Fatal("a >16 KiB reduce output must stay reffed so the agent reduces further")
 	}
 }

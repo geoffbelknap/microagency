@@ -242,9 +242,9 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Ups
 type UpstreamInfo struct {
 	Name       string `json:"name"`
 	URL        string `json:"url"`
-	State      string `json:"state"`      // "enabled" | "discovered"
-	Provenance string `json:"provenance"` // preloaded | catalog | discovered
-	ReadOnly   bool   `json:"read_only"`  // writes refused (least-privilege)
+	State      string `json:"state"`           // "enabled" | "discovered"
+	Provenance string `json:"provenance"`      // preloaded | catalog | discovered
+	ReadOnly   bool   `json:"read_only"`       // writes refused (least-privilege)
 	Owner      string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
 	Tools      int    `json:"tools"`           // count of advertised tools (shown per connection in the console)
 	// Minimize is the field-minimization policy set for this upstream (type→action
@@ -501,7 +501,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			if !rehydrated && len(payload) < len(res)/2 {
 				stored = string(res)
 			}
-			ref, sum := s.budget.Store.Put(stored)
+			ref, sum := s.budget.Store.Put(stored, principalOf(ctx).Subject)
 			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, upHost, 0)
 			return s.refHandleResult(ref, sum, name), true
 		}
@@ -853,7 +853,7 @@ func (s *Server) refPreview(ref refstore.Ref) map[string]any {
 	if s.budget.Store == nil {
 		return nil
 	}
-	if data, ok := s.budget.Store.Get(ref); ok {
+	if data, _, ok := s.budget.Store.Get(ref); ok { // preview is gateway-internal; owner enforced at reduce
 		return structuralPreview(data)
 	}
 	return nil

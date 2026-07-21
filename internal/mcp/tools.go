@@ -198,7 +198,7 @@ func (s *Server) finalizeReduce(out budget.Outcome) budget.Outcome {
 		cap = s.budget.MaxBytes
 	}
 	if out.Reffed && out.Summary.Bytes <= cap && s.budget.Store != nil {
-		if data, ok := s.budget.Store.Get(out.Ref); ok {
+		if data, _, ok := s.budget.Store.Get(out.Ref); ok { // inlining a just-created ref; owner is the caller
 			return budget.Outcome{Inline: data}
 		}
 	}
@@ -233,9 +233,13 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			return toolError("reduce: give references (ref/refs) OR inline data, not both")
 		}
 		payloads = make([]string, len(refs))
+		subject := principalOf(ctx).Subject
 		for i, rf := range refs {
-			p, ok := s.budget.Store.Get(refstore.Ref(rf))
-			if !ok {
+			p, owner, ok := s.budget.Store.Get(refstore.Ref(rf))
+			// A ref is bound to the subject that created it. Another principal holding
+			// the handle (in a shared --issuer gateway) is refused with the SAME error as
+			// a genuinely unknown ref — no oracle that the handle exists but is owned.
+			if !ok || owner != subject {
 				return toolError("unknown reference %q", rf)
 			}
 			payloads[i] = p
@@ -315,7 +319,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			}
 			return toolError("reduce: the %q engine failed (%v). For large data, regex, or complex logic, run it as code instead — reduce(%s, code=<python that reads /app/input>).", engineName, err, selfRef)
 		}
-		out := s.finalizeReduce(s.budget.Apply(string(summary)))
+		out := s.finalizeReduce(s.budget.Apply(string(summary), user)) // reduce output is owned by its caller
 		s.putRun(runID, runRecord{
 			Kind: "reduce", SourceID: refLabel, User: user,
 			Substrate: "wasm", Engine: engineName, LatencyMs: time.Since(start).Milliseconds(),
@@ -328,6 +332,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 		dec, err := s.runner.Run(ctx, router.Request{
 			Name: "reduce-" + runID, Code: in.Code,
 			Inputs: reduceInputs(payloads),
+			Owner:  user, // the microVM reduce output ref is bound to its caller
 		})
 		if err != nil {
 			// A guest failure carries the VM console log, which tees guest output and

@@ -65,8 +65,13 @@ type Summary struct {
 	Bytes int `json:"bytes"`
 }
 
-// Store maps reference handles to payloads.
+// Store maps reference handles to payloads, each BOUND to the subject that created
+// it. Get returns that owner so the caller can enforce that only the creating
+// principal reduces over a handle — in a shared (--issuer) gateway an unguessable
+// handle alone is capability-by-knowledge, a weaker property than an explicit
+// owner check. owner is "" for a single-principal deployment (everything is owned
+// by the same local subject).
 type Store interface {
-	Put(payload string) (Ref, Summary)
-	Get(ref Ref) (payload string, ok bool)
+	Put(payload, owner string) (Ref, Summary)
+	Get(ref Ref) (payload, owner string, ok bool)
 }
