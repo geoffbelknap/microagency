@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 )
 
 func main() {
@@ -24,6 +25,14 @@ func main() {
 	if i := strings.LastIndex(os.Args[1], "@"); i >= 0 {
 		sel, attr = os.Args[1][:i], os.Args[1][i+1:]
 	}
+	// Compile the selector explicitly. goquery's Find tolerates an invalid
+	// selector by matching nothing and succeeding, which is indistinguishable
+	// from "no matches" to the agent; the contract says a bad query is exit 2.
+	matcher, err := cascadia.Compile(sel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "html: bad CSS selector: %v\n", err)
+		os.Exit(2)
+	}
 	doc, err := goquery.NewDocumentFromReader(os.Stdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "html: parse: %v\n", err)
@@ -31,7 +40,7 @@ func main() {
 	}
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
-	doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+	doc.FindMatcher(matcher).Each(func(_ int, s *goquery.Selection) {
 		if attr != "" {
 			if v, ok := s.Attr(attr); ok {
 				fmt.Fprintln(out, v)
