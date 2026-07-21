@@ -98,6 +98,22 @@ func (s *Signer) KID() string { return s.kid }
 // PublicKey is the verification key, for publishing JWKS / AS metadata.
 func (s *Signer) PublicKey() *ecdsa.PublicKey { return &s.priv.PublicKey }
 
+// SignBytes signs an arbitrary message with the ES256 private key (ASN.1 ECDSA
+// over SHA-256 of data), for uses beyond JWTs — the audit chain signs each line's
+// hash so a record can't be forged or edited without this key, and the log stays
+// verifiable offline by anyone holding only the public key.
+func (s *Signer) SignBytes(data []byte) ([]byte, error) {
+	h := sha256.Sum256(data)
+	return ecdsa.SignASN1(rand.Reader, s.priv, h[:])
+}
+
+// VerifyBytes reports whether sig is a valid SignBytes signature over data under
+// this signer's public key.
+func (s *Signer) VerifyBytes(data, sig []byte) bool {
+	h := sha256.Sum256(data)
+	return ecdsa.VerifyASN1(&s.priv.PublicKey, h[:], sig)
+}
+
 type localKeySet struct {
 	kid string
 	pub crypto.PublicKey
