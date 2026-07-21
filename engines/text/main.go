@@ -24,10 +24,21 @@ func main() {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
 	for in.Scan() {
 		if re.Match(in.Bytes()) {
 			fmt.Fprintln(out, in.Text())
 		}
+	}
+	// A Scan that stops on an error (e.g. a line longer than the 16 MiB buffer)
+	// otherwise looks identical to clean EOF, so the engine would exit 0 with
+	// silently-truncated matches. The contract says a runtime failure is a
+	// non-zero exit; fail closed and discard the partial output.
+	if err := in.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "text: read: %v\n", err)
+		os.Exit(1)
+	}
+	if err := out.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "text: write: %v\n", err)
+		os.Exit(1)
 	}
 }
