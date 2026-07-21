@@ -156,7 +156,7 @@ The built-in query engines:
 | `jq` | a jq program | JSON |
 | `text` | a regular expression | text / logs (matching lines) |
 | `html` | a CSS selector (`sel` or `sel@attr`) | HTML |
-| `sql` | `SELECT … FROM data WHERE … GROUP BY … ORDER BY … LIMIT …` | a JSON array of objects |
+| `sql` | `SELECT [DISTINCT] … FROM data WHERE … GROUP BY … HAVING … ORDER BY … LIMIT … OFFSET …` | a JSON array of objects |
 
 `make build` bundles them into the binary. Point `--engine name=path.wasm` at
 any wasip1 module you trust to add or override one.
