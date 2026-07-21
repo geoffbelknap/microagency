@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemStorePutGetRoundTrip(t *testing.T) {
@@ -63,5 +64,54 @@ func TestMemStoreGetUnknownRef(t *testing.T) {
 	s := NewMemStore()
 	if _, ok := s.Get("<ref_99>"); ok {
 		t.Fatal("Get on unknown ref returned ok=true")
+	}
+}
+
+// A bounded store keeps at most maxEntries, evicting the oldest — so a long-lived
+// gateway can't accumulate parked payloads for the process lifetime.
+func TestBoundedMemStoreEvictsOldest(t *testing.T) {
+	s := NewBoundedMemStore(0, 3) // no TTL, cap 3
+	refs := make([]Ref, 5)
+	for i := range refs {
+		refs[i], _ = s.Put(string(rune('a' + i)))
+	}
+	// The two oldest are evicted; the three newest remain.
+	for i, ref := range refs {
+		_, ok := s.Get(ref)
+		if i < 2 && ok {
+			t.Fatalf("ref %d (%q) should have been evicted", i, ref)
+		}
+		if i >= 2 && !ok {
+			t.Fatalf("ref %d (%q) should still be present", i, ref)
+		}
+	}
+}
+
+// TTL expiry: an entry older than the TTL is gone, both on sweep and on Get.
+func TestBoundedMemStoreTTLExpiry(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := NewBoundedMemStore(time.Minute, 0)
+	s.now = func() time.Time { return now }
+	ref, _ := s.Put("data")
+	if _, ok := s.Get(ref); !ok {
+		t.Fatal("fresh entry must be present")
+	}
+	now = now.Add(2 * time.Minute) // advance past the TTL
+	if _, ok := s.Get(ref); ok {
+		t.Fatal("expired entry must not be returned")
+	}
+}
+
+// The default NewMemStore is unbounded (back-compat): nothing is evicted.
+func TestMemStoreUnboundedByDefault(t *testing.T) {
+	s := NewMemStore()
+	refs := make([]Ref, 50)
+	for i := range refs {
+		refs[i], _ = s.Put("x")
+	}
+	for _, ref := range refs {
+		if _, ok := s.Get(ref); !ok {
+			t.Fatalf("unbounded store dropped %q", ref)
+		}
 	}
 }

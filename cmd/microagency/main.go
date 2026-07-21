@@ -974,8 +974,11 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	// a reffed result is resolvable regardless of which produced it. maxInlineBytes
 	// (operator-set via --max-inline-bytes) is the single context budget everywhere.
 	// In-memory by default; --persist-refs swaps in an encrypted, TTL'd file store so
-	// <ref_> handles survive a restart (opt-in — it's a new at-rest liability).
-	var store refstore.Store = refstore.NewMemStore()
+	// <ref_> handles survive a restart (opt-in — it's a new at-rest liability). The
+	// in-memory store is BOUNDED (24h TTL, 10k entries — the same limits as the file
+	// store) so a long-lived gateway that parks many multi-MB results can't grow
+	// until it OOMs.
+	var store refstore.Store = refstore.NewBoundedMemStore(24*time.Hour, 10000)
 	if persistRefs {
 		if fs, err := openPersistedRefs(); err != nil {
 			log.Printf("microagency: --persist-refs unavailable (%v) — using in-memory refs", err)

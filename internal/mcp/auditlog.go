@@ -101,13 +101,18 @@ func (s *Server) loadAudit() {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	maxSeq, malformed := 0, 0
+	// Replays run before the server serves, so no concurrency — but addRunLocked
+	// mutates the same fields putRun does, so hold mu for the invariant. Every line
+	// folds into the all-time cumulative totals; only the last maxRuns stay in the
+	// in-memory window, so replaying a huge log doesn't reload it all into memory.
+	s.mu.Lock()
 	for sc.Scan() {
 		var line auditLine
 		if json.Unmarshal(sc.Bytes(), &line) != nil || line.RunID == "" {
 			malformed++ // surfaced (and located) by VerifyAuditLog; counted here so it's never silent
 			continue
 		}
-		s.runs[line.RunID] = line.Rec
+		s.addRunLocked(line.RunID, line.Rec)
 		if line.Hash != "" {
 			s.auditHash = line.Hash // resume the chain from the last written link
 		}
@@ -115,6 +120,7 @@ func (s *Server) loadAudit() {
 			maxSeq = n
 		}
 	}
+	s.mu.Unlock()
 	if malformed > 0 {
 		log.Printf("microagency: audit log: %d malformed line(s) skipped — run /admin/audit/verify", malformed)
 	}
