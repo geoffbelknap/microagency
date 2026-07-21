@@ -188,9 +188,25 @@ given.
 
 ## The audit chain
 
-Every run and proxied call is written to an append-only audit log with a hash
-chain, so an edited, deleted, or reordered line is detectable. Verify it from
-the console (Activity → verify audit chain) or with `GET /admin/audit/verify`.
+Every run and proxied call is written to an append-only audit log. Each line is
+hash-chained to its predecessor and **signed** (ES256) over that hash with a
+per-gateway key at `~/.microagency/audit-key`. The signature is what makes the
+log tamper-evident against someone who can write the file: the chain hash is
+public and recomputable, so a hash chain alone lets an attacker rewrite a record
+and recompute every hash after it — the signature can't be recomputed without the
+private key, so an edited, inserted, or reordered line is caught. The log is also
+verifiable offline by anyone holding only the public key. Verify from the console
+(Activity → verify audit chain) or with `GET /admin/audit/verify`, which reports
+lines checked, how many were chained and signed, and the first break.
+
+What the chain still can't stop on its own is wholesale **tail truncation** —
+deleting the last N lines leaves a validly signed prefix — which needs an
+external high-water anchor (writing the head hash somewhere the gateway operator
+can't later rewrite). Keeping the signing key in a KMS or the secret store rather
+than a local file is the hardening path when the log and the key would otherwise
+share one disk. Without a signer configured the log falls back to an
+integrity-only chain: it still catches accidental corruption and naive edits, but
+not a key-less attacker who recomputes the hashes.
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -252,8 +268,10 @@ The guarantees, and where each one is enforced:
   credential access; Python runs in an isolated microVM that sees only its
   input data.
 - Auditability. Every proxied call and every reduce run is written to an
-  append-only, hash-chained log. An edited, deleted, or reordered line is
-  detectable.
+  append-only, hash-chained log whose lines are ES256-signed, so an edited,
+  inserted, or reordered line is detectable by anyone with the public key — not
+  just the operator who holds the private one. Wholesale tail truncation still
+  needs an external anchor; see "The audit chain".
 - Plane separation. The operator surface (admin API and console) uses its own
   token, and in public mode it moves to a loopback listener the tunnel never
   exposes. An agent's OAuth token can never reach admin.

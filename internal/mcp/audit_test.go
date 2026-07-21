@@ -45,7 +45,7 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 	}
 	path := filepath.Join(dir, "audit.jsonl")
 
-	v, err := VerifyAuditLog(path)
+	v, err := VerifyAuditLog(path, nil)
 	if err != nil || !v.Intact || v.Lines != 3 || v.Chained != 3 {
 		t.Fatalf("fresh log must verify intact: %+v err=%v", v, err)
 	}
@@ -60,13 +60,13 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 		t.Fatal("test setup: edit did not change the line")
 	}
 	os.WriteFile(path, []byte(strings.Join(edited, "\n")+"\n"), 0o600)
-	if v, _ := VerifyAuditLog(path); v.Intact || v.BreakAt != 2 {
+	if v, _ := VerifyAuditLog(path, nil); v.Intact || v.BreakAt != 2 {
 		t.Fatalf("in-place edit must break verification at line 2: %+v", v)
 	}
 
 	// Delete line 2 entirely — line 3 no longer links to line 1.
 	os.WriteFile(path, []byte(lines[0]+"\n"+lines[2]+"\n"), 0o600)
-	if v, _ := VerifyAuditLog(path); v.Intact || v.BreakAt != 2 {
+	if v, _ := VerifyAuditLog(path, nil); v.Intact || v.BreakAt != 2 {
 		t.Fatalf("deleting a line must break the chain at line 2: %+v", v)
 	}
 }
@@ -81,7 +81,7 @@ func TestAuditChainSurvivesRestart(t *testing.T) {
 	s2 := NewServer(fakeRunner{}, WithStateDir(dir))
 	s2.putRun(s2.nextRunID(), runRecord{Kind: "proxy", Tool: "b"})
 
-	v, err := VerifyAuditLog(filepath.Join(dir, "audit.jsonl"))
+	v, err := VerifyAuditLog(filepath.Join(dir, "audit.jsonl"), nil)
 	if err != nil || !v.Intact || v.Chained != 2 {
 		t.Fatalf("chain must continue across restart: %+v err=%v", v, err)
 	}
@@ -99,7 +99,7 @@ func TestAuditChainToleratesLegacyLines(t *testing.T) {
 	s := NewServer(fakeRunner{}, WithStateDir(dir)) // loads legacy history
 	s.putRun(s.nextRunID(), runRecord{Kind: "proxy", Tool: "new"})
 
-	v, err := VerifyAuditLog(path)
+	v, err := VerifyAuditLog(path, nil)
 	if err != nil || !v.Intact {
 		t.Fatalf("legacy prefix must not fail verification: %+v err=%v", v, err)
 	}

@@ -98,6 +98,12 @@ type Server struct {
 	// registration. It guards on-disk state only, independent of mu (in-memory maps).
 	persistMu sync.Mutex
 
+	// auditSigner, when set, signs each audit line's chain hash (ES256) so the log
+	// is unforgeable without the private key and verifiable offline from the public
+	// key. Nil = integrity-only chain (detects accidental corruption and naive edits,
+	// but a key-less attacker who recomputes hashes is not stopped).
+	auditSigner auditSigner
+
 	mu         sync.Mutex
 	auditMu    sync.Mutex // serializes audit appends (the hash chain must not fork)
 	auditHash  string     // last written chain hash; "" before the first chained line
@@ -175,6 +181,30 @@ func WithSecretStore(s2 secretstore.Store) Option { return func(s *Server) { s.s
 // WithStateDir sets the directory for non-secret persisted state (the upstream
 // registrations index), so OAuth upstreams reload across restarts.
 func WithStateDir(dir string) Option { return func(s *Server) { s.stateDir = dir } }
+
+// auditSigner signs and verifies audit-chain hashes. *auth.Signer (ES256/P-256)
+// satisfies it; kept as a narrow interface so the audit log doesn't import auth
+// and tests can inject a stub.
+type auditSigner interface {
+	SignBytes(data []byte) ([]byte, error)
+	VerifyBytes(data, sig []byte) bool
+}
+
+// WithAuditSigner makes the audit chain signed (and offline-verifiable): every
+// appended line is signed over its hash, and VerifyAuditLog checks those
+// signatures. Without it the chain is integrity-only.
+func WithAuditSigner(signer auditSigner) Option {
+	return func(s *Server) { s.auditSigner = signer }
+}
+
+// auditVerify returns the signature verifier for VerifyAuditLog, or nil when no
+// signer is configured (chain-linkage checks only).
+func (s *Server) auditVerify() func(hash, sig []byte) bool {
+	if s.auditSigner == nil {
+		return nil
+	}
+	return s.auditSigner.VerifyBytes
+}
 
 // WithBudgetGate installs the shared context-byte gate + refstore (the same one
 // the run substrates use) so the proxy path can minimize and reduce off-context.
