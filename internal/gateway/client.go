@@ -159,7 +159,7 @@ func (u *Upstream) call(ctx context.Context, method string, params any) (json.Ra
 		return nil, fmt.Errorf("gateway %q: %s: http %d: %s", u.Name, method, resp.StatusCode, bytes.TrimSpace(data))
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		data = sseData(data)
+		data = sseResponse(data)
 	}
 	var reply rpcReply
 	if err := json.Unmarshal(data, &reply); err != nil {
@@ -175,28 +175,60 @@ func (u *Upstream) call(ctx context.Context, method string, params any) (json.Ra
 	return reply.Result, nil
 }
 
-// sseData extracts the first SSE "message" event's data payload from a fully
-// buffered text/event-stream body. Operating on the complete buffer (vs streaming
-// line-by-line) avoids chunk-boundary corruption and any per-line size limit on
-// multi-MB events. Multiple data: lines join with \n per the SSE spec.
-func sseData(buf []byte) []byte {
-	var data [][]byte
+// sseEvents splits a fully buffered text/event-stream body into each event's data
+// payload, in order. Operating on the complete buffer (vs streaming line-by-line)
+// avoids chunk-boundary corruption and any per-line size limit on multi-MB events.
+// Multiple data: lines within one event join with \n per the SSE spec.
+func sseEvents(buf []byte) [][]byte {
+	var events, data [][]byte
+	flush := func() {
+		if len(data) > 0 {
+			events = append(events, bytes.Join(data, []byte("\n")))
+			data = nil
+		}
+	}
 	for _, raw := range bytes.Split(buf, []byte("\n")) {
 		line := bytes.TrimRight(raw, "\r")
 		if len(line) == 0 { // event boundary
-			if len(data) > 0 {
-				return bytes.Join(data, []byte("\n"))
-			}
+			flush()
 			continue
 		}
 		if v, ok := bytes.CutPrefix(line, []byte("data:")); ok {
 			data = append(data, bytes.TrimPrefix(v, []byte(" ")))
 		}
 	}
-	if len(data) > 0 {
-		return bytes.Join(data, []byte("\n"))
+	flush() // trailing event with no terminating blank line
+	return events
+}
+
+// sseResponse selects the JSON-RPC RESPONSE to our request from an SSE body: the
+// event carrying "result" or "error" and no "method". The Streamable-HTTP spec
+// lets a server emit notifications and server-initiated requests (progress,
+// logging, sampling) on the POST stream BEFORE the response, so taking the first
+// event — as this once did — misreads a leading notification as the reply and
+// surfaces a spurious "malformed result". A response has no "method" field;
+// notifications and requests do. Falls back to the whole buffer when nothing is
+// SSE-framed, or to the last event if none parse as a response (so the decode
+// downstream raises a real error rather than silently using a notification).
+func sseResponse(buf []byte) []byte {
+	events := sseEvents(buf)
+	if len(events) == 0 {
+		return buf // not SSE-framed; use as-is
 	}
-	return buf // not SSE-framed; use as-is
+	for _, ev := range events {
+		var probe struct {
+			Method *string         `json:"method"`
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(ev, &probe) != nil {
+			continue
+		}
+		if probe.Method == nil && (probe.Result != nil || probe.Error != nil) {
+			return ev
+		}
+	}
+	return events[len(events)-1]
 }
 
 // Initialize performs the MCP initialize handshake, captures the session id, and
