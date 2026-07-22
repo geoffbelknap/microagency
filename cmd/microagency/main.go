@@ -20,24 +20,17 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"microagency/internal/app"
 	"microagency/internal/auth"
 	"microagency/internal/baomanager"
-	"microagency/internal/budget"
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
-	"microagency/internal/minimize"
-	"microagency/internal/refstore"
-	"microagency/internal/router"
-	"microagency/internal/sandbox"
-	"microagency/internal/secretstore"
 	"microagency/internal/tunnel"
-	"microagency/internal/wasmexec"
 )
 
 // Build stamp, set via -ldflags at release time (GoReleaser). "dev" for a plain
@@ -706,6 +699,25 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string
 // the URL, approve once, no token handed over. --token forces a static bearer (for
 // clients that can't do OAuth); --issuer uses an external authorization server.
 // /admin + /console always sit behind a persistent operator token.
+func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly bool, consoleAddr string) *mcp.Server {
+	srv, err := app.BuildServer(app.Config{
+		StateDir:          microagencyDir(),
+		Version:           version,
+		ConsoleAddr:       consoleAddr,
+		MaxInlineBytes:    maxInlineBytes,
+		WasmMaxMemMB:      wasmMaxMemMB,
+		PersistRefs:       persistRefs,
+		ReduceEnginesOnly: reduceEnginesOnly,
+		EngineSpecs:       engineSpecs,
+		BundledEngines:    bundledEngines(),
+		BundledMinimizers: bundledMinimizers(),
+	})
+	if err != nil {
+		fatal("build server", "err", err)
+	}
+	return srv
+}
+
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
 	// A tunnel with no --token needs a pasteable /mcp bearer that is NOT the operator
@@ -919,18 +931,6 @@ func oauthKeyPath() string {
 	return filepath.Join(home, ".microagency", "oauth-key")
 }
 
-// auditKeyPath is where the audit-log signing key lives (0600), so the audit
-// chain stays signed and offline-verifiable across restarts. Distinct from the
-// OAuth key so audit integrity holds in every auth mode (built-in AS, external
-// issuer, or static bearer), not just when the AS is running.
-func auditKeyPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "microagency-audit-key")
-	}
-	return filepath.Join(home, ".microagency", "audit-key")
-}
-
 // oauthClientsPath is where dynamic client registrations persist (0600), so a
 // client's cached client_id stays known across restarts (no spurious re-auth).
 func oauthClientsPath() string {
@@ -980,171 +980,4 @@ func randomToken() string {
 		fatal("generate token", "err", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-// buildServer wires the MCP gateway: the refstore-backed budget gate, the reduce
-// substrate (wasm engines + a microVM router), and the upstream secret store.
-// openPersistedRefs builds an encrypted, TTL'd file-backed refstore. The AES-256 key
-// is a 0600 file under the state dir (generated on first use) — a local at-rest key
-// for a single-user install; a KMS/Vault-held key is the hardening path.
-func openPersistedRefs() (refstore.Store, error) {
-	key, err := loadOrCreateRefsKey(filepath.Join(microagencyDir(), "refs.key"))
-	if err != nil {
-		return nil, err
-	}
-	return refstore.NewFileStore(filepath.Join(microagencyDir(), "refs"), key, 24*time.Hour, 10000)
-}
-
-// loadOrCreateRefsKey reads the 32-byte refs encryption key, minting and persisting
-// one (0600) on first use.
-func loadOrCreateRefsKey(path string) ([]byte, error) {
-	if b, err := os.ReadFile(path); err == nil && len(b) == 32 {
-		return b, nil
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(path, key, 0o600); err != nil {
-		return nil, err
-	}
-	return key, nil
-}
-
-// orderEngineNames returns bundled engine names in a deterministic registration
-// order: jq first (the preferred default), then the rest alphabetically. The
-// first engine registered becomes the default (see mcp.WithWasmEngine), so a
-// stable order keeps the default from flipping between restarts under Go's
-// randomized map iteration — an un-inferable, jq-shaped query would otherwise
-// route to a different engine each boot.
-func orderEngineNames(names []string) []string {
-	out := append([]string(nil), names...)
-	sort.Slice(out, func(i, j int) bool {
-		if (out[i] == "jq") != (out[j] == "jq") {
-			return out[i] == "jq"
-		}
-		return out[i] < out[j]
-	})
-	return out
-}
-
-func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly bool, consoleAddr string) *mcp.Server {
-	// One refstore backs the budget gate for both substrates AND the proxy path, so
-	// a reffed result is resolvable regardless of which produced it. maxInlineBytes
-	// (operator-set via --max-inline-bytes) is the single context budget everywhere.
-	// In-memory by default; --persist-refs swaps in an encrypted, TTL'd file store so
-	// <ref_> handles survive a restart (opt-in — it's a new at-rest liability). The
-	// in-memory store is BOUNDED (24h TTL, 10k entries — the same limits as the file
-	// store) so a long-lived gateway that parks many multi-MB results can't grow
-	// until it OOMs.
-	var store refstore.Store = refstore.NewBoundedMemStore(24*time.Hour, 10000)
-	if persistRefs {
-		if fs, err := openPersistedRefs(); err != nil {
-			slog.Warn("--persist-refs unavailable; using in-memory refs", "err", err)
-		} else {
-			store = fs
-			slog.Info("refs persisted (encrypted, 24h TTL)", "dir", filepath.Join(microagencyDir(), "refs"))
-		}
-	}
-	gate := budget.Gate{MaxBytes: maxInlineBytes, Store: store}
-	// The microVM reduce path (arbitrary code) needs nested virtualization;
-	// where there is none, disable it and keep only the in-process wasm
-	// engines. A reduce that would have used the microVM then fails with a
-	// clear error instead of silently degrading.
-	var provider sandbox.Provider = sandbox.MicroagentProvider{}
-	if reduceEnginesOnly {
-		provider = sandbox.UnavailableProvider{Reason: "microagency is running with --reduce-engines-only (no microVM sandbox)"}
-		slog.Info("microVM reduce disabled (--reduce-engines-only); wasm engines only")
-	}
-	rt := router.Router{
-		Provider: provider,
-		Gate:     gate,
-		Image:    "docker.io/library/python:3.13-slim",
-		CodePath: "/app/run.py",
-		Timeout:  6 * time.Minute,
-	}
-	// Acquired secrets (upstream OAuth refresh tokens) persist in OpenBao/Vault when
-	// VAULT_ADDR + VAULT_TOKEN are set, else a 0600 file under ~/.microagency.
-	secStore := secretstore.Open(microagencyDir(), os.Getenv, http.DefaultClient)
-	// Hand the store + gate to the Server so the PROXY path (aggregated MCP tool
-	// calls) goes through reference-by-default minimization and the reffed results
-	// are reducible off-context.
-	opts := []mcp.Option{mcp.WithSecretStore(secStore), mcp.WithStateDir(microagencyDir()), mcp.WithBudgetGate(gate), mcp.WithVersion(version), mcp.WithConsoleAddr(consoleAddr)}
-	// Sign the audit chain (ES256) so a record can't be forged or edited without the
-	// key and the log verifies offline from the public key. Best-effort: if the key
-	// can't be loaded, the chain stays integrity-only rather than blocking startup.
-	if auditSigner, err := auth.LoadOrCreateSigner(auditKeyPath()); err == nil {
-		opts = append(opts, mcp.WithAuditSigner(auditSigner))
-	} else {
-		slog.Warn("audit signing disabled; chain is integrity-only", "err", err)
-	}
-	// The wasm engines back reduce (a declarative reduction over a ref is computed
-	// in the selected engine instead of running Python in a microVM). The engines
-	// BUNDLED into the binary are registered automatically; each `--engine name=path`
-	// adds or overrides one. All engines share the budget gate.
-	addEngine := func(name string, mod []byte) {
-		opts = append(opts, mcp.WithWasmEngine(name, wasmexec.SandboxEngine{
-			Module:         mod,
-			Timeout:        2 * time.Minute,
-			MaxMemoryPages: uint32(wasmMaxMemMB) * 16, // 64 KiB pages → MiB
-		}))
-	}
-	// Register bundled engines in a deterministic order so the default engine
-	// (the first one registered — see mcp.WithWasmEngine) is stable across
-	// restarts rather than whatever Go's randomized map iteration yields. jq is
-	// preferred as the default when present: an engine-less query is almost
-	// always jq-shaped (sql's SELECT/WITH and jq's .[{( are inferred; anything
-	// else falls through to the default), and a stable default keeps the same
-	// reduce request from succeeding one restart and failing the next.
-	bundled := bundledEngines()
-	bundledNames := make([]string, 0, len(bundled))
-	for name := range bundled {
-		bundledNames = append(bundledNames, name)
-	}
-	for _, name := range orderEngineNames(bundledNames) {
-		addEngine(name, bundled[name])
-	}
-	for _, spec := range engineSpecs {
-		name, path, ok := strings.Cut(spec, "=")
-		if !ok || name == "" || path == "" {
-			fatal("--engine expects name=path", "got", spec)
-		}
-		mod, err := os.ReadFile(path)
-		if err != nil {
-			fatal("read engine", "path", path, "err", err)
-		}
-		addEngine(name, mod)
-	}
-	// Field minimizers: bundled wasip1 modules that redact/tokenize/alert on
-	// sensitive FIELD values at the egress-to-model boundary (the fine-grained
-	// complement to reference-by-default). Loaded into a warm cluster and installed
-	// as an ordered pipeline; per-upstream policy (set from the console) decides what
-	// actually fires — with no policy for an upstream, nothing changes.
-	if mods := bundledMinimizers(); len(mods) > 0 {
-		names := make([]string, 0, len(mods))
-		for n := range mods {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		var chain []minimize.Module
-		for _, n := range names {
-			m, err := minimize.LoadWasm(context.Background(), n, mods[n], minimize.Options{
-				Timeout:        30 * time.Second,
-				MaxMemoryPages: uint32(wasmMaxMemMB) * 16,
-			})
-			if err != nil {
-				slog.Warn("minimizer unavailable", "minimizer", n, "err", err)
-				continue
-			}
-			chain = append(chain, m)
-		}
-		if len(chain) > 0 {
-			opts = append(opts, mcp.WithMinimizer(minimize.Pipeline{Modules: chain}, minimize.NewMemTokenStore()))
-			opts = append(opts, mcp.WithSecureDefault(true)) // protect detected sensitive fields by default; operator opts down
-		}
-	}
-	return mcp.NewServer(rt, opts...)
 }
