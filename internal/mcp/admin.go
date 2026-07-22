@@ -91,6 +91,10 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	}))
 	mux.HandleFunc("GET /admin/refs/{ref}", g(s.adminMaterializeRef))
 	mux.HandleFunc("GET /admin/metrics", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Metrics()) }))
+	mux.HandleFunc("GET /admin/metrics/prometheus", g(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", PrometheusContentType)
+		_, _ = w.Write([]byte(s.Metrics().Prometheus()))
+	}))
 	mux.HandleFunc("GET /admin/infra", g(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, s.InfraStatus(r.Context())) }))
 	mux.HandleFunc("GET /admin/upstreams", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.UpstreamList()) }))
 	mux.HandleFunc("GET /admin/egress-policy", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.EgressPolicy()) }))
