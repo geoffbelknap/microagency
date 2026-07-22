@@ -76,6 +76,26 @@ The OAuth signing key lives at `~/.microagency/oauth-key` (mode 0600), so
 issued tokens survive restarts. The admin API and the console use a separate
 operator token: `cat ~/.microagency/token`.
 
+### Where credentials live
+
+The upstream secrets microagency holds — OAuth refresh tokens, static bearers,
+stored client registrations — go in a secret store, not the plaintext
+registration index. On startup `up` picks one:
+
+- If `VAULT_ADDR` (and `VAULT_TOKEN`) are set, it uses that Vault/OpenBao.
+- Otherwise, if an `openbao`/`bao` binary is on your PATH, `up` starts a
+  dedicated OpenBao on `127.0.0.1:8200`, stores its unseal key and root token
+  under `~/.microagency/openbao/` (0600), and uses its KV-v2 engine. `restart`
+  keeps this OpenBao up; `down` stops it.
+- If neither is available, it falls back to an encrypted-at-rest **file store**
+  under `~/.microagency`. The startup log records which posture you got (watch
+  for it in `~/.microagency/microagency.log` when running backgrounded), so you
+  can tell where your secrets actually are.
+
+The managed OpenBao runs with `tls_disable` on the loopback bind (it never
+leaves localhost). Auto-unseal via a system keychain/KMS is a hardening
+follow-up.
+
 ### Static bearer / external OAuth
 
 For a client that can't do OAuth, `up --token <tok>` serves a static bearer
@@ -90,9 +110,12 @@ claude mcp add --transport http microagency http://127.0.0.1:8765/mcp \
 ```
 
 For a shared or hosted deployment, `up --issuer <url>` validates tokens from
-an external authorization server; clients log in there. For the public web
-apps, `up --public` wraps a tunnel. The tunnel path is static-bearer for now;
-OAuth over the tunnel is planned.
+an external authorization server; clients log in there — and this works over a
+tunnel too (`up --tunnel … --issuer …`, see [Public mode](#public-mode-remote-mcp-in-the-claudechatgpt-web-apps)),
+so external OAuth over the tunnel is available today. What's still planned is
+serving the **built-in** authorization server over the tunnel; until then, a
+tunnel without `--issuer` uses a static bearer (a distinct MCP bearer, minted at
+`~/.microagency/mcp-bearer`, never the operator token).
 
 ### Client-spawned (stdio)
 
@@ -102,6 +125,11 @@ port, no token:
 ```sh
 claude mcp add microagency -- /abs/path/to/microagency up --stdio
 ```
+
+`--stdio` is meant for `reduce` and for testing the tool surface: it doesn't run
+OpenBao or aggregate upstreams, so there's no console to add servers from and the
+index starts empty. For the gateway story — connecting MCP servers and proxying
+them — use the HTTP server (`up`).
 
 ## The tool index
 
@@ -186,6 +214,26 @@ load a `.wasm` you trust. The sandbox stops an engine from reaching the network
 or your credentials; it does not vet what the engine does with the bytes it's
 given.
 
+## Field minimization
+
+Reference-by-default keeps *bulk* data out of context; field minimization is the
+fine-grained complement, for the small results that do return inline. As an
+upstream result passes back toward the model, a pipeline of bundled wasip1
+minimizers scans its field values and can redact or **tokenize** the sensitive
+ones — replacing a value with a stable placeholder (`<mtok_…>`) instead of the
+real bytes. When the model later passes a placeholder back on an outbound call,
+the gateway resolves it to the real value before the request leaves — so the
+model can *reference* a secret it never saw. Placeholders are keyed by a
+per-session secret and scoped to the principal and upstream they came from.
+
+This is **on by default**: an upstream with no explicit policy gets a
+conservative default that protects detected sensitive fields, and the operator
+opts *down* by setting a policy from the console (microagency also auto-suggests
+one from each upstream's tool schemas). The count of fields protected per call
+shows up in the run record and the impact metrics. If you see tokenized values in
+a result, that's this pipeline — the real data is on the gateway, resolved only
+on the outbound call.
+
 ## The audit chain
 
 Every run and proxied call is written to an append-only audit log. Each line is
@@ -245,8 +293,10 @@ user of the gateway can find and invoke them, against the one set of
 credentials the gateway holds. To restrict a connection to a single user, set its `owner` to
 that user's token subject, at add time or from the console. Other users can't
 see or call an owned connection or the credential it holds; the index and the
-invocation gate both enforce it. Self-service connections, where each user
-runs their own OAuth flow, aren't implemented yet.
+invocation gate both enforce it. Off-context results are scoped the same way:
+each `<ref_>` is bound to the subject that created it, so one user can't reduce
+over another's parked data even with the handle. Self-service connections, where
+each user runs their own OAuth flow, aren't implemented yet.
 
 ## The egress guard
 
@@ -261,13 +311,22 @@ guard stays silent.
 The guarantees, and where each one is enforced:
 
 - Credential custody. Upstream tokens and OAuth refresh tokens live in the
-  gateway's secret store. Nothing in the agent's config, context, or tool
-  results can reveal them.
+  gateway's secret store — OpenBao/Vault when available, else an encrypted file
+  store (see "Where credentials live"). Nothing in the agent's config, context,
+  or tool results can reveal them.
 - Least privilege. A connection can be read-only, narrowed to specific OAuth
   scopes, restricted to one user (`owner`), or held in the index as
-  discovered — findable but not invocable until an operator enables it.
+  discovered — findable but not invocable until an operator enables it. Reffed
+  data is likewise bound to the principal that created it: another user holding
+  the `<ref_>` handle can't reduce over it.
+- Field minimization. Sensitive field values in inline results are redacted or
+  tokenized before they reach the model, on by default; a tokenized value is
+  resolved back only on the principal's outbound call to the same upstream (see
+  "Field minimization").
 - Mediation. The egress-guard hook warns when an agent tries to reach a
-  connected host directly instead of through the gateway.
+  connected host directly instead of through the gateway; `microagency doctor`
+  additionally flags any upstream the gateway proxies that a client is ALSO wired
+  to directly — a back door around the gateway.
 - Isolation. Query engines run in WebAssembly modules with no network or
   credential access; Python runs in an isolated microVM that sees only its
   input data.

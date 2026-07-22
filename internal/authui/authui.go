@@ -1,36 +1,6 @@
 // Package authui renders microagency's served OAuth screens: the client-approval
 // consent page, the upstream-connected callback, and generic notices. One shared
 // stylesheet, no external assets, auto light/dark via prefers-color-scheme.
-//
-// PLACEMENT
-//
-//	Save as internal/authui/authui.go (new package). It has no microagency
-//	dependencies, so both package auth and package mcp can import it.
-//
-// WIRE-UP (two call sites)
-//
-//  1. internal/auth/authserver.go — delete the consentTmpl var and the
-//     renderConsent helper, then replace the call:
-//
-//     - renderConsent(w, name, redirect, fields)
-//     + authui.WriteConsent(w, name, redirect, fields)
-//
-//     (add the import "…/internal/authui"; drop the now-unused
-//     "html/template" import if nothing else uses it.)
-//
-//  2. internal/mcp/oauthadd.go — replace the two inline writers:
-//
-//     - writeHTML(w, "This authorization request is unknown or expired. …")
-//     + authui.WriteMessage(w, "This authorization request is unknown or expired. Start again from the console.")
-//
-//     …and the final success response block:
-//
-//     - w.Header().Set("Content-Type", "text/html; charset=utf-8")
-//     - fmt.Fprintf(w, `<!doctype html>…Returning to the console…`, html.EscapeString(flow.name))
-//     + authui.WriteConnected(w, flow.name)
-//
-//     The local writeHTML func in oauthadd.go can be deleted once its callers
-//     point at authui.WriteMessage. (Keep "html" only if still referenced.)
 package authui
 
 import (

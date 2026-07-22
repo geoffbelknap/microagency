@@ -46,7 +46,14 @@ connected. Any other client works the same way: paste
 a token.
 
 To stop, `microagency down`. To disconnect a client,
-`claude mcp remove microagency`.
+`claude mcp remove microagency`. `microagency restart` bounces the server
+(keeping its secret store up), and `microagency purge` deletes your local state
+(add `--full` to wipe everything; both confirm first).
+
+Your upstream credentials are held in a secret store, not in the clear:
+OpenBao/Vault when available (or a managed OpenBao if the binary is on your
+PATH), otherwise an encrypted file store under `~/.microagency`. See
+[where credentials live](ARCHITECTURE.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency
 up`. Go is the only build dependency.
@@ -79,10 +86,11 @@ the gateway; only the answer comes back.
 ## Going deeper
 
 [ARCHITECTURE.md](ARCHITECTURE.md) covers how it all works: the auth modes
-(built-in OAuth, static bearer, external issuer, stdio), the tool index and
-how invocation is gated, off-context data handling and the query engines
-and microVM, public mode for the Claude and ChatGPT web apps, multi-user
-gateways, and the security model, including how to write your own engine.
+(built-in OAuth, static bearer, external issuer, stdio), where credentials
+live, the tool index and how invocation is gated, off-context data handling
+and the query engines and microVM, field minimization, public mode for the
+Claude and ChatGPT web apps, multi-user gateways, and the security model,
+including how to write your own engine.
 
 `microagency --help` shows the CLI surface, and `microagency doctor` checks
 runtime and engine health.
