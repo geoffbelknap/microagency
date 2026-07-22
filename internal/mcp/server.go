@@ -73,19 +73,13 @@ type Server struct {
 	// before they enter model context (redact/tokenize/alert on sensitive values),
 	// the fine-grained complement to reference-by-default. nil = off. tokens holds
 	// the placeholder→value bindings for tokenized fields, resolved back on the way
-	// to the upstream. minimizePolicies is the per-upstream policy (nil policy for an
-	// upstream = passthrough), guarded by mu.
+	// to the upstream. (The per-upstream minimize policy lives in reg.policies.)
 	minimizer minimize.Module
 	tokens    minimize.TokenStore
 	// tokenSalt keys placeholder derivation in the minimizer (a per-session secret,
 	// never exposed to the model) so tokenized low-entropy values can't be brute-
 	// forced from their placeholders. Set when a minimizer is installed.
-	tokenSalt        string
-	minimizePolicies map[string][]byte
-	// secureDefault protects detected sensitive fields by DEFAULT: an upstream with
-	// no explicit policy gets defaultMinimizePolicy, and the operator opts DOWN by
-	// setting one. Off = opt-in (no policy → passthrough).
-	secureDefault bool
+	tokenSalt string
 
 	// inflight decouples a slow READ's execution from the caller's request context
 	// (a client cancel no longer aborts near-done work) and single-flights identical
@@ -95,7 +89,7 @@ type Server struct {
 
 	// persistMu serializes the read-modify-write of upstreams.json so concurrent
 	// admin handlers and the OAuth callback can't interleave and lose a persisted
-	// registration. It guards on-disk state only, independent of mu (in-memory maps).
+	// registration. It guards on-disk state only, independent of the in-memory stores.
 	persistMu sync.Mutex
 
 	// auditSigner, when set, signs each audit line's chain hash (ES256) so the log
@@ -104,24 +98,47 @@ type Server struct {
 	// but a key-less attacker who recomputes hashes is not stopped).
 	auditSigner auditSigner
 
-	mu              sync.Mutex
-	auditMu         sync.Mutex // serializes audit appends (the hash chain must not fork)
-	auditHash       string     // last written chain hash; "" before the first chained line
-	auditChained    int        // count of chained lines written/loaded (the log's height)
-	auditAnchoredAt int        // auditChained at the last out-of-band anchor save
-	seq             int
-	// runs is a BOUNDED window of the most recent runs (the durable audit log on
-	// disk is the complete record). runOrder tracks insertion order so the oldest is
-	// evicted once maxRuns is reached — without a cap, a long-lived daemon's map grew
-	// forever and every /admin/runs poll and Metrics scan walked all of it under mu.
-	runs       map[string]runRecord
-	runOrder   []string
-	maxRuns    int
-	runsTotal  int                   // all-time run count (survives window eviction), for Metrics.TotalRuns
-	impact     Impact                // all-time cumulative impact, accumulated as runs are recorded
-	upstreams  map[string]*upstream  // aggregated MCP servers (enabled or discovered), by name
-	toolUsage  map[string]int        // per-tool invocation counts, a find_tools ranking signal
-	oauthFlows map[string]*oauthFlow // pending console OAuth-add flows, keyed by state
+	// Audit-write state, guarded by auditMu (the hash chain must not fork).
+	auditMu         sync.Mutex
+	auditHash       string // last written chain hash; "" before the first chained line
+	auditChained    int    // count of chained lines written/loaded (the log's height)
+	auditAnchoredAt int    // auditChained at the last out-of-band anchor save
+
+	// Three concern-scoped stores, each with its OWN mutex — previously one shared
+	// mutex guarded runs, upstreams, tool usage, OAuth flows, and minimize policies
+	// alike. Splitting them cuts the blast radius (a change to run tracking can't
+	// affect the registry) and the contention (recording a run no longer blocks a
+	// find_tools index read). No critical section spans two of them.
+	reg   registry       // aggregated upstreams + tool usage + per-upstream minimize policy
+	rs    runStore       // the bounded recent-run window + all-time counters + run-id seq
+	flows oauthFlowStore // pending console OAuth-add flows
+}
+
+// registry holds the aggregated-MCP index and its per-upstream configuration.
+type registry struct {
+	mu            sync.Mutex
+	conns         map[string]*upstream // aggregated MCP servers (enabled or discovered), by name
+	usage         map[string]int       // per-tool invocation counts, a find_tools ranking signal
+	policies      map[string][]byte    // per-upstream field-minimization policy JSON; nil = passthrough
+	secureDefault bool                 // protect detected sensitive fields by default (operator opts down)
+}
+
+// runStore holds the bounded recent-run window (the durable audit log on disk is
+// the complete record) plus the all-time counters that survive window eviction.
+type runStore struct {
+	mu      sync.Mutex
+	seq     int
+	byID    map[string]runRecord // the recent window, by run id
+	order   []string             // insertion order, so the oldest is evicted at maxKept
+	maxKept int                  // window cap (0 = unbounded)
+	total   int                  // all-time run count, for Metrics.TotalRuns
+	impact  Impact               // all-time cumulative impact
+}
+
+// oauthFlowStore holds pending console OAuth-add flows, keyed by state.
+type oauthFlowStore struct {
+	mu      sync.Mutex
+	byState map[string]*oauthFlow
 }
 
 // defaultMaxRuns bounds the in-memory recent-run window. The complete history
@@ -171,13 +188,11 @@ type runRecord struct {
 
 func NewServer(r Runner, opts ...Option) *Server {
 	s := &Server{
-		runner:           r,
-		runs:             map[string]runRecord{},
-		maxRuns:          defaultMaxRuns,
-		toolUsage:        map[string]int{},
-		oauthFlows:       map[string]*oauthFlow{},
-		minimizePolicies: map[string][]byte{},
-		inflight:         newInflight(),
+		runner:   r,
+		reg:      registry{conns: map[string]*upstream{}, usage: map[string]int{}, policies: map[string][]byte{}},
+		rs:       runStore{byID: map[string]runRecord{}, maxKept: defaultMaxRuns},
+		flows:    oauthFlowStore{byState: map[string]*oauthFlow{}},
+		inflight: newInflight(),
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
 		// aren't killed mid-flight.
@@ -202,7 +217,7 @@ func WithStateDir(dir string) Option { return func(s *Server) { s.stateDir = dir
 // audit log keeps the complete history regardless; this caps what /admin/runs and
 // the metrics breakdown scan. Applied before the audit replay, so a restart honors
 // it too.
-func WithMaxRuns(n int) Option { return func(s *Server) { s.maxRuns = n } }
+func WithMaxRuns(n int) Option { return func(s *Server) { s.rs.maxKept = n } }
 
 // auditSigner signs and verifies audit-chain hashes. *auth.Signer (ES256/P-256)
 // satisfies it; kept as a narrow interface so the audit log doesn't import auth
@@ -264,7 +279,7 @@ func newTokenSalt() string {
 // WithSecureDefault turns on secure-by-default minimization: an upstream with no
 // explicit policy is protected by defaultMinimizePolicy (the operator opts down),
 // instead of passing through. No effect without a minimizer installed.
-func WithSecureDefault(on bool) Option { return func(s *Server) { s.secureDefault = on } }
+func WithSecureDefault(on bool) Option { return func(s *Server) { s.reg.secureDefault = on } }
 
 // WithConsoleAddr records where the operator console is bound (e.g.
 // "127.0.0.1:8765"), reported in /admin/infra so the header shows the actual
@@ -392,19 +407,19 @@ func initializeResult(version string) map[string]any {
 
 // nextRunID returns a deterministic run id and reserves it.
 func (s *Server) nextRunID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq++
-	return fmt.Sprintf("run_%d", s.seq)
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
+	s.rs.seq++
+	return fmt.Sprintf("run_%d", s.rs.seq)
 }
 
 func (s *Server) putRun(id string, rec runRecord) {
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now()
 	}
-	s.mu.Lock()
+	s.rs.mu.Lock()
 	s.addRunLocked(id, rec)
-	s.mu.Unlock()
+	s.rs.mu.Unlock()
 	s.appendAudit(id, rec) // durable, append-only — the audit outlives the process
 }
 
@@ -412,41 +427,41 @@ func (s *Server) putRun(id string, rec runRecord) {
 // all-time cumulative counters, evicting the oldest window entry past maxRuns. The
 // cumulative impact/total are accumulated on first insert (so they stay complete
 // even after the window evicts a run), and recomputed from the durable log on
-// restart via loadAudit. Caller holds s.mu.
+// restart via loadAudit. Caller holds s.rs.mu.
 func (s *Server) addRunLocked(id string, rec runRecord) {
-	if _, exists := s.runs[id]; !exists {
-		s.runOrder = append(s.runOrder, id)
-		s.runsTotal++
+	if _, exists := s.rs.byID[id]; !exists {
+		s.rs.order = append(s.rs.order, id)
+		s.rs.total++
 		s.accumulateImpactLocked(rec)
 	}
-	s.runs[id] = rec
-	for s.maxRuns > 0 && len(s.runOrder) > s.maxRuns {
-		oldest := s.runOrder[0]
-		s.runOrder = s.runOrder[1:]
-		delete(s.runs, oldest)
+	s.rs.byID[id] = rec
+	for s.rs.maxKept > 0 && len(s.rs.order) > s.rs.maxKept {
+		oldest := s.rs.order[0]
+		s.rs.order = s.rs.order[1:]
+		delete(s.rs.byID, oldest)
 	}
 }
 
 // accumulateImpactLocked folds one run into the all-time impact totals, mirroring
 // the per-run logic in Metrics so the cumulative figures match a full scan. Caller
-// holds s.mu.
+// holds s.rs.mu.
 func (s *Server) accumulateImpactLocked(rec runRecord) {
 	if rec.Kind == "materialize" { // operator out-of-band pull, not a model-context call
 		return
 	}
-	s.impact.Calls++
+	s.rs.impact.Calls++
 	if rec.Reffed {
-		s.impact.Parked++
-		s.impact.BytesKeptOut += int64(rec.Bytes)
+		s.rs.impact.Parked++
+		s.rs.impact.BytesKeptOut += int64(rec.Bytes)
 	} else {
-		s.impact.BytesToContext += int64(rec.OutputBytes)
+		s.rs.impact.BytesToContext += int64(rec.OutputBytes)
 	}
-	s.impact.FieldsProtected += rec.Protected
+	s.rs.impact.FieldsProtected += rec.Protected
 }
 
 func (s *Server) getRun(id string) (runRecord, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.runs[id]
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
+	rec, ok := s.rs.byID[id]
 	return rec, ok
 }

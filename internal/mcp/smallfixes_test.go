@@ -65,11 +65,11 @@ func TestPutOAuthFlowSweepsExpired(t *testing.T) {
 	s.putOAuthFlow("stale", &oauthFlow{name: "old", expiry: time.Now().Add(-time.Hour)})
 	s.putOAuthFlow("fresh", &oauthFlow{name: "new", expiry: time.Now().Add(time.Hour)})
 
-	s.mu.Lock()
-	_, staleThere := s.oauthFlows["stale"]
-	_, freshThere := s.oauthFlows["fresh"]
-	n := len(s.oauthFlows)
-	s.mu.Unlock()
+	s.flows.mu.Lock()
+	_, staleThere := s.flows.byState["stale"]
+	_, freshThere := s.flows.byState["fresh"]
+	n := len(s.flows.byState)
+	s.flows.mu.Unlock()
 
 	if staleThere {
 		t.Fatal("the expired flow should have been swept on the next put")

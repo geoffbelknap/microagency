@@ -163,26 +163,26 @@ func (s *Server) refreshingBearer(name string, tok *auth.UpstreamToken) func(con
 }
 
 func (s *Server) putOAuthFlow(state string, f *oauthFlow) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.flows.mu.Lock()
+	defer s.flows.mu.Unlock()
 	// Sweep abandoned flows on the way in — takeOAuthFlow only drops the state it
 	// redeems, so a flow the operator starts and never completes would otherwise
 	// linger forever. Cheap: the map only holds pending console OAuth adds.
 	now := time.Now()
-	for st, of := range s.oauthFlows {
+	for st, of := range s.flows.byState {
 		if now.After(of.expiry) {
-			delete(s.oauthFlows, st)
+			delete(s.flows.byState, st)
 		}
 	}
-	s.oauthFlows[state] = f
+	s.flows.byState[state] = f
 }
 
 // takeOAuthFlow removes and returns the flow for state, or nil if absent/expired.
 func (s *Server) takeOAuthFlow(state string) *oauthFlow {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f := s.oauthFlows[state]
-	delete(s.oauthFlows, state)
+	s.flows.mu.Lock()
+	defer s.flows.mu.Unlock()
+	f := s.flows.byState[state]
+	delete(s.flows.byState, state)
 	if f == nil || time.Now().After(f.expiry) {
 		return nil
 	}
