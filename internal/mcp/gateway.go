@@ -911,34 +911,74 @@ func structuralPreview(payload string) map[string]any {
 		if json.Unmarshal([]byte(tr), &arr) == nil {
 			p := map[string]any{"kind": "array", "count": len(arr)}
 			if len(arr) > 0 {
-				if ks := jsonKeys(arr[0]); ks != nil {
-					p["item_keys"] = ks
+				if ks, _, ok := objectShape(arr[0]); ok && fieldNameKeys(ks) {
+					p["item_keys"] = capKeys(ks)
 				}
 			}
 			return p
 		}
 	case '{':
-		if ks := jsonKeys(json.RawMessage(tr)); ks != nil {
-			return map[string]any{"kind": "object", "keys": ks}
+		if ks, total, ok := objectShape(json.RawMessage(tr)); ok {
+			if fieldNameKeys(ks) {
+				return map[string]any{"kind": "object", "keys": capKeys(ks)}
+			}
+			// The keys look like DATA (emails, ids, …), not a fixed field schema —
+			// e.g. {"alice@example.com": {...}} — so emitting them would leak values
+			// the ref model keeps out of context. Report shape (count) only.
+			return map[string]any{"kind": "object", "key_count": total}
 		}
 	}
 	return map[string]any{"kind": "text", "chars": len(payload), "lines": strings.Count(payload, "\n") + 1}
 }
 
-// jsonKeys returns the sorted top-level field names of a JSON object (schema, not
-// values), capped so the preview stays small. Returns nil if raw isn't an object.
-func jsonKeys(raw json.RawMessage) []string {
+// objectShape returns a JSON object's sorted top-level keys and their count, or
+// ok=false if raw isn't an object.
+func objectShape(raw json.RawMessage) (keys []string, total int, ok bool) {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(raw, &m) != nil {
-		return nil
+		return nil, 0, false
 	}
-	ks := make([]string, 0, len(m))
+	keys = make([]string, 0, len(m))
 	for k := range m {
-		ks = append(ks, k)
+		keys = append(keys, k)
 	}
-	sort.Strings(ks)
+	sort.Strings(keys)
+	return keys, len(m), true
+}
+
+// fieldNameKeys reports whether keys look like a fixed FIELD SCHEMA (safe to show
+// in a values-free preview) rather than data used as map keys. A record schema is
+// a small set of identifier-like names; an object keyed by data (emails, UUIDs)
+// has many keys and/or keys with value-like characters (@, spaces, …), which would
+// leak content. Heuristic — conservative: any doubt falls back to count-only.
+func fieldNameKeys(keys []string) bool {
+	if len(keys) == 0 || len(keys) > 25 { // records rarely exceed ~25 fields; data-maps do
+		return false
+	}
+	for _, k := range keys {
+		if !isFieldName(k) {
+			return false
+		}
+	}
+	return true
+}
+
+func isFieldName(k string) bool {
+	if k == "" || len(k) > 64 {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '$') {
+			return false
+		}
+	}
+	return true
+}
+
+func capKeys(ks []string) []string {
 	if len(ks) > 50 {
-		ks = ks[:50]
+		return ks[:50]
 	}
 	return ks
 }
