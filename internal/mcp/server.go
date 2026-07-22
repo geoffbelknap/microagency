@@ -104,10 +104,12 @@ type Server struct {
 	// but a key-less attacker who recomputes hashes is not stopped).
 	auditSigner auditSigner
 
-	mu        sync.Mutex
-	auditMu   sync.Mutex // serializes audit appends (the hash chain must not fork)
-	auditHash string     // last written chain hash; "" before the first chained line
-	seq       int
+	mu              sync.Mutex
+	auditMu         sync.Mutex // serializes audit appends (the hash chain must not fork)
+	auditHash       string     // last written chain hash; "" before the first chained line
+	auditChained    int        // count of chained lines written/loaded (the log's height)
+	auditAnchoredAt int        // auditChained at the last out-of-band anchor save
+	seq             int
 	// runs is a BOUNDED window of the most recent runs (the durable audit log on
 	// disk is the complete record). runOrder tracks insertion order so the oldest is
 	// evicted once maxRuns is reached — without a cap, a long-lived daemon's map grew

@@ -253,11 +253,17 @@ verifiable offline by anyone holding only the public key. Verify from the consol
 (Activity → verify audit chain) or with `GET /admin/audit/verify`, which reports
 lines checked, how many were chained and signed, and the first break.
 
-What the chain still can't stop on its own is wholesale **tail truncation** —
-deleting the last N lines leaves a validly signed prefix — which needs an
-external high-water anchor (writing the head hash somewhere the gateway operator
-can't later rewrite). Keeping the signing key in a KMS or the secret store rather
-than a local file is the hardening path when the log and the key would otherwise
+Wholesale **tail truncation** — deleting the last N lines leaves a validly
+signed prefix, which the in-file chain can't see — is caught by an **out-of-band
+head anchor**: every ~64 appends microagency records the log's height (chained
+line count) and head hash, signed, in the **secret store**, and verification
+flags a log shorter than its anchor as truncated. This is real protection when
+the secret store is OpenBao/Vault, where a log-file attacker can't reach the
+anchor; with the file-fallback store the anchor sits on the same disk (weaker —
+but it's signed, so it can't be *lowered* to hide a truncation without the audit
+key). The residual window is the up-to-64 most-recent lines since the last
+anchor. Keeping the signing key in a KMS or the secret store rather than a local
+file is the remaining hardening path when the log and the key would otherwise
 share one disk. Without a signer configured the log falls back to an
 integrity-only chain: it still catches accidental corruption and naive edits, but
 not a key-less attacker who recomputes the hashes.
@@ -339,8 +345,9 @@ The guarantees, and where each one is enforced:
 - Auditability. Every proxied call and every reduce run is written to an
   append-only, hash-chained log whose lines are ES256-signed, so an edited,
   inserted, or reordered line is detectable by anyone with the public key — not
-  just the operator who holds the private one. Wholesale tail truncation still
-  needs an external anchor; see "The audit chain".
+  just the operator who holds the private one. Wholesale tail truncation is
+  caught by a signed, out-of-band head anchor in the secret store (real
+  protection under OpenBao/Vault); see "The audit chain".
 - Plane separation. The operator surface (admin API and console) uses its own
   token — distinct from the agent's `/mcp` bearer, including the tunnel path,
   which mints a dedicated MCP bearer rather than reusing the operator token —

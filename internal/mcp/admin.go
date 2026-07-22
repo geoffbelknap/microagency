@@ -82,7 +82,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	g := func(h http.HandlerFunc) http.HandlerFunc { return s.adminGuard(token, h) }
 	mux.HandleFunc("GET /admin/runs", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.RunLog()) }))
 	mux.HandleFunc("GET /admin/audit/verify", g(func(w http.ResponseWriter, _ *http.Request) {
-		v, err := VerifyAuditLog(s.auditPath(), s.auditVerify())
+		v, err := s.VerifyAudit()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
