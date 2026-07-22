@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -90,6 +90,13 @@ func resolveBinary() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("openbao not found on PATH — install it (e.g. `brew install openbao`)")
+}
+
+// Available reports whether an OpenBao/Vault binary is on PATH, so `doctor` can
+// tell the operator which secret-store posture `up` would use.
+func Available() bool {
+	_, err := resolveBinary()
+	return err == nil
 }
 
 const configTmpl = `storage "file" { path = "%s/data" }
@@ -175,7 +182,7 @@ func (m *Manager) initOrUnseal(ctx context.Context) (string, error) {
 	// be re-authorized afterward. This turns a permanent brick into a one-time reset.
 	if st.Initialized {
 		if _, lerr := loadBootstrap(m.Dir); lerr != nil {
-			log.Printf("microagency: OpenBao is initialized but its bootstrap is missing — the vault is unrecoverable; resetting it fresh (re-authorize upstream connections afterward)")
+			slog.Warn("OpenBao bootstrap missing; resetting vault fresh (re-authorize upstream connections afterward)")
 			if rerr := m.resetStorage(ctx); rerr != nil {
 				return "", fmt.Errorf("reset unrecoverable openbao: %w", rerr)
 			}

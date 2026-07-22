@@ -3,7 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -89,33 +89,33 @@ func (s *Server) loadRegistrations() []upstreamReg {
 // registry. Callers hold persistMu (via updateRegistrations).
 func (s *Server) writeRegistrations(regs []upstreamReg) {
 	if err := os.MkdirAll(s.stateDir, 0o700); err != nil {
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 		return
 	}
 	b, _ := json.Marshal(regs)
 	tmp, err := os.CreateTemp(s.stateDir, "upstreams-*.json.tmp")
 	if err != nil {
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 		return
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 		return
 	}
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 		return
 	}
 	if err := tmp.Close(); err != nil {
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 		return
 	}
 	if err := os.Rename(tmpName, s.registrationsPath()); err != nil {
-		log.Printf("microagency: persist upstream registration: %v", err)
+		slog.Error("persist upstream registration failed", "err", err)
 	}
 }
 
@@ -227,7 +227,7 @@ func (s *Server) removeRegistration(ctx context.Context, name string) {
 	})
 	if s.secrets != nil {
 		if err := s.secrets.Delete(ctx, tokenKey(name)); err != nil && err != secretstore.ErrNotFound {
-			log.Printf("microagency: remove upstream %q secret: %v", name, err)
+			slog.Error("remove upstream secret failed", "upstream", name, "err", err)
 		}
 	}
 }
@@ -239,7 +239,7 @@ func (s *Server) saveStaticToken(ctx context.Context, name, token string) {
 		return
 	}
 	if err := s.secrets.Save(ctx, tokenKey(name), []byte(token)); err != nil {
-		log.Printf("microagency: persist upstream %q token: %v", name, err)
+		slog.Error("persist upstream token failed", "upstream", name, "err", err)
 	}
 }
 
@@ -259,30 +259,30 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 			// No credential — reconnect as-is (its tools/list is reachable unauthenticated).
 		case authStatic:
 			if s.secrets == nil {
-				log.Printf("microagency: reload upstream %q: no secret store", reg.Name)
+				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
 				continue
 			}
 			raw, err := s.secrets.Load(ctx, tokenKey(reg.Name))
 			if err != nil {
-				log.Printf("microagency: reload upstream %q: %v", reg.Name, err)
+				slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
 				continue
 			}
 			u.Token = string(raw)
 		default: // authOAuth
 			if s.secrets == nil {
-				log.Printf("microagency: reload upstream %q: no secret store", reg.Name)
+				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
 				continue
 			}
 			raw, err := s.secrets.Load(ctx, tokenKey(reg.Name))
 			if err != nil {
 				if err != secretstore.ErrNotFound {
-					log.Printf("microagency: reload upstream %q: %v", reg.Name, err)
+					slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
 				}
 				continue
 			}
 			var rec auth.TokenRecord
 			if err := json.Unmarshal(raw, &rec); err != nil {
-				log.Printf("microagency: reload upstream %q: bad token record: %v", reg.Name, err)
+				slog.Warn("reload upstream: bad token record", "upstream", reg.Name, "err", err)
 				continue
 			}
 			u.Bearer = s.refreshingBearer(reg.Name, auth.TokenFromRecord(rec))
@@ -299,7 +299,7 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 			aerr = s.AddUpstream(ctx, u, opts...)
 		}
 		if aerr != nil {
-			log.Printf("microagency: reload upstream %q: %v", reg.Name, aerr)
+			slog.Warn("reload upstream failed", "upstream", reg.Name, "err", aerr)
 			continue
 		}
 		if reg.ReadOnly {
@@ -308,6 +308,6 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		if reg.Minimize != "" {
 			s.SetMinimizePolicy(reg.Name, []byte(reg.Minimize))
 		}
-		log.Printf("microagency: reloaded upstream %q", reg.Name)
+		slog.Info("reloaded upstream", "upstream", reg.Name)
 	}
 }

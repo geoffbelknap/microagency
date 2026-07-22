@@ -3,7 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"microagency/internal/minimize"
 	"microagency/internal/sandbox"
@@ -125,7 +125,7 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 			// A dropped binding means a placeholder the model later echoes back won't
 			// resolve to its real value on the outbound call — surface it rather than
 			// fail silently at a distance.
-			log.Printf("microagency: persist minimizer token bindings for %s: %v", upstream, err)
+			slog.Warn("persist minimizer token bindings failed", "upstream", upstream, "err", err)
 		}
 	}
 	var scrubbed map[string]any
