@@ -174,7 +174,7 @@ func (s *Server) loadAuditAnchor() *AuditAnchor {
 	return &a
 }
 
-// loadAudit replays the persisted log into s.runs and restores the run-id counter
+// loadAudit replays the persisted log into s.rs.byID and restores the run-id counter
 // past the highest seen id, so new run ids don't collide with history.
 func (s *Server) loadAudit() {
 	path := s.auditPath()
@@ -193,7 +193,7 @@ func (s *Server) loadAudit() {
 	// mutates the same fields putRun does, so hold mu for the invariant. Every line
 	// folds into the all-time cumulative totals; only the last maxRuns stay in the
 	// in-memory window, so replaying a huge log doesn't reload it all into memory.
-	s.mu.Lock()
+	s.rs.mu.Lock()
 	for sc.Scan() {
 		var line auditLine
 		if json.Unmarshal(sc.Bytes(), &line) != nil || line.RunID == "" {
@@ -212,11 +212,11 @@ func (s *Server) loadAudit() {
 	// Resume the chained-line height so anchoring continues after restart; the last
 	// anchor persisted before the restart still detects truncation below it.
 	s.auditChained, s.auditAnchoredAt = chained, chained
-	s.mu.Unlock()
+	s.rs.mu.Unlock()
 	if malformed > 0 {
 		slog.Warn("audit log has malformed lines; run /admin/audit/verify", "count", malformed)
 	}
-	s.seq = maxSeq
+	s.rs.seq = maxSeq
 }
 
 // AuditVerification is the outcome of walking the audit chain.

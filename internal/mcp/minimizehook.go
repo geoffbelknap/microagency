@@ -19,13 +19,13 @@ import (
 // one upstream — opaque, module-defined config (e.g. a type→action map). An
 // upstream with no policy is passed through untouched.
 func (s *Server) SetMinimizePolicy(upstream string, policy []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
 	if policy == nil {
-		delete(s.minimizePolicies, upstream)
+		delete(s.reg.policies, upstream)
 		return
 	}
-	s.minimizePolicies[upstream] = policy
+	s.reg.policies[upstream] = policy
 }
 
 // defaultMinimizePolicy is the secure-by-default effective policy for an upstream
@@ -51,12 +51,12 @@ var defaultMinimizePolicyJSON, _ = json.Marshal(defaultMinimizePolicy)
 // explicit one if set (an explicit empty "{}" means opted out), else the secure
 // default when enabled, else none.
 func (s *Server) minimizePolicyFor(upstream string) []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if raw, ok := s.minimizePolicies[upstream]; ok {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	if raw, ok := s.reg.policies[upstream]; ok {
 		return raw // explicit (possibly "{}" = opted out)
 	}
-	if s.secureDefault {
+	if s.reg.secureDefault {
 		return defaultMinimizePolicyJSON
 	}
 	return nil

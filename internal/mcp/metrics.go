@@ -51,21 +51,21 @@ type SubstrateStats struct {
 
 // Metrics aggregates the recorded runs by substrate and engine.
 func (s *Server) Metrics() MetricsSummary {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
 	m := MetricsSummary{
 		// TotalRuns and Impact are ALL-TIME cumulative (they survive the bounded
 		// window's eviction), accumulated as runs are recorded and rebuilt from the
 		// durable log on restart. The by-substrate/engine/latency breakdown below is
 		// over the retained recent window — a bounded scan, and recent latency is the
 		// useful signal anyway.
-		TotalRuns:   s.runsTotal,
-		Impact:      s.impact,
+		TotalRuns:   s.rs.total,
+		Impact:      s.rs.impact,
 		BySubstrate: map[string]*SubstrateStats{},
 		ByEngine:    map[string]int{},
 	}
 	lat := map[string][]int64{}
-	for _, rec := range s.runs {
+	for _, rec := range s.rs.byID {
 		// by_substrate is "where reduce ran" — only reduce runs land on a substrate
 		// (wasm/microvm). Proxy calls have none, so they don't belong in this
 		// breakdown (otherwise they pile up under a bogus "unknown" substrate).

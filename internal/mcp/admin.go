@@ -50,10 +50,10 @@ type RunInfo struct {
 
 // RunLog returns every recorded run (with its egress audit), ordered by run id.
 func (s *Server) RunLog() []RunInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]RunInfo, 0, len(s.runs))
-	for id, rec := range s.runs {
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
+	out := make([]RunInfo, 0, len(s.rs.byID))
+	for id, rec := range s.rs.byID {
 		ts := ""
 		if !rec.Timestamp.IsZero() {
 			ts = rec.Timestamp.Format(time.RFC3339)

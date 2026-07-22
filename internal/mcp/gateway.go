@@ -72,7 +72,7 @@ type upstream struct {
 	minimizeSuggested json.RawMessage
 	// lastOK/lastErr track the most recent invocation's outcome so the operator can
 	// see a dead or erroring upstream instead of discovering it one failed call at a
-	// time. Mutated under s.mu, like the other record fields.
+	// time. Mutated under s.reg.mu, like the other record fields.
 	lastOK    time.Time
 	lastErr   string
 	lastErrAt time.Time
@@ -82,9 +82,9 @@ type upstream struct {
 // operator visibility (UpstreamList). A client cancellation is not a failure and
 // isn't recorded here.
 func (s *Server) recordUpstreamHealth(name string, callErr error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
 	if !ok {
 		return
 	}
@@ -123,38 +123,38 @@ func WithOwner(subject string) UpstreamOption { return func(u *upstream) { u.own
 // acquisition — two concurrent adds of the same name can't both pass a separate
 // check and silently overwrite each other.
 func (s *Server) registerUpstream(name string, u *upstream, opts ...UpstreamOption) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.upstreams == nil {
-		s.upstreams = map[string]*upstream{}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	if s.reg.conns == nil {
+		s.reg.conns = map[string]*upstream{}
 	}
-	if _, ok := s.upstreams[name]; ok {
+	if _, ok := s.reg.conns[name]; ok {
 		return fmt.Errorf("gateway: upstream %q already registered", name)
 	}
 	for _, opt := range opts {
 		opt(u)
 	}
-	s.upstreams[name] = u
+	s.reg.conns[name] = u
 	return nil
 }
 
 func (s *Server) hasUpstream(name string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	_, ok := s.reg.conns[name]
 	return ok
 }
 
 // snapshotUpstream returns a consistent copy of the named record's fields, taken
-// under the lock. s.mu guards the map AND the record fields — Enable/Rebind/
+// under the lock. s.reg.mu guards the map AND the record fields — Enable/Rebind/
 // SetUpstreamReadOnly mutate records in place under the lock — so readers must
 // never hold a bare *upstream across unlocked work. The copy is safe to use
 // lock-free: conn is immutable once wired, and tools is only ever replaced
 // wholesale, never mutated in place.
 func (s *Server) snapshotUpstream(name string) (upstream, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
 	if !ok {
 		return upstream{}, false
 	}
@@ -232,9 +232,9 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	// Commit under the lock, re-validating against the live record: the upstream
 	// may have been removed or rebound to a new connection while we were on the
 	// network — enabling with tools listed from a stale connection would be wrong.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	cur, ok := s.reg.conns[name]
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while enabling", name)
 	}
@@ -263,9 +263,9 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamC
 	sug := suggestionFor(tools) // compute off the lock (scans tool metadata)
 	// Commit under the lock against the live record — it may have been removed
 	// while we were verifying the new connection.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while rebinding", name)
 	}
@@ -296,9 +296,9 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 	sug := suggestionFor(tools) // compute off the lock (scans tool metadata)
 	// Commit under the lock, re-validating against the live record: it may have been
 	// removed or rebound to a new connection while we were on the network.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	cur, ok := s.reg.conns[name]
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while refreshing", name)
 	}
@@ -340,9 +340,9 @@ type UpstreamInfo struct {
 // SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
 // principal's subject. Errors if the upstream is unknown.
 func (s *Server) SetUpstreamOwner(name, owner string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
@@ -353,9 +353,9 @@ func (s *Server) SetUpstreamOwner(name, owner string) error {
 // SetUpstreamReadOnly toggles an upstream's read-only restriction. Errors if the
 // upstream is unknown.
 func (s *Server) SetUpstreamReadOnly(name string, ro bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.upstreams[name]
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
@@ -365,17 +365,17 @@ func (s *Server) SetUpstreamReadOnly(name string, ro bool) error {
 
 // UpstreamList returns the registered upstreams (enabled and discovered), sorted.
 func (s *Server) UpstreamList() []UpstreamInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]UpstreamInfo, 0, len(s.upstreams))
-	for name, rec := range s.upstreams {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	out := make([]UpstreamInfo, 0, len(s.reg.conns))
+	for name, rec := range s.reg.conns {
 		state := "discovered"
 		if rec.enabled {
 			state = "enabled"
 		}
-		explicit, hasExplicit := s.minimizePolicies[name]
+		explicit, hasExplicit := s.reg.policies[name]
 		effective := explicit
-		if !hasExplicit && s.secureDefault {
+		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
 		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
@@ -403,12 +403,12 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 // RemoveUpstream deregisters an upstream (enabled or discovered), dropping its
 // tools from the index.
 func (s *Server) RemoveUpstream(name string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.upstreams[name]; !ok {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	if _, ok := s.reg.conns[name]; !ok {
 		return false
 	}
-	delete(s.upstreams, name)
+	delete(s.reg.conns, name)
 	return true
 }
 
@@ -420,10 +420,10 @@ func (s *Server) RemoveUpstream(name string) bool {
 // invocation gate enforces the same boundary, so this filter is minimization,
 // not the only line of defense.
 func (s *Server) indexedTools(subject string) []map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
 	var out []map[string]any
-	for name, rec := range s.upstreams {
+	for name, rec := range s.reg.conns {
 		if rec.owner != "" && rec.owner != subject {
 			continue
 		}
@@ -438,7 +438,7 @@ func (s *Server) indexedTools(subject string) []map[string]any {
 				"inputSchema": t.InputSchema,
 				"enabled":     rec.enabled,
 				"provenance":  rec.provenance,
-				"usage":       s.toolUsage[full],
+				"usage":       s.reg.usage[full],
 			}
 			if rec.enabled && rec.readOnly && isWriteTool(t) {
 				invocable = false
@@ -729,12 +729,12 @@ func (s *Server) refPreview(ref refstore.Ref) map[string]any {
 
 // bumpUsage records one successful invocation of a tool, by namespaced name.
 func (s *Server) bumpUsage(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.toolUsage == nil {
-		s.toolUsage = map[string]int{}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	if s.reg.usage == nil {
+		s.reg.usage = map[string]int{}
 	}
-	s.toolUsage[name]++
+	s.reg.usage[name]++
 }
 
 // callTool is the invoke half of the off-context tool surface: a tool discovered
