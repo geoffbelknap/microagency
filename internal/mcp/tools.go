@@ -269,6 +269,13 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 	runID := s.nextRunID()
 	start := time.Now()
 
+	// query and code are two different substrates over the same input; supplying
+	// both is ambiguous, so reject it rather than silently running the query and
+	// dropping the code (mirrors the ref/data conflict above).
+	if strings.TrimSpace(in.Query) != "" && strings.TrimSpace(in.Code) != "" {
+		return toolError("reduce: give a query (declarative engine) OR code (Python), not both")
+	}
+
 	switch {
 	case strings.TrimSpace(in.Query) != "":
 		if len(s.wasm) == 0 {

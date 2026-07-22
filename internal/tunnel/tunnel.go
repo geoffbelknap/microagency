@@ -99,6 +99,7 @@ func start(ctx context.Context, name string, args []string, re *regexp.Regexp, t
 		return &Tunnel{cmd: cmd, PublicURL: url}, nil
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait() // reap it — a bare Kill leaves a zombie (Close does the same)
 		return nil, fmt.Errorf("tunnel: %q did not report a public URL within %s", name, timeout)
 	}
 }
