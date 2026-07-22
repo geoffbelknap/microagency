@@ -147,6 +147,12 @@ explicit operator action in the console. This keeps the index broad (you can
 import the whole registry) while invocation stays operator-granted. Discovery
 never auto-enables anything.
 
+The index is captured when an upstream is added, enabled, or rebound. An
+upstream's tool set can change afterward — tools added or removed, schemas
+revised — so `POST /admin/upstreams/{name}/refresh` re-lists it on demand,
+keeping `find_tools` and the pre-egress write guard working against current
+schemas rather than a stale snapshot.
+
 ## Large results and reduce
 
 A result too large to return inline is stored server-side, and the agent gets

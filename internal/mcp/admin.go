@@ -99,6 +99,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	// it is protected by the unguessable state + PKCE, not the admin bearer.
 	mux.HandleFunc("GET /admin/oauth/callback", s.adminOAuthCallback)
 	mux.HandleFunc("POST /admin/upstreams/{name}/enable", g(s.adminEnableUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
 	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
@@ -313,6 +314,16 @@ func (s *Server) adminEnableUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	s.markRegistrationEnabled(r.PathValue("name")) // reload enabled, not discovered
 	writeJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "state": "enabled"})
+}
+
+// adminRefreshUpstream re-lists an upstream's tools so the index reflects the
+// upstream's current tool set (added/removed tools, revised schemas).
+func (s *Server) adminRefreshUpstream(w http.ResponseWriter, r *http.Request) {
+	if err := s.RefreshUpstream(r.Context(), r.PathValue("name")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "state": "refreshed"})
 }
 
 // adminOAuthScopes probes a URL and reports whether it's OAuth-protected and which
