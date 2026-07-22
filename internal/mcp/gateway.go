@@ -454,11 +454,11 @@ func (s *Server) indexedTools(subject string) []map[string]any {
 	return out
 }
 
-// invokeUpstream resolves a namespaced tool, GATES on enabled, and proxies to the
-// upstream. ok is false only when the name isn't namespaced (so the caller can
-// fall back to "unknown tool"); a disabled or unknown-upstream tool returns a tool
-// error with ok=true. This is the single invocation gate both call_tool and a
-// direct namespaced call go through.
+// invokeUpstream runs an aggregated upstream tool call: it applies the
+// pre-invocation gates (unknown/owner/disabled — no call, so no audit record),
+// then hands off to proxyCall and records the single outcome. Every path through
+// proxyCall returns a proxyOutcome, so recording happens in exactly one place —
+// a new early return can't silently skip the audit log.
 func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawMessage) (map[string]any, bool) {
 	upName, tool, found := strings.Cut(name, nsSep)
 	if !found {
@@ -491,32 +491,58 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	args = s.resolveOutbound(ctx, upName, args)
 	runID := s.nextRunID()
 	start := time.Now()
+	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args)
+	// THE single audit record: every proxyCall outcome — refusal, error, ref,
+	// inline, or success — lands here, so "every outcome is audited" is structural.
+	s.recordProxy(ctx, runID, upName, tool, args, out.outBytes, start, out.err, out.outcome, out.egressHost, out.protected, out.extra...)
+	return out.result, true
+}
+
+// proxyOutcome bundles a proxied call's result with everything recordProxy needs.
+// proxyCall returns it on every path, so the single recordProxy in invokeUpstream
+// can't be bypassed by a new early return.
+type proxyOutcome struct {
+	result     map[string]any
+	outBytes   int
+	err        error
+	outcome    budget.Outcome
+	egressHost string // "" when no egress reached the upstream (a pre-dial refusal)
+	protected  int
+	extra      []sandbox.AuditEvent
+}
+
+// proxyCall dials the upstream (after the read-only and pre-egress write gates),
+// then shapes the result — offload rehydration, truncation notice,
+// reference-by-default parking, or field minimization — returning a proxyOutcome
+// for each path. It performs the side effects that belong to a call (health,
+// usage), but never records the audit line itself; that is invokeUpstream's job.
+func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, upName, tool, name string, rec upstream, args json.RawMessage) proxyOutcome {
 	upHost := hostFromURL(rec.conn.Endpoint()) // the egress target for calls that reach the upstream
-	// Tier 1 — pre-egress write guard. If this is a write and its arguments don't
-	// satisfy the tool's retained schema, fail CLOSED: no malformed mutation is sent,
-	// and the agent gets the full spec to retry (it may have seen only a find_tools
-	// digest). Reads skip this — Tier 2 covers them after the fact, without ever
-	// hard-blocking on a false positive.
 	spec, haveSpec := findTool(rec.tools, tool)
 	// Read-only gate: a read-only upstream refuses writes (and unclassifiable tools,
 	// which default to write). Enforced OUTSIDE the agent, at the single invocation
-	// gate — the agent can't widen it.
+	// gate — the agent can't widen it. No egress happened, so egressHost stays "".
 	if rec.readOnly && (!haveSpec || isWriteTool(spec)) {
-		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("read-only upstream: write refused"), budget.Outcome{}, "", 0)
-		return toolError("upstream %q is READ-ONLY; the write/destructive tool %q is refused. Ask the operator to allow writes on this upstream if this is intended.", upName, name), true
-	}
-	if haveSpec && isWriteTool(spec) {
-		if gaps := schemaGaps(spec.InputSchema, args); len(gaps) > 0 {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")), budget.Outcome{}, "", 0)
-			return schemaBlockResult(name, spec, gaps), true
+		return proxyOutcome{
+			result: toolError("upstream %q is READ-ONLY; the write/destructive tool %q is refused. Ask the operator to allow writes on this upstream if this is intended.", upName, name),
+			err:    fmt.Errorf("read-only upstream: write refused"),
 		}
 	}
-	// Reads run through the in-flight cache: a slow read is decoupled from the
-	// caller's request context (a client-timeout cancel won't abort near-done work,
-	// and an identical retry collects the cached result), and identical concurrent
-	// reads share one execution. Writes — and unclassifiable tools, defaulted to
-	// write — run under the caller context: a cancel aborts, and nothing continues in
-	// the background that could commit after the client stopped waiting.
+	// Tier 1 — pre-egress write guard. If this is a write and its arguments don't
+	// satisfy the tool's retained schema, fail CLOSED: no malformed mutation is sent,
+	// and the agent gets the full spec to retry. Reads skip this — Tier 2 covers them.
+	if haveSpec && isWriteTool(spec) {
+		if gaps := schemaGaps(spec.InputSchema, args); len(gaps) > 0 {
+			return proxyOutcome{
+				result: schemaBlockResult(name, spec, gaps),
+				err:    fmt.Errorf("pre-egress schema block: %s", strings.Join(gaps, "; ")),
+			}
+		}
+	}
+	// Reads run through the in-flight cache (a client-timeout cancel won't abort
+	// near-done work, and identical concurrent reads share one execution); writes and
+	// unclassifiable tools run under the caller context (a cancel aborts, nothing
+	// commits in the background after the client stopped waiting).
 	var res json.RawMessage
 	var err error
 	if !haveSpec || isWriteTool(spec) {
@@ -527,19 +553,16 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			return rec.conn.CallTool(c, tool, args)
 		})
 		if canceled {
-			s.recordProxy(ctx, runID, upName, tool, args, 0, start, err, budget.Outcome{}, upHost, 0)
-			return toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), true
+			return proxyOutcome{result: toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), err: err, egressHost: upHost}
 		}
 	}
 	s.recordUpstreamHealth(upName, err) // last-call health, for the operator view
 	if err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost, 0)
-		return toolError("upstream %q: %v", upName, err), true
+		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), outBytes: len(res), err: err, egressHost: upHost}
 	}
 	var passthrough map[string]any
-	if err := json.Unmarshal(res, &passthrough); err != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost, 0)
-		return toolError("upstream %q: malformed result: %v", upName, err), true
+	if uerr := json.Unmarshal(res, &passthrough); uerr != nil {
+		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), outBytes: len(res), err: uerr, egressHost: upHost}
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
 	// Reference-by-default: a large result is held off-context as a handle the agent
@@ -547,72 +570,49 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if s.budget.Store != nil && !resultIsError(passthrough) {
 		payload, rehydrated := resultPayload(passthrough), false
 		// Offload neutralization: some upstreams return an off-platform URL in place
-		// of a large payload (e.g. LimaCharlie exporting to a public GCS bucket). That
-		// pointer defeats cred-blindness and minimization — the real bytes never enter
-		// the governed pipeline, and a bare public URL is an unmediated egress
-		// capability handed to the agent. Fetch it host-side and treat the bytes as the
-		// real result; the agent never sees the URL. The offload fields live in the
-		// extracted payload (upstreams wrap results in an MCP content text block).
+		// of a large payload. That pointer defeats cred-blindness and minimization —
+		// fetch it host-side and treat the bytes as the real result; the agent never
+		// sees the URL.
 		if link := offloadURL(payload); link != "" {
 			data, ferr := s.fetchOffload(ctx, link)
 			if ferr != nil {
-				s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("offload rehydrate: %w", ferr), budget.Outcome{}, upHost, 0)
-				return toolError("upstream %q returned an off-platform result link microagency could not retrieve (%v); the raw URL is withheld", upName, ferr), true
+				return proxyOutcome{result: toolError("upstream %q returned an off-platform result link microagency could not retrieve (%v); the raw URL is withheld", upName, ferr), err: fmt.Errorf("offload rehydrate: %w", ferr), egressHost: upHost}
 			}
 			payload, rehydrated = string(data), true
 		}
-		// A truncated / malformed payload is a NOTICE, not data. Some upstreams cut a
-		// too-large response mid-structure and append a "narrow your query" marker
-		// (Cloudflare's MCP does). Parking that behind a ref buries the guidance: the
-		// agent's reduce then fails to PARSE the broken bytes instead of reading the
-		// message. Surface the notice inline instead. Only fires when the payload
-		// claims to be JSON but doesn't parse, or carries a truncation marker — a real
-		// prose document (which doesn't claim to be JSON) still refs normally.
+		// A truncated / malformed payload is a NOTICE, not data — surface it inline so
+		// the agent reads the guidance instead of parking broken bytes behind a ref.
 		if notice, ok := truncatedNotice(payload); ok {
-			s.recordProxy(ctx, runID, upName, tool, args, len(notice), start, nil, budget.Outcome{}, upHost, 0)
-			return truncatedResult(notice), true
+			return proxyOutcome{result: truncatedResult(notice), outBytes: len(notice), egressHost: upHost}
 		}
-		// Gate on the LARGER of the extracted payload and the full upstream result.
-		// The inline path returns the whole passthrough (len(res) bytes); resultPayload
-		// can extract LESS than that (a compact structuredContent beside a large
-		// content[].text — Notion page fetches), so measuring only the extraction let
-		// large results ride inline, defeating reference-by-default. A rehydrated
-		// result replaces the passthrough, so it's measured by its own size, not res.
+		// Gate on the LARGER of the extracted payload and the full upstream result, so
+		// a compact structuredContent beside a large content[].text can't ride inline.
 		if len(payload) > s.budget.MaxBytes || (!rehydrated && len(res) > s.budget.MaxBytes) {
-			// Store the extracted payload when it kept the bulk (clean data for reduce);
-			// if the extraction is a small fraction of the full result, the extraction
-			// dropped data — ref the full result instead so nothing is lost behind the ref.
 			stored := payload
 			if !rehydrated && len(payload) < len(res)/2 {
-				stored = string(res)
+				stored = string(res) // extraction dropped data — ref the full result instead
 			}
 			ref, sum := s.budget.Store.Put(stored, principalOf(ctx).Subject)
-			s.recordProxy(ctx, runID, upName, tool, args, sum.Bytes, start, nil, budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, upHost, 0)
-			return s.refHandleResult(ref, sum, name), true
+			return proxyOutcome{result: s.refHandleResult(ref, sum, name), outBytes: sum.Bytes, outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
-			s.recordProxy(ctx, runID, upName, tool, args, len(payload), start, nil, budget.Outcome{}, upHost, 0)
-			return rehydratedResult(payload), true
+			return proxyOutcome{result: rehydratedResult(payload), outBytes: len(payload), egressHost: upHost}
 		}
 	}
 	// Tier 2 — on an upstream tool error, append the tool's full description +
-	// inputSchema so a retry is informed (the failure may be a semantic one the JSON
-	// schema can't express, e.g. a malformed DSL string). Applies to reads and writes.
+	// inputSchema so a retry is informed (a semantic failure the JSON schema can't
+	// express). Applies to reads and writes.
 	if resultIsError(passthrough) && haveSpec {
 		passthrough = attachToolSpec(passthrough, name, spec)
 	}
 	// Field-level minimization: scrub sensitive VALUES out of a small inline result
-	// before it enters model context — the fine-grained complement to
-	// reference-by-default (which only parks LARGE results). No-op unless a minimizer
-	// and a policy are configured for this upstream. Fails closed: a minimizer error
-	// withholds the result rather than emit it un-minimized.
+	// before it enters model context. No-op unless a minimizer and policy are
+	// configured for this upstream. Fails closed.
 	scrubbed, alerts, protected, merr := s.scrubInbound(ctx, upName, tool, passthrough)
 	if merr != nil {
-		s.recordProxy(ctx, runID, upName, tool, args, 0, start, fmt.Errorf("minimize: %w", merr), budget.Outcome{}, upHost, 0)
-		return toolError("upstream %q: field minimization failed; result withheld", upName), true
+		return proxyOutcome{result: toolError("upstream %q: field minimization failed; result withheld", upName), err: fmt.Errorf("minimize: %w", merr), egressHost: upHost}
 	}
-	s.recordProxy(ctx, runID, upName, tool, args, len(res), start, nil, budget.Outcome{}, upHost, protected, minimizeAlertEvents(alerts)...)
-	return scrubbed, true
+	return proxyOutcome{result: scrubbed, outBytes: len(res), egressHost: upHost, protected: protected, extra: minimizeAlertEvents(alerts)}
 }
 
 // fetchOffload retrieves an upstream offload URL host-side through the SSRF-guarded
