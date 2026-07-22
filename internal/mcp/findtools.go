@@ -43,8 +43,11 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 	}
 	_ = json.Unmarshal(args, &in)
 	limit := in.Limit
-	if limit <= 0 || limit > 50 {
-		limit = 10
+	if limit <= 0 {
+		limit = 10 // default
+	}
+	if limit > 50 {
+		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
 	terms := tokenize(in.Query)
 

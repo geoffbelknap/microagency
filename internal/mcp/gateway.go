@@ -238,6 +238,41 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Ups
 	return nil
 }
 
+// RefreshUpstream re-lists a registered upstream's tools, updating the index so
+// find_tools serves current schemas and the pre-egress write guard validates
+// against them. An upstream's advertised tool set can change after it was first
+// added — tools added or removed, schemas revised — and nothing re-listed it
+// short of a rebind; a stale index hides added tools (and, being spec-less, treats
+// them as writes) and keeps a removed tool looking invocable. Preserves the
+// connection, enabled state, and provenance. Errors if the upstream is unknown or
+// unreachable (leaving the current tools in place).
+func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
+	rec, ok := s.snapshotUpstream(name)
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	_ = rec.conn.Initialize(ctx)
+	tools, err := rec.conn.ListTools(ctx)
+	if err != nil {
+		return err
+	}
+	sug := suggestionFor(tools) // compute off the lock (scans tool metadata)
+	// Commit under the lock, re-validating against the live record: it may have been
+	// removed or rebound to a new connection while we were on the network.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.upstreams[name]
+	if !ok {
+		return fmt.Errorf("gateway: upstream %q was removed while refreshing", name)
+	}
+	if cur.conn != rec.conn {
+		return fmt.Errorf("gateway: upstream %q changed while refreshing; retry", name)
+	}
+	cur.tools = tools
+	cur.minimizeSuggested = sug
+	return nil
+}
+
 // UpstreamInfo is an operator-facing view of one registered upstream (no token).
 type UpstreamInfo struct {
 	Name       string `json:"name"`
