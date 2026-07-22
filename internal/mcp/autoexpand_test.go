@@ -71,7 +71,7 @@ func addGuarded(t *testing.T, tools []upTool, callErr bool) (*Server, *int32) {
 	up := guardUpstream(t, tools, callErr, &hit)
 	t.Cleanup(up.Close)
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 	return s, &hit

@@ -94,7 +94,7 @@ func TestOffloadURLRehydratedNotLeaked(t *testing.T) {
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 2048, Store: rs}),
 		WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "lc", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "lc", &gateway.Upstream{Name: "lc", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestNonOffloadURLPassesThrough(t *testing.T) {
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 2048, Store: rs}),
 		WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 

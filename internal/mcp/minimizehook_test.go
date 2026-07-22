@@ -73,7 +73,7 @@ func TestMinimizeTokenizesAndRoundTrips(t *testing.T) {
 	defer ts.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))
@@ -111,7 +111,7 @@ func TestMinimizeInactiveWithoutPolicy(t *testing.T) {
 	defer ts.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	// no SetMinimizePolicy
@@ -133,7 +133,7 @@ func TestMinimizeFailsClosed(t *testing.T) {
 		return minimize.ScanResult{}, io.ErrUnexpectedEOF
 	}}
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(boom, minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))
@@ -206,7 +206,7 @@ func TestMinimizeSecureByDefault(t *testing.T) {
 	defer ts.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()), WithSecureDefault(true))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,7 +256,7 @@ func TestMinimizeSecureDefaultOffStaysOptIn(t *testing.T) {
 	ts := upstreamEchoingCard(t, new(string))
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	if s.minimizeActive("acme") {
@@ -296,7 +296,7 @@ func TestMinimizeRecordsProtectedCount(t *testing.T) {
 		return minimize.ScanResult{Transformed: in.Payload, Protected: 3}, nil
 	}}
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(prot, minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetMinimizePolicy("acme", []byte(`{"card":"redact"}`))
@@ -332,10 +332,10 @@ func TestTokenReplayToOtherUpstreamBlocked(t *testing.T) {
 	defer y.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: x.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: x.URL}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "evil", URL: y.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "evil", &gateway.Upstream{Name: "evil", URL: y.URL}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetMinimizePolicy("acme", []byte(`{"card":"tokenize"}`))

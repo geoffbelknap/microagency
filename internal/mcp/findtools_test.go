@@ -17,7 +17,7 @@ func TestFindToolsRanksRelevant(t *testing.T) {
 	ts := cannedUpstream(t) // exposes "search"
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestFindToolsRespectsLimit(t *testing.T) {
 	defer b.Close()
 	s := newTestServer(t, fakeRunner{})
 	for name, url := range map[string]string{"u1": a.URL, "u2": b.URL} {
-		if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: name, URL: url}); err != nil {
+		if err := s.AddUpstream(context.Background(), name, &gateway.Upstream{Name: name, URL: url}); err != nil {
 			t.Fatalf("add %s: %v", name, err)
 		}
 	}
@@ -62,7 +62,7 @@ func TestFindToolsRanksByUsage(t *testing.T) {
 	defer b.Close()
 	s := newTestServer(t, fakeRunner{})
 	for name, url := range map[string]string{"u1": a.URL, "u2": b.URL} {
-		if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: name, URL: url}); err != nil {
+		if err := s.AddUpstream(context.Background(), name, &gateway.Upstream{Name: name, URL: url}); err != nil {
 			t.Fatalf("add %s: %v", name, err)
 		}
 	}
@@ -146,7 +146,7 @@ func TestFindToolsBoundsOversizedMenu(t *testing.T) {
 	defer up.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -231,7 +231,7 @@ func TestFindToolsNarrowQueryKeepsFullSchema(t *testing.T) {
 	defer up.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 

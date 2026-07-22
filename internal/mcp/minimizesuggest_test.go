@@ -134,7 +134,7 @@ func TestUpstreamListSurfacesSuggestionUntilPolicySet(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
 	ts := upstreamEchoingCard(t, new(string)) // advertises an "acct" tool → account signal
 	defer ts.Close()
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "acme", &gateway.Upstream{Name: "acme", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	find := func() UpstreamInfo {

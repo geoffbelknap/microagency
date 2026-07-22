@@ -326,7 +326,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
-	if err := srv.AddUpstream(context.Background(), &gateway.Upstream{Name: "lc", URL: upTS.URL, Client: &http.Client{}}); err != nil {
+	if err := srv.AddUpstream(context.Background(), "lc", &gateway.Upstream{Name: "lc", URL: upTS.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("pre-register: %v", err)
 	}
 	admin := httptest.NewServer(srv.AdminHandler("op"))

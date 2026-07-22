@@ -53,3 +53,26 @@ func TestGatewayWorksOverUpstreamConnSeam(t *testing.T) {
 		t.Fatalf("call through the seam errored: %s", raw)
 	}
 }
+
+// The PUBLIC onboarding API accepts any upstreamConn, not just *gateway.Upstream —
+// so a new transport (stdio, WebSocket) is aggregated through the same AddUpstream
+// path, with no HTTP-specific onboarding.
+func TestAddUpstreamAcceptsNonHTTPConn(t *testing.T) {
+	fc := &fakeConn{
+		endpoint: "stdio://svc",
+		tools:    []gateway.Tool{{Name: "echo", Description: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		result:   json.RawMessage(`{"content":[{"type":"text","text":"ok"}],"isError":false}`),
+	}
+	s := newTestServer(t, fakeRunner{})
+	if err := s.AddUpstream(context.Background(), "svc", fc); err != nil {
+		t.Fatalf("AddUpstream with a non-HTTP conn: %v", err)
+	}
+	if info := s.UpstreamList()[0]; info.URL != "stdio://svc" || info.Tools != 1 {
+		t.Fatalf("onboarded conn not reflected: %+v", info)
+	}
+	out, ok := s.invokeUpstream(withPrincipal("local"), "svc__echo", json.RawMessage(`{}`))
+	if !ok || out["isError"].(bool) {
+		raw, _ := json.Marshal(out)
+		t.Fatalf("call through the onboarded non-HTTP conn failed: %s", raw)
+	}
+}

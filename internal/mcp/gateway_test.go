@@ -41,7 +41,7 @@ func TestProxyCallIsAudited(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestAggregatesUpstreamTools(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestDiscoveryInvocationGate(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
 
 	// Discover (do NOT enable): the tool is indexed but not invocable.
-	if err := s.DiscoverUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.DiscoverUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestAddUpstreamRejectsBadName(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "bad__name", URL: ts.URL}); err == nil {
+	if err := s.AddUpstream(context.Background(), "bad__name", &gateway.Upstream{Name: "bad__name", URL: ts.URL}); err == nil {
 		t.Fatal("an upstream name containing the namespace separator must be rejected")
 	}
 }
@@ -178,7 +178,7 @@ func TestGatewayStateNoRace(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -225,7 +225,7 @@ func TestRegisterUpstreamAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- s.AddUpstream(context.Background(), &gateway.Upstream{Name: "dup", URL: ts.URL})
+			errs <- s.AddUpstream(context.Background(), "dup", &gateway.Upstream{Name: "dup", URL: ts.URL})
 		}()
 	}
 	wg.Wait()
@@ -255,10 +255,10 @@ func TestOwnerScopedUpstreamIsolation(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "alicedocs", URL: ts.URL}, WithOwner("alice")); err != nil {
+	if err := s.AddUpstream(context.Background(), "alicedocs", &gateway.Upstream{Name: "alicedocs", URL: ts.URL}, WithOwner("alice")); err != nil {
 		t.Fatalf("add owned upstream: %v", err)
 	}
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "shared", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "shared", &gateway.Upstream{Name: "shared", URL: ts.URL}); err != nil {
 		t.Fatalf("add shared upstream: %v", err)
 	}
 
@@ -296,7 +296,7 @@ func TestSetUpstreamOwner(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if err := s.SetUpstreamOwner("docs", "carol"); err != nil {

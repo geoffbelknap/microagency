@@ -294,9 +294,9 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		}
 		var aerr error
 		if reg.Discover {
-			aerr = s.DiscoverUpstream(ctx, u, opts...)
+			aerr = s.DiscoverUpstream(ctx, reg.Name, u, opts...)
 		} else {
-			aerr = s.AddUpstream(ctx, u, opts...)
+			aerr = s.AddUpstream(ctx, reg.Name, u, opts...)
 		}
 		if aerr != nil {
 			slog.Warn("reload upstream failed", "upstream", reg.Name, "err", aerr)

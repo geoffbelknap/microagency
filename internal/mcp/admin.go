@@ -215,9 +215,9 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 	var err error
 	state := "enabled"
 	if in.Discover {
-		err, state = s.DiscoverUpstream(r.Context(), u, opts...), "discovered"
+		err, state = s.DiscoverUpstream(r.Context(), in.Name, u, opts...), "discovered"
 	} else {
-		err = s.AddUpstream(r.Context(), u, opts...)
+		err = s.AddUpstream(r.Context(), in.Name, u, opts...)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -439,7 +439,7 @@ func (s *Server) adminRegistryImport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		u := &gateway.Upstream{Name: sv.Name, URL: sv.URL, Client: s.upstreamClient}
-		if err := s.AddDiscovered(u, sv.Tools, "catalog"); err != nil {
+		if err := s.AddDiscovered(sv.Name, u, sv.Tools, "catalog"); err != nil {
 			skipped++
 			continue
 		}

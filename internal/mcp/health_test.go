@@ -15,7 +15,7 @@ func TestUpstreamHealthSurfacedInList(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "docs", URL: ts.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 

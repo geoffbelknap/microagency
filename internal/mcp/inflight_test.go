@@ -78,7 +78,7 @@ func TestInflightSingleFlightsIdenticalReads(t *testing.T) {
 	defer up.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestInflightDecouplesReadFromCallerCancel(t *testing.T) {
 	defer up.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestInflightDoesNotCacheWrites(t *testing.T) {
 	defer up.Close()
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
