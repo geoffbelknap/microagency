@@ -156,7 +156,7 @@ func sandboxComponent(ctx context.Context) InfraComponent {
 
 func (s *Server) auditComponent() InfraComponent {
 	c := InfraComponent{Key: "audit", Label: "audit", Status: "ok"}
-	v, err := VerifyAuditLog(s.auditPath(), s.auditVerify())
+	v, err := s.VerifyAudit()
 	if err != nil {
 		c.Status = "warn"
 		c.Detail = map[string]any{"note": "no audit entries yet"}
