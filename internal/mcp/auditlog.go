@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,7 +66,7 @@ func (s *Server) appendAudit(id string, rec runRecord) {
 	defer s.auditMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		log.Printf("microagency: audit log: %v", err)
+		slog.Error("audit log write failed", "err", err)
 		return
 	}
 	defer func() { _ = f.Close() }()
@@ -75,12 +75,12 @@ func (s *Server) appendAudit(id string, rec runRecord) {
 		if sig, err := s.auditSigner.SignBytes([]byte(line.Hash)); err == nil {
 			line.Sig = hex.EncodeToString(sig)
 		} else {
-			log.Printf("microagency: audit log: sign: %v", err) // unsigned line; verification flags the gap
+			slog.Warn("audit log sign failed; line unsigned", "err", err) // verification flags the gap
 		}
 	}
 	b, _ := json.Marshal(line)
 	if _, err := f.Write(append(b, '\n')); err != nil {
-		log.Printf("microagency: audit log: %v", err)
+		slog.Error("audit log write failed", "err", err)
 		return
 	}
 	s.auditHash = line.Hash
@@ -122,7 +122,7 @@ func (s *Server) loadAudit() {
 	}
 	s.mu.Unlock()
 	if malformed > 0 {
-		log.Printf("microagency: audit log: %d malformed line(s) skipped — run /admin/audit/verify", malformed)
+		slog.Warn("audit log has malformed lines; run /admin/audit/verify", "count", malformed)
 	}
 	s.seq = maxSeq
 }

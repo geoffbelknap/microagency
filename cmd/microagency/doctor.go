@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"sort"
 	"strings"
 
+	"microagency/internal/baomanager"
 	"microagency/internal/mcp"
 	"microagency/internal/sandbox"
 )
@@ -19,6 +21,15 @@ import (
 func runDoctor() {
 	out := os.Stderr
 	fmt.Fprintln(out, "microagency doctor")
+
+	// The two questions a first-run operator most often has: is the server up, and
+	// where do my credentials actually live.
+	if pid := runningPID(); pid != 0 {
+		fmt.Fprintf(out, "\n  server            ✓ running (pid %d)\n", pid)
+	} else {
+		fmt.Fprintf(out, "\n  server            ✗ not running — start it with `microagency up`\n")
+	}
+	reportSecretPosture(out)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
 	// query path (filter / count / extract) in-process, no VM.
@@ -100,6 +111,20 @@ func reportBypasses(out *os.File) {
 		fmt.Fprintf(out, "    ⚠ upstream %q (%s) is ALSO directly connected as %q in %s\n",
 			w.UpstreamName, w.URL, w.ClientName, w.ConfigPath)
 		fmt.Fprintln(out, "      that's a back door around microagency — remove the direct entry so every call goes through the gateway.")
+	}
+}
+
+// reportSecretPosture tells the operator where upstream credentials are held —
+// the posture `up` selects — so "where are my secrets" has an answer up front.
+func reportSecretPosture(out io.Writer) {
+	switch {
+	case os.Getenv("VAULT_ADDR") != "":
+		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", os.Getenv("VAULT_ADDR"))
+	case baomanager.Available():
+		fmt.Fprintln(out, "  secret store      ✓ managed OpenBao (loopback 127.0.0.1:8200)")
+	default:
+		fmt.Fprintln(out, "  secret store      ⚠ encrypted file store under ~/.microagency")
+		fmt.Fprintln(out, "                    (no OpenBao/Vault found — fine for single-user; install openbao or set VAULT_ADDR for hosted/multi-user)")
 	}
 }
 

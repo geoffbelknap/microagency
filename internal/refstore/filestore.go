@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,7 +61,7 @@ func (s *FileStore) Put(payload, owner string) (Ref, Summary) {
 			// Put's signature can't return this, but a silent failure hands back a
 			// live-looking ref whose Get later fails with "unknown reference" — a
 			// confusing failure at a distance. Surface it here, at the source.
-			log.Printf("microagency: persist ref %s: %v", ref, err)
+			slog.Error("persist ref failed", "ref", ref, "err", err)
 		}
 	}
 	s.sweepLocked() // after the write, so the cap counts the new entry (never evicts it — it's newest)

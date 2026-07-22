@@ -56,6 +56,29 @@ type upstream struct {
 	// it lazily in UpstreamList would rescan attacker-controlled tool metadata on every
 	// /admin request under the lock — a DoS vector — so it is done at discovery instead.
 	minimizeSuggested json.RawMessage
+	// lastOK/lastErr track the most recent invocation's outcome so the operator can
+	// see a dead or erroring upstream instead of discovering it one failed call at a
+	// time. Mutated under s.mu, like the other record fields.
+	lastOK    time.Time
+	lastErr   string
+	lastErrAt time.Time
+}
+
+// recordUpstreamHealth stamps the outcome of the most recent call to name, for
+// operator visibility (UpstreamList). A client cancellation is not a failure and
+// isn't recorded here.
+func (s *Server) recordUpstreamHealth(name string, callErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.upstreams[name]
+	if !ok {
+		return
+	}
+	if callErr != nil {
+		rec.lastErr, rec.lastErrAt = callErr.Error(), time.Now()
+	} else {
+		rec.lastOK = time.Now()
+	}
 }
 
 // suggestionFor computes the cached minimization suggestion for a tool set. Done at
@@ -293,6 +316,11 @@ type UpstreamInfo struct {
 	// secure default when none is set. The console pre-fills the editor from this and
 	// shows the "protected" chip when it's non-empty.
 	MinimizeEffective json.RawMessage `json:"minimize_effective,omitempty"`
+	// Health: the outcome of the most recent invocation, so a dead or erroring
+	// upstream is visible in the console without waiting for the next per-call error.
+	LastOK      string `json:"last_ok,omitempty"`       // RFC3339 of the last successful call
+	LastError   string `json:"last_error,omitempty"`    // message of the last failed call
+	LastErrorAt string `json:"last_error_at,omitempty"` // RFC3339 of the last failed call
 }
 
 // SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
@@ -338,6 +366,13 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		}
 		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
+		if !rec.lastOK.IsZero() {
+			info.LastOK = rec.lastOK.Format(time.RFC3339)
+		}
+		if rec.lastErr != "" {
+			info.LastError = rec.lastErr
+			info.LastErrorAt = rec.lastErrAt.Format(time.RFC3339)
+		}
 		// Surface the schema-derived suggestion only when nothing is protecting the
 		// upstream (secure-default off and no explicit policy) — never applied on its
 		// own. Read from the cache computed at tool-load time; UpstreamList must not
@@ -482,6 +517,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			return toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), true
 		}
 	}
+	s.recordUpstreamHealth(upName, err) // last-call health, for the operator view
 	if err != nil {
 		s.recordProxy(ctx, runID, upName, tool, args, len(res), start, err, budget.Outcome{}, upHost, 0)
 		return toolError("upstream %q: %v", upName, err), true

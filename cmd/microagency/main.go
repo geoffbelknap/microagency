@@ -13,7 +13,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -47,7 +47,31 @@ var (
 	commit  = ""
 )
 
+// setupLogging routes structured logs (slog) to stderr — which the daemon parent
+// redirects to ~/.microagency/microagency.log. Level from MICROAGENCY_LOG_LEVEL
+// (debug|info|warn|error), default info.
+func setupLogging() {
+	lvl := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("MICROAGENCY_LOG_LEVEL")) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+}
+
+// fatal logs a structured error and exits non-zero — the slog replacement for the
+// startup log.Fatalf sites (a running server logs and recovers; startup can't).
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
 func main() {
+	setupLogging()
 	gateway.ClientVersion = version // identify the real build to upstream MCP servers
 	args := os.Args[1:]
 	if len(args) < 1 {
@@ -244,7 +268,7 @@ func run(args []string) {
 	// to the local file store rather than failing the whole server.
 	if !stdio {
 		if addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv); err != nil {
-			log.Printf("microagency: OpenBao unavailable (%v) — using the local file store", err)
+			slog.Warn("OpenBao unavailable; using the local file store", "err", err)
 		} else {
 			_ = os.Setenv("VAULT_ADDR", addr)
 			_ = os.Setenv("VAULT_TOKEN", vaultTok)
@@ -303,14 +327,14 @@ func daemonize(cfg httpConfig) {
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		log.Fatalf("microagency: %v", err)
+		fatal("resolve executable", "err", err)
 	}
 	dir := microagencyDir()
 	_ = os.MkdirAll(dir, 0o700)
 	logPath := filepath.Join(dir, "microagency.log")
 	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		log.Fatalf("microagency: open log: %v", err)
+		fatal("open log file", "err", err)
 	}
 	defer func() { _ = logf.Close() }()
 
@@ -319,7 +343,7 @@ func daemonize(cfg httpConfig) {
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from the terminal
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("microagency: start: %v", err)
+		fatal("start daemon", "err", err)
 	}
 	pid := cmd.Process.Pid
 	_ = os.WriteFile(pidPath(), []byte(strconv.Itoa(pid)), 0o600)
@@ -621,7 +645,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string
 		// External OAuth resource server — issuance is hosted elsewhere.
 		ks, err := auth.NewJWKSFromIssuer(context.Background(), cfg.issuer, nil)
 		if err != nil {
-			log.Fatalf("microagency: discover issuer %q: %v", cfg.issuer, err)
+			fatal("discover issuer", "issuer", cfg.issuer, "err", err)
 		}
 		rs := &auth.ResourceServer{Issuer: cfg.issuer, Audience: audience, Keys: ks}
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(mcp.OAuthAuthenticator(rs, cfg.requireScope)))
@@ -646,7 +670,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string
 		// authorization server AND resource server, pointing at itself.
 		signer, err := auth.LoadOrCreateSigner(oauthKeyPath())
 		if err != nil {
-			log.Fatalf("microagency: oauth key: %v", err)
+			fatal("load oauth key", "err", err)
 		}
 		issuer := "http://" + cfg.addr
 		// 2h access tokens: long enough that a working session never re-auths
@@ -699,7 +723,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		adminSrv = newHTTPServer(effectiveAdminAddr(cfg), adminMux)
 		go func() {
 			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("microagency: admin listener %s: %v", adminSrv.Addr, err)
+				slog.Error("admin listener failed", "addr", adminSrv.Addr, "err", err)
 			}
 		}()
 	}
@@ -712,7 +736,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	if cfg.tunnel != "" {
 		t, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
 		if err != nil {
-			log.Fatalf("microagency: %v", err)
+			fatal("start tunnel", "err", err)
 		}
 		tun = t
 		fmt.Fprintf(os.Stderr, "  Public URL     %s/mcp  (paste into a web app's connector)\n\n", tun.PublicURL)
@@ -953,7 +977,7 @@ func persistentTokenAt(name string) (token, file string) {
 func randomToken() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		log.Fatalf("microagency: generate token: %v", err)
+		fatal("generate token", "err", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
@@ -1019,10 +1043,10 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	var store refstore.Store = refstore.NewBoundedMemStore(24*time.Hour, 10000)
 	if persistRefs {
 		if fs, err := openPersistedRefs(); err != nil {
-			log.Printf("microagency: --persist-refs unavailable (%v) — using in-memory refs", err)
+			slog.Warn("--persist-refs unavailable; using in-memory refs", "err", err)
 		} else {
 			store = fs
-			log.Printf("microagency: refs persisted (encrypted, 24h TTL) under %s", filepath.Join(microagencyDir(), "refs"))
+			slog.Info("refs persisted (encrypted, 24h TTL)", "dir", filepath.Join(microagencyDir(), "refs"))
 		}
 	}
 	gate := budget.Gate{MaxBytes: maxInlineBytes, Store: store}
@@ -1033,7 +1057,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	var provider sandbox.Provider = sandbox.MicroagentProvider{}
 	if reduceEnginesOnly {
 		provider = sandbox.UnavailableProvider{Reason: "microagency is running with --reduce-engines-only (no microVM sandbox)"}
-		log.Printf("microagency: microVM reduce disabled (--reduce-engines-only); wasm engines only")
+		slog.Info("microVM reduce disabled (--reduce-engines-only); wasm engines only")
 	}
 	rt := router.Router{
 		Provider: provider,
@@ -1055,7 +1079,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	if auditSigner, err := auth.LoadOrCreateSigner(auditKeyPath()); err == nil {
 		opts = append(opts, mcp.WithAuditSigner(auditSigner))
 	} else {
-		log.Printf("microagency: audit signing disabled (%v); chain is integrity-only", err)
+		slog.Warn("audit signing disabled; chain is integrity-only", "err", err)
 	}
 	// The wasm engines back reduce (a declarative reduction over a ref is computed
 	// in the selected engine instead of running Python in a microVM). The engines
@@ -1086,11 +1110,11 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 	for _, spec := range engineSpecs {
 		name, path, ok := strings.Cut(spec, "=")
 		if !ok || name == "" || path == "" {
-			log.Fatalf("microagency: --engine expects name=path, got %q", spec)
+			fatal("--engine expects name=path", "got", spec)
 		}
 		mod, err := os.ReadFile(path)
 		if err != nil {
-			log.Fatalf("microagency: read engine %q: %v", path, err)
+			fatal("read engine", "path", path, "err", err)
 		}
 		addEngine(name, mod)
 	}
@@ -1112,7 +1136,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 				MaxMemoryPages: uint32(wasmMaxMemMB) * 16,
 			})
 			if err != nil {
-				log.Printf("microagency: minimizer %q unavailable: %v", n, err)
+				slog.Warn("minimizer unavailable", "minimizer", n, "err", err)
 				continue
 			}
 			chain = append(chain, m)

@@ -2,7 +2,7 @@ package auth
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -35,7 +35,7 @@ func (s *AuthServer) LoadClients(path string) {
 	}
 	var pcs []persistedClient
 	if err := json.Unmarshal(b, &pcs); err != nil {
-		log.Printf("microagency: load oauth clients: %v", err)
+		slog.Warn("load oauth clients failed", "err", err)
 		return
 	}
 	for _, pc := range pcs {
@@ -54,11 +54,11 @@ func (s *AuthServer) persistClientsLocked() {
 		pcs = append(pcs, persistedClient{ClientID: id, RedirectURIs: c.redirectURIs, Name: c.name})
 	}
 	if err := os.MkdirAll(filepath.Dir(s.clientsPath), 0o700); err != nil {
-		log.Printf("microagency: persist oauth clients: %v", err)
+		slog.Error("persist oauth clients failed", "err", err)
 		return
 	}
 	b, _ := json.Marshal(pcs)
 	if err := os.WriteFile(s.clientsPath, b, 0o600); err != nil {
-		log.Printf("microagency: persist oauth clients: %v", err)
+		slog.Error("persist oauth clients failed", "err", err)
 	}
 }
