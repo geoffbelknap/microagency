@@ -465,7 +465,7 @@ func TestProxyLargeResultIsReffed(t *testing.T) {
 
 	store := refstore.NewMemStore()
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 1024, Store: store}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "db", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "db", &gateway.Upstream{Name: "db", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -484,7 +484,7 @@ func TestProxySmallResultStaysInline(t *testing.T) {
 	defer ts.Close()
 	store := refstore.NewMemStore()
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 1024, Store: store}))
-	if err := s.AddUpstream(context.Background(), &gateway.Upstream{Name: "db", URL: ts.URL}); err != nil {
+	if err := s.AddUpstream(context.Background(), "db", &gateway.Upstream{Name: "db", URL: ts.URL}); err != nil {
 		t.Fatal(err)
 	}
 	out := call(t, s, "call_tool", map[string]any{"name": "db__q", "arguments": map[string]any{}})

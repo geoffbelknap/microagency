@@ -164,52 +164,52 @@ func (s *Server) snapshotUpstream(name string) (upstream, bool) {
 // AddUpstream connects to an upstream, lists its tools, and registers it ENABLED
 // (preloaded — operator-trusted, invocable). Failure to reach it is returned
 // (fail-loud at wiring time), never a silent drop.
-func (s *Server) AddUpstream(ctx context.Context, u *gateway.Upstream, opts ...UpstreamOption) error {
-	if u.Name == "" || strings.Contains(u.Name, nsSep) {
-		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", u.Name, nsSep)
+func (s *Server) AddUpstream(ctx context.Context, name string, conn upstreamConn, opts ...UpstreamOption) error {
+	if name == "" || strings.Contains(name, nsSep) {
+		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", name, nsSep)
 	}
-	if s.hasUpstream(u.Name) { // fast-fail before the network round-trip
-		return fmt.Errorf("gateway: upstream %q already registered", u.Name)
+	if s.hasUpstream(name) { // fast-fail before the network round-trip
+		return fmt.Errorf("gateway: upstream %q already registered", name)
 	}
-	_ = u.Initialize(ctx) // best-effort; some servers don't require it before tools/list
-	tools, err := u.ListTools(ctx)
+	_ = conn.Initialize(ctx) // best-effort; some servers don't require it before tools/list
+	tools, err := conn.ListTools(ctx)
 	if err != nil {
 		return err
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: true, provenance: "preloaded", minimizeSuggested: suggestionFor(tools)}, opts...)
+	return s.registerUpstream(name, &upstream{conn: conn, tools: tools, enabled: true, provenance: "preloaded", minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // AddDiscovered registers an upstream's tools WITHOUT connecting — discovered
 // metadata (a catalog entry or pre-discovery). The tools enter the index and are
 // findable, but call_tool refuses them until EnableUpstream connects it. The
 // connection config is retained so enabling is a one-step operator action.
-func (s *Server) AddDiscovered(u *gateway.Upstream, tools []gateway.Tool, provenance string, opts ...UpstreamOption) error {
-	if u.Name == "" || strings.Contains(u.Name, nsSep) {
-		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", u.Name, nsSep)
+func (s *Server) AddDiscovered(name string, conn upstreamConn, tools []gateway.Tool, provenance string, opts ...UpstreamOption) error {
+	if name == "" || strings.Contains(name, nsSep) {
+		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", name, nsSep)
 	}
 	if provenance == "" {
 		provenance = "discovered"
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: provenance, minimizeSuggested: suggestionFor(tools)}, opts...)
+	return s.registerUpstream(name, &upstream{conn: conn, tools: tools, enabled: false, provenance: provenance, minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // DiscoverUpstream connects once to fetch an upstream's tool metadata and
 // registers it DISCOVERED (not enabled): the agent can find its tools but not
 // invoke them until EnableUpstream authorizes it. (A catalog feed would instead
 // call AddDiscovered with metadata it already holds, without connecting.)
-func (s *Server) DiscoverUpstream(ctx context.Context, u *gateway.Upstream, opts ...UpstreamOption) error {
-	if u.Name == "" || strings.Contains(u.Name, nsSep) {
-		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", u.Name, nsSep)
+func (s *Server) DiscoverUpstream(ctx context.Context, name string, conn upstreamConn, opts ...UpstreamOption) error {
+	if name == "" || strings.Contains(name, nsSep) {
+		return fmt.Errorf("gateway: upstream name %q must be non-empty and not contain %q", name, nsSep)
 	}
-	if s.hasUpstream(u.Name) { // fast-fail before the network round-trip
-		return fmt.Errorf("gateway: upstream %q already registered", u.Name)
+	if s.hasUpstream(name) { // fast-fail before the network round-trip
+		return fmt.Errorf("gateway: upstream %q already registered", name)
 	}
-	_ = u.Initialize(ctx)
-	tools, err := u.ListTools(ctx)
+	_ = conn.Initialize(ctx)
+	tools, err := conn.ListTools(ctx)
 	if err != nil {
 		return err
 	}
-	return s.registerUpstream(u.Name, &upstream{conn: u, tools: tools, enabled: false, provenance: "discovered", minimizeSuggested: suggestionFor(tools)}, opts...)
+	return s.registerUpstream(name, &upstream{conn: conn, tools: tools, enabled: false, provenance: "discovered", minimizeSuggested: suggestionFor(tools)}, opts...)
 }
 
 // EnableUpstream connects a discovered upstream — verifying it's reachable and
@@ -251,12 +251,12 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 // token or scope — refreshing its tools while preserving its enabled state and
 // provenance. Errors if the upstream is unknown or the new connection is
 // unreachable (leaving the old connection in place).
-func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Upstream) error {
+func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamConn) error {
 	if !s.hasUpstream(name) { // fast-fail before the network round-trip
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
-	_ = u.Initialize(ctx)
-	tools, err := u.ListTools(ctx)
+	_ = conn.Initialize(ctx)
+	tools, err := conn.ListTools(ctx)
 	if err != nil {
 		return err
 	}
@@ -269,7 +269,7 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, u *gateway.Ups
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while rebinding", name)
 	}
-	rec.conn = u
+	rec.conn = conn
 	rec.tools = tools
 	rec.minimizeSuggested = sug
 	return nil

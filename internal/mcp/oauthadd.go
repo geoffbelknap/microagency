@@ -251,9 +251,9 @@ func (s *Server) adminOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	case flow.reauth:
 		err = s.RebindUpstream(r.Context(), flow.name, u) // new token/scope onto the existing upstream
 	case flow.discover:
-		err = s.DiscoverUpstream(r.Context(), u, opts...)
+		err = s.DiscoverUpstream(r.Context(), flow.name, u, opts...)
 	default:
-		err = s.AddUpstream(r.Context(), u, opts...)
+		err = s.AddUpstream(r.Context(), flow.name, u, opts...)
 	}
 	if err != nil {
 		authui.WriteMessage(w, "Authorized, but registering the upstream failed: "+err.Error())
