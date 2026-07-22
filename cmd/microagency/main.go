@@ -28,6 +28,7 @@ import (
 	"microagency/internal/app"
 	"microagency/internal/auth"
 	"microagency/internal/baomanager"
+	"microagency/internal/console"
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
 	"microagency/internal/tunnel"
@@ -689,7 +690,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string
 		adminMux = http.NewServeMux()
 	}
 	adminMux.Handle("/admin/", srv.AdminHandler(operatorToken))
-	adminMux.Handle("/console", srv.ConsoleHandler(operatorToken))
+	adminMux.Handle("/console", console.Handler(operatorToken))
 	return mcpMux, adminMux, mode, bearer
 }
 
