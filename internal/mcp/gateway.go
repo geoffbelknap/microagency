@@ -27,6 +27,21 @@ const maxOffloadBytes = 64 << 20 // 64 MiB
 // "<upstream>__<tool>". Tool names don't normally contain it, so it round-trips.
 const nsSep = "__"
 
+// upstreamConn is the transport-agnostic seam the gateway stores and calls. The
+// concrete HTTP client (*gateway.Upstream) satisfies it today; a stdio or
+// WebSocket transport can be added by implementing this interface, without
+// touching the storage, invocation, enable/rebind/refresh, or health machinery
+// that only ever talks to this seam. (Onboarding still constructs the concrete
+// HTTP client explicitly — new transports add their own onboarding path and reuse
+// everything below.)
+type upstreamConn interface {
+	Initialize(ctx context.Context) error
+	ListTools(ctx context.Context) ([]gateway.Tool, error)
+	CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
+	Probe(ctx context.Context) (string, error)
+	Endpoint() string // the upstream address (for display + egress accounting)
+}
+
 // upstream is one registered MCP server in the index. ENABLED means it's
 // connected and its tools are invocable; otherwise it's DISCOVERED — metadata the
 // agent can find but NOT call until the operator enables it. This is the
@@ -34,10 +49,10 @@ const nsSep = "__"
 // call_tool only runs enabled upstreams (ASK: trust is explicit, never
 // self-elevated).
 type upstream struct {
-	conn       *gateway.Upstream // connection config (URL, token, client)
-	tools      []gateway.Tool    // advertised tools (un-namespaced)
-	enabled    bool              // connected → invocable
-	provenance string            // "preloaded" | "catalog" | "discovered"
+	conn       upstreamConn   // connection (any transport; HTTP today)
+	tools      []gateway.Tool // advertised tools (un-namespaced)
+	enabled    bool           // connected → invocable
+	provenance string         // "preloaded" | "catalog" | "discovered"
 	// readOnly restricts this upstream to its READ tools: write/destructive tools
 	// (isWriteTool) are refused at the invocation gate and marked non-invocable in
 	// find_tools. Least-privilege at onboarding — an operator opts a connection down
@@ -364,7 +379,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if !hasExplicit && s.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.URL, State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
@@ -477,7 +492,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	args = s.resolveOutbound(ctx, upName, args)
 	runID := s.nextRunID()
 	start := time.Now()
-	upHost := hostFromURL(rec.conn.URL) // the egress target for calls that reach the upstream
+	upHost := hostFromURL(rec.conn.Endpoint()) // the egress target for calls that reach the upstream
 	// Tier 1 — pre-egress write guard. If this is a write and its arguments don't
 	// satisfy the tool's retained schema, fail CLOSED: no malformed mutation is sent,
 	// and the agent gets the full spec to retry (it may have seen only a find_tools

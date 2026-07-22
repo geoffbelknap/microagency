@@ -97,6 +97,11 @@ func (u *Upstream) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
+// Endpoint returns the upstream's address for display and egress accounting. It's
+// the accessor the gateway's transport-agnostic UpstreamConn seam reads, so the
+// stored connection needn't be a concrete *Upstream.
+func (u *Upstream) Endpoint() string { return u.URL }
+
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int    `json:"id"`
