@@ -3,7 +3,7 @@ module microagency
 go 1.26.3
 
 require (
-	github.com/geoffbelknap/microagent v0.8.7
+	github.com/geoffbelknap/microagent v0.8.8-0.20260723132335-b16d6b2ecb53
 	github.com/golang-jwt/jwt/v5 v5.3.1
 )
 
