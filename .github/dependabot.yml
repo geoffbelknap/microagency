@@ -9,6 +9,20 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: gomod
+    directories:
+      - /engines/html
+      - /engines/jq
+      - /engines/sql
+      - /engines/text
+      - /minimizers/redactor
+    schedule:
+      interval: weekly
+    groups:
+      standalone-go-modules:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

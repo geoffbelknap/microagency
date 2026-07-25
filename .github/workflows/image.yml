@@ -4,50 +4,75 @@ name: Image
 # Docker). Building never boots a VM — microagent assembles the rootfs from the
 # base image plus the spec's baked files and extracts it on the host
 # (mke2fs/debugfs) — so it runs on a stock runner. Pull requests build only, to
-# validate the whole path; merges to main and version tags publish to GHCR.
+# validate the whole path. A successful main CI run and version tags publish.
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
+  merge_group:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ['v*']
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: image-${{ github.ref }}
+  group: image-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
   image:
+    name: image-build
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     env:
       REPO_IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      # microagent provides the Docker-free image build (create + commit). The
-      # tap formula pulls in its Linux build deps (e2fsprogs for mke2fs/debugfs,
-      # passt) automatically.
-      - name: Install microagent
+      # Use the exact microagent module version selected by go.mod. A separate
+      # newest-supported canary may be useful, but the required product build
+      # must be reproducible from this repository alone.
+      - name: Install pinned microagent
         run: |
-          # Homebrew ships on the runner but is not on PATH by default.
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          # Newer Homebrew skips untrusted third-party taps; trust ours first.
-          # `|| true` keeps this working on brew versions without `trust`.
-          brew tap geoffbelknap/tap
-          brew trust geoffbelknap/tap 2>/dev/null || true
-          brew install geoffbelknap/tap/microagent
-          # Expose the brew bin (where microagent is linked) to later steps.
-          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs passt
+          version="$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)"
+          go install "github.com/geoffbelknap/microagent/cmd/microagent@${version}"
+          go install "github.com/geoffbelknap/microagent/cmd/microagent-guestinit@${version}"
+          go install "github.com/geoffbelknap/microagent/cmd/microagent-firecracker-supervisor@${version}"
+          mkdir -p "$(go env GOPATH)/libexec"
+          cp "$(go env GOPATH)/bin/microagent-guestinit" \
+            "$(go env GOPATH)/libexec/microagent-guestinit-$(go env GOARCH)"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "MICROAGENT_VERSION=$version" >> "$GITHUB_ENV"
+          "$(go env GOPATH)/bin/microagent" version
+
+      - name: Record build inputs
+        run: |
+          {
+            echo "### Image build inputs"
+            echo "- microagency: \`${{ github.event.workflow_run.head_sha || github.sha }}\`"
+            echo "- microagent module: \`$MICROAGENT_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify microagent
+        run: |
           microagent version
 
       # `make image` runs the whole build (static binary + create + commit), so
@@ -60,7 +85,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
             make image IMAGE_REF="$REPO_IMAGE:ci-validate"
             exit 0
           fi

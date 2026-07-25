@@ -89,21 +89,3 @@ func TestParseErrorReturnsNullID(t *testing.T) {
 		t.Fatalf("expected -32700 parse error, got %+v", resp.Error)
 	}
 }
-
-// mustText decodes the first text content block of a tool result into v.
-func mustText(t *testing.T, res map[string]any, v any) {
-	t.Helper()
-	text := res["content"].([]map[string]any)[0]["text"].(string)
-	if err := json.Unmarshal([]byte(text), v); err != nil {
-		t.Fatalf("decode tool result text: %v\n%s", err, text)
-	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

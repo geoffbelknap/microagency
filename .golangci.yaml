@@ -1,0 +1,45 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - misspell
+    - unconvert
+    - nolintlint
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Best-effort browser responses and shutdown paths cannot be recovered
+        # after the OAuth callback has completed or the client disconnects.
+        - io.WriteString
+        - (io.Closer).Close
+        - (net.Listener).Close
+        - (*os.File).Close
+        - (*net/http.Server).Close
+        - (*net/http.Server).Serve
+        - os.Remove
+        - os.RemoveAll
+    staticcheck:
+      checks:
+        - all
+        # QF* are optional refactor suggestions, not correctness findings.
+        - -QF1001
+        - -QF1008
+        # The JWK encoder needs affine coordinates. Migrating it to the new
+        # encoded-key API should be a focused compatibility change.
+        - -SA1019
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

@@ -19,7 +19,7 @@ const DefaultRegistryURL = "https://registry.modelcontextprotocol.io"
 // registry unboundedly (ASK tenet 8 — operations are bounded).
 const (
 	registryPageSize = 100
-	registryMaxPages  = 20
+	registryMaxPages = 20
 )
 
 // registryResponse is the official MCP registry's GET /v0/servers shape:
