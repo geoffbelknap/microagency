@@ -4,75 +4,77 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test:
     name: build-test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          # Full history so the docs-only check can diff against the PR base.
-          fetch-depth: 0
-
-      # build-test is the required check that auto-merge waits on, so it must
-      # always report — a paths-ignore trigger would leave docs-only PRs
-      # pending forever. Instead the job always runs and skips the Go steps
-      # when the diff is docs-only. Pushes to main always run everything.
-      - name: Detect docs-only diff
-        id: diff
-        run: |
-          code=true
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            non_docs=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD | grep -vE '\.md$' || true)
-            if [ -z "$non_docs" ]; then
-              code=false
-              echo "docs-only diff — skipping build and tests"
-            fi
-          fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Go
-        if: steps.diff.outputs.code == 'true'
-        uses: actions/setup-go@v7
-        with:
-          go-version: "1.26.4"
-          cache-dependency-path: go.sum
-
-      # microagency depends on the PUBLIC github.com/geoffbelknap/microagent module
-      # (pinned in go.mod) — no sibling checkout, go.work, or token needed. Devs may
-      # keep a local go.work replace for co-development; CI builds against the module.
+          go-version-file: go.mod
       - name: Build
-        if: steps.diff.outputs.code == 'true'
         run: go build ./...
-
       - name: Vet
-        if: steps.diff.outputs.code == 'true'
         run: go vet ./...
-
-      - name: Test
-        if: steps.diff.outputs.code == 'true'
-        run: go test -short ./cmd/... ./internal/...
-
-      # The race detector re-instruments the whole tree + deps and dominates CI
-      # (~140s vs ~16s for the plain suite). PRs run the full non-race suite above
-      # for fast feedback; the race detector runs on push to main (post-merge), so
-      # a data race is still caught within minutes of landing, off the PR path.
-      - name: Race test
-        if: steps.diff.outputs.code == 'true' && github.event_name == 'push'
-        run: go test -race -short ./cmd/... ./internal/...
-
-      # Each engines/* dir is a standalone Go module (compiled to wasip1 in the
-      # product, but its logic is host-testable). Run their unit tests too —
-      # they're outside ./cmd/... ./internal/... . Engines with no test files
-      # pass trivially ("no test files" is not a failure).
-      - name: Engine module tests
-        if: steps.diff.outputs.code == 'true'
+      - name: Test with coverage
+        run: go test -short -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Report coverage
         run: |
-          for d in engines/*/; do
-            (cd "$d" && go test ./...)
-          done
+          total="$(go tool cover -func=coverage.out | tail -1)"
+          echo "### Go coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$total\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Test standalone modules
+        run: |
+          while IFS= read -r module; do
+            dir="${module%/go.mod}"
+            echo "::group::$dir"
+            (cd "$dir" && go test ./...)
+            echo "::endgroup::"
+          done < <(find engines minimizers -name go.mod -print | sort)
+
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Race test
+        run: go test -race -short ./...
+
+  static-analysis:
+    name: static-analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  workflows:
+    name: workflow-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

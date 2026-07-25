@@ -11,13 +11,13 @@ import (
 func TestIsInternal(t *testing.T) {
 	internal := []string{
 		"127.0.0.1", "::1", // loopback
-		"169.254.169.254", // cloud metadata (link-local)
-		"fe80::1",          // link-local v6
+		"169.254.169.254",                       // cloud metadata (link-local)
+		"fe80::1",                               // link-local v6
 		"10.1.2.3", "172.16.5.4", "192.168.1.1", // RFC1918
-		"fd00::1",     // ULA
-		"100.64.0.1",  // CGNAT
-		"0.0.0.0",     // unspecified
-		"224.0.0.1",   // multicast
+		"fd00::1",    // ULA
+		"100.64.0.1", // CGNAT
+		"0.0.0.0",    // unspecified
+		"224.0.0.1",  // multicast
 	}
 	for _, s := range internal {
 		if !isInternal(net.ParseIP(s)) {

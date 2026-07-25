@@ -102,12 +102,12 @@ func TestProviderSurfacesDeny(t *testing.T) {
 		"    pass\n"
 
 	res, err := p.Run(ctx, Spec{
-		Name:        "m2-prov-deny",
-		Image:       pyImage,
-		Code:        probe,
-		CodePath:    "/app/run.py",
-		Command:     "python /app/run.py",
-		Timeout:     6 * time.Minute,
+		Name:     "m2-prov-deny",
+		Image:    pyImage,
+		Code:     probe,
+		CodePath: "/app/run.py",
+		Command:  "python /app/run.py",
+		Timeout:  6 * time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("provider.Run: %v", err)
@@ -131,7 +131,7 @@ func TestProviderSurfacesDeny(t *testing.T) {
 			hasTarget := strings.Contains(e.Dst, "example.com") ||
 				strings.Contains(e.Host, "example.com")
 			if !hasTarget {
-				t.Logf("deny event has no example.com in Dst/Host â checking raw event fields; Dst=%q Host=%q", e.Dst, e.Host)
+				t.Logf("deny event has no example.com in Dst/Host — checking raw event fields; Dst=%q Host=%q", e.Dst, e.Host)
 			}
 			break
 		}

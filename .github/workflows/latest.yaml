@@ -1,11 +1,12 @@
 name: Latest
 
-# Latest train: every merge to main tags the commit v0.0.0-latest.<N> (N = commit
-# count, monotonic), publishes a prerelease, and updates the `microagency-latest`
-# Homebrew formula — so `brew upgrade` on the latest channel tracks main. Old
-# latest prereleases are pruned. Stable releases are cut by tagging (release.yaml).
+# Latest train: a successful CI run for main tags the validated commit,
+# publishes a prerelease, and updates the `microagency-latest` Homebrew formula.
+# Old latest prereleases are pruned. Stable releases are cut by tagging.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -18,12 +19,16 @@ concurrency:
 
 jobs:
   latest:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       # A GitHub App token scoped to the tap repo, so GoReleaser can push the
       # generated formula. NOTE: this repo needs the HOMEBREW_APP_CLIENT_ID and

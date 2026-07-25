@@ -13,7 +13,35 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: release-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -short ./...
+      - name: Test standalone modules
+        run: |
+          while IFS= read -r module; do
+            dir="${module%/go.mod}"
+            (cd "$dir" && go test ./...)
+          done < <(find engines minimizers -name go.mod -print | sort)
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
   release:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
