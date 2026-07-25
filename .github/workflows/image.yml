@@ -54,6 +54,10 @@ jobs:
           sudo apt-get install -y e2fsprogs passt
           version="$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)"
           go install "github.com/geoffbelknap/microagent/cmd/microagent@${version}"
+          go install "github.com/geoffbelknap/microagent/cmd/microagent-guestinit@${version}"
+          mkdir -p "$(go env GOPATH)/libexec"
+          cp "$(go env GOPATH)/bin/microagent-guestinit" \
+            "$(go env GOPATH)/libexec/microagent-guestinit-$(go env GOARCH)"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           echo "MICROAGENT_VERSION=$version" >> "$GITHUB_ENV"
           "$(go env GOPATH)/bin/microagent" version
