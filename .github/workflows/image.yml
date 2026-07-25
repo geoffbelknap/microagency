@@ -55,6 +55,7 @@ jobs:
           version="$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)"
           go install "github.com/geoffbelknap/microagent/cmd/microagent@${version}"
           go install "github.com/geoffbelknap/microagent/cmd/microagent-guestinit@${version}"
+          go install "github.com/geoffbelknap/microagent/cmd/microagent-firecracker-supervisor@${version}"
           mkdir -p "$(go env GOPATH)/libexec"
           cp "$(go env GOPATH)/bin/microagent-guestinit" \
             "$(go env GOPATH)/libexec/microagent-guestinit-$(go env GOARCH)"
