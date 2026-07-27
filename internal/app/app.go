@@ -76,8 +76,8 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	rt := router.Router{
 		Provider: provider,
 		Gate:     gate,
-		Image:    "docker.io/library/python:3.13-slim",
-		CodePath: "/app/run.py",
+		Image:    sandbox.ReduceImage,
+		CodePath: sandbox.ReduceCodePath,
 		Timeout:  6 * time.Minute,
 	}
 

@@ -73,6 +73,15 @@ func (e *GuestFailureError) Error() string {
 }
 
 // Provider runs a Spec in an isolated sandbox.
+// ReduceImage and ReduceCodePath are the canonical reduce(code) workload
+// configuration, shared by the running gateway's router and doctor's
+// end-to-end self-check — the check is only meaningful if it probes the
+// exact image and path a real reduce will use.
+const (
+	ReduceImage    = "docker.io/library/python:3.13-slim"
+	ReduceCodePath = "/app/run.py"
+)
+
 type Provider interface {
 	Run(ctx context.Context, spec Spec) (Result, error)
 }
