@@ -58,7 +58,8 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 	}
 	var hits []scored
 	// The index is scoped to the caller: shared connections + the caller's own.
-	for _, t := range s.indexedTools(principalOf(ctx).Subject) {
+	indexed := s.indexedTools(principalOf(ctx).Subject)
+	for _, t := range indexed {
 		name, _ := t["name"].(string)
 		desc, _ := t["description"].(string)
 		score := matchScore(terms, name, desc)
@@ -124,6 +125,24 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		summarized++
 	}
 	result := map[string]any{"tools": out}
+	if len(out) == 0 {
+		// A bare {"tools":[]} is three indistinguishable states: nothing
+		// connected, nothing matched, or a broken index — and this lands on
+		// the agent's primary discovery entry point, in the state every new
+		// gateway starts in. Name which empty this is and who can act:
+		// zero servers is the operator's to fix (the agent retrying keyword
+		// variations cannot conjure an upstream), while zero matches over a
+		// real index is the agent's cue to vary terms, not to conclude the
+		// capability does not exist.
+		if len(indexed) == 0 {
+			result["note"] = "No upstream MCP servers are connected to this gateway yet, so there are no tools to find. " +
+				"This is an operator action, not something to retry: ask the operator to connect servers in the microagency console."
+		} else {
+			result["note"] = fmt.Sprintf("0 of %d indexed tools matched %q. The servers are connected and the index is live — "+
+				"vary the keywords (names and descriptions are matched) rather than concluding the capability is missing.",
+				len(indexed), in.Query)
+		}
+	}
 	if summarized > 0 || omitted > 0 {
 		// Self-describing overflow: tell the agent how to recover any full detail.
 		note := "Some results were summarized to stay within budget."
