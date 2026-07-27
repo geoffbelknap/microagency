@@ -18,7 +18,23 @@ import (
 // (always available, in-process) and the microVM runtime (the code substrate) —
 // so an unhealthy install is visible up front with a fix, not a cryptic failure
 // mid-run.
-func runDoctor() {
+func runDoctor(args []string) {
+	// --help must never act. doctor is read-only, so running it on --help was
+	// harmless, but the same discarded-argument bug made `down --help` stop
+	// the server; both commands now parse before doing anything.
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "help":
+			fmt.Fprintln(os.Stderr, "usage: microagency doctor")
+			fmt.Fprintln(os.Stderr, "  check runtime + engine health (server, secret store, query engines,")
+			fmt.Fprintln(os.Stderr, "  microVM runtime, enforcement-hygiene bypasses)")
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
+			os.Exit(2)
+		}
+	}
+
 	out := os.Stderr
 	fmt.Fprintln(out, "microagency doctor")
 
