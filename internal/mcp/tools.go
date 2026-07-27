@@ -72,6 +72,26 @@ func toolDefs() []map[string]any {
 					"engine": strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
 					"code":   strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
 				},
+				// The contract, machine-checkable instead of prose-only: exactly
+				// one input (ref | refs | data), exactly one operation (query |
+				// code), and refs implies code. Runtime enforcement is
+				// unchanged and remains authoritative; this lets schema-
+				// validating clients refuse an invalid call before the round
+				// trip, instead of a schema that marked everything optional
+				// and asserted reduce({}) was valid.
+				"allOf": []map[string]any{
+					{"oneOf": []map[string]any{
+						{"required": []string{"ref"}},
+						{"required": []string{"refs"}},
+						{"required": []string{"data"}},
+					}},
+					{"oneOf": []map[string]any{
+						{"required": []string{"query"}},
+						{"required": []string{"code"}},
+					}},
+					{"if": map[string]any{"required": []string{"refs"}},
+						"then": map[string]any{"required": []string{"code"}}},
+				},
 			},
 		},
 	}
@@ -219,11 +239,20 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 		return toolError("references are not enabled on this server")
 	}
 	// The input is EITHER references (`ref`/`refs`, resolved from the refstore) OR
-	// inline `data` (small, in-context data to compute over exactly). Resolve the
-	// payloads up front, failing closed on any unknown handle.
+	// inline `data` (small, in-context data to compute over exactly).
 	refs := in.Refs
 	if len(refs) == 0 && strings.TrimSpace(in.Ref) != "" {
 		refs = []string{in.Ref}
+	}
+	// Shape before resolution: a structurally invalid call is told about its
+	// structure, not about a ref it may also have mistyped. refs+query used
+	// to report "unknown reference" — the less actionable of its two
+	// problems — because resolution ran first.
+	if len(in.Refs) > 0 && strings.TrimSpace(in.Code) == "" {
+		return toolError("reduce: refs=[...] joins several inputs and requires code (Python reading /app/input_1..N); a single input with a query is ref=<ref> + query")
+	}
+	if strings.TrimSpace(in.Query) != "" && strings.TrimSpace(in.Code) != "" {
+		return toolError("reduce: give a query (declarative engine) OR code (Python), not both")
 	}
 	var payloads []string
 	var refLabel string
@@ -268,13 +297,6 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 	user := principalOf(ctx).Subject
 	runID := s.nextRunID()
 	start := time.Now()
-
-	// query and code are two different substrates over the same input; supplying
-	// both is ambiguous, so reject it rather than silently running the query and
-	// dropping the code (mirrors the ref/data conflict above).
-	if strings.TrimSpace(in.Query) != "" && strings.TrimSpace(in.Code) != "" {
-		return toolError("reduce: give a query (declarative engine) OR code (Python), not both")
-	}
 
 	switch {
 	case strings.TrimSpace(in.Query) != "":

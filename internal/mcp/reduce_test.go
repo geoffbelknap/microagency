@@ -698,3 +698,55 @@ func TestRuntimeStderrStaysOperatorOnly(t *testing.T) {
 		t.Errorf("no operator pointer for the withheld diagnostic: %s", raw)
 	}
 }
+
+// TestReduceSchemaEncodesTheContract pins the machine-checkable half of the
+// calling contract. The schema had no required array and six independently
+// optional properties, so it asserted reduce({}) was valid — a
+// schema-validating client got no help, and every invalid combination cost a
+// round trip the schema could have refused.
+func TestReduceSchemaEncodesTheContract(t *testing.T) {
+	var reduceDef map[string]any
+	for _, d := range toolDefs() {
+		if d["name"] == "reduce" {
+			reduceDef = d
+		}
+	}
+	if reduceDef == nil {
+		t.Fatal("reduce not in toolDefs")
+	}
+	schema := reduceDef["inputSchema"].(map[string]any)
+	allOf, ok := schema["allOf"].([]map[string]any)
+	if !ok || len(allOf) != 3 {
+		t.Fatalf("schema allOf missing or wrong arity: %#v", schema["allOf"])
+	}
+	raw, _ := json.Marshal(schema)
+	for _, want := range []string{
+		`"oneOf":[{"required":["ref"]},{"required":["refs"]},{"required":["data"]}]`,
+		`"oneOf":[{"required":["query"]},{"required":["code"]}]`,
+		`"if":{"required":["refs"]}`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("schema missing constraint %s:\n%s", want, raw)
+		}
+	}
+}
+
+// TestStructuralErrorsOutrankRefResolution pins the precedence: refs+query is
+// structurally invalid (refs requires code), and used to report "unknown
+// reference" — the less actionable of its two problems — because resolution
+// ran first. The shape answer names the fix; the resolution answer sends the
+// caller checking a handle that was never the issue.
+func TestStructuralErrorsOutrankRefResolution(t *testing.T) {
+	store := refstore.NewMemStore()
+	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}))
+
+	out := call(t, s, "reduce", map[string]any{"refs": []string{"<ref_nope>"}, "query": "length"})
+	raw, _ := json.Marshal(out)
+
+	if strings.Contains(string(raw), "unknown reference") {
+		t.Errorf("resolution error outranked the structural one:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "requires code") {
+		t.Errorf("structural error does not name the fix:\n%s", raw)
+	}
+}
