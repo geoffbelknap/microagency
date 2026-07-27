@@ -78,3 +78,27 @@ func TestPutOAuthFlowSweepsExpired(t *testing.T) {
 		t.Fatalf("the fresh flow must remain (have %d flows)", n)
 	}
 }
+
+// TestToolsListFollowsTheWorkflowOrder pins tools/list to find → call →
+// reduce. The wire order led with reduce — the most advanced tool, the one
+// least likely to be an agent's first step, carrying by far the largest
+// description — and list order is a weak but real salience signal: a model
+// skimming a tool list anchors on what it reads first. The README and the
+// descriptions themselves teach find_tools → call_tool → reduce; the wire
+// now agrees.
+func TestToolsListFollowsTheWorkflowOrder(t *testing.T) {
+	defs := toolDefs()
+	var names []string
+	for _, d := range defs {
+		names = append(names, d["name"].(string))
+	}
+	want := []string{"find_tools", "call_tool", "reduce"}
+	if len(names) != len(want) {
+		t.Fatalf("tool count = %d, want %d: %v", len(names), len(want), names)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("tools/list order = %v, want %v", names, want)
+		}
+	}
+}
