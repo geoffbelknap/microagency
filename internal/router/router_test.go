@@ -202,3 +202,29 @@ func TestRouterRefsLargeResult(t *testing.T) {
 		t.Fatalf("stored payload not retrievable/complete via %q (ok=%v)", dec.Ref, ok)
 	}
 }
+
+// TestRouterPropagatesStartError pins the seam this field crosses: the
+// provider's never-ran diagnosis must reach the Decision, or the MCP layer
+// classifies a substrate failure as a code failure — the exact collapse the
+// field exists to prevent.
+func TestRouterPropagatesStartError(t *testing.T) {
+	r := Router{
+		Provider: fakeProvider{result: sandbox.Result{
+			ExitCode:   127,
+			StartError: "fork/exec /bin/sh: no such file or directory",
+		}},
+		Gate:     budget.Gate{MaxBytes: 4096, Store: refstore.NewMemStore()},
+		Image:    "img",
+		CodePath: "/app/run.py",
+	}
+	dec, err := r.Run(context.Background(), Request{Name: "n", Code: "print(1)"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if dec.StartError != "fork/exec /bin/sh: no such file or directory" {
+		t.Errorf("StartError did not survive the router: %+v", dec)
+	}
+	if dec.ExitCode != 127 {
+		t.Errorf("ExitCode = %d, want the guest's 127", dec.ExitCode)
+	}
+}

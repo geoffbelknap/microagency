@@ -99,9 +99,10 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	}
 
 	out := Result{
-		Stdout:   res.Result.Stdout,
-		Stderr:   res.Result.Stderr,
-		ExitCode: res.Result.ExitCode,
+		Stdout:     res.Result.Stdout,
+		Stderr:     res.Result.Stderr,
+		ExitCode:   res.Result.ExitCode,
+		StartError: res.Result.StartError,
 	}
 	events, aerr := workspace.ReadEgressAudit(stateDir, spec.Name)
 	if aerr != nil {

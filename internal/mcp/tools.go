@@ -378,14 +378,11 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
 			InputBytes: totalIn, OutputBytes: outputBytes,
 			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: out.Summary.Bytes,
-			ExitCode: dec.ExitCode, Stderr: dec.Stderr, Audit: dec.Audit, AuditErr: auditErr,
+			ExitCode: dec.ExitCode, Stderr: dec.Stderr, StartError: dec.StartError,
+			Audit: dec.Audit, AuditErr: auditErr,
 		})
-		if dec.ExitCode != 0 {
-			// Content-free by design: a traceback (or a stray print to stderr) over
-			// /app/input can echo the exact bytes the ref model keeps off-context, so
-			// stderr never enters the agent's context — it lives in the operator's
-			// audit record (recorded above, surfaced via /admin/runs and the console).
-			return toolError("reduce code failed (exit %d). The guest's stderr is not returned here (it can echo the referenced data); the operator can read it in the audit log (run %s, /admin/runs). Fix the code and retry — the inputs are unchanged.", dec.ExitCode, runID)
+		if dec.ExitCode != 0 || dec.StartError != "" {
+			return toolError("%s", classifyReduceFailure(dec.ExitCode, dec.StartError, runID))
 		}
 		return s.reduceResult(runID, out, "") // code already handles any size — no advisory
 
