@@ -56,7 +56,15 @@ PATH), otherwise an encrypted file store under `~/.microagency`. See
 [where credentials live](ARCHITECTURE.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency
-up`. Go is the only build dependency.
+up`. Go is the only build dependency for the gateway itself (the wasm query
+engines are bundled by `make build`; the `reduce` sandbox pulls its workload
+image on demand).
+
+Separately, `make image` builds `ghcr.io/geoffbelknap/microagency` — the OCI
+image for running **microagency itself as a microplane workload**, state
+riding the guest filesystem into hibernation snapshots. Most people never
+need it; it additionally requires `microagent` on PATH and a readable CA
+bundle, so "Go only" does not apply to that target.
 
 ## Add your servers
 
