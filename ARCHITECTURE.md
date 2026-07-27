@@ -205,7 +205,10 @@ a query language by writing one module — in any language that compiles to
 - the **data** arrives on **stdin** (the bytes the gateway fetched, cred-blind)
 - the **result** goes to **stdout**
 - **errors** go to **stderr** with a non-zero exit: `2` for a bad query or
-  usage, `1` for a runtime failure
+  usage, `1` for a runtime failure. **Exit 2 must happen before the first
+  stdin read** — the gateway returns exit-2 stderr to the caller as their own
+  query diagnostic, so it must be provably built from the query text alone;
+  runtime (exit 1) stderr can quote the data and stays operator-only
 - it does **pure compute** — no network, no filesystem, no credentials. The
   runtime enforces this; your module couldn't reach them if it tried.
 

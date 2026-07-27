@@ -1,6 +1,9 @@
 package mcp
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // classifyReduceFailure writes the failure message for a reduce(code) run that
 // did not succeed, routed by WHO can fix it.
@@ -46,4 +49,23 @@ func classifyReduceFailure(exitCode int, startError, runID string) string {
 			"echo the referenced data); the operator can read it in the audit log (run %s, /admin/runs). "+
 			"Fix the code and retry — the inputs are unchanged.", exitCode, runID)
 	}
+}
+
+// capQueryDiagnostic bounds a compile/parse diagnostic for the agent-facing
+// message: first lines, modest length. The diagnostic is safe to return only
+// because every engine exits 2 before reading input (see the bad-query branch
+// in runReduce); this cap is about message hygiene, not privacy.
+func capQueryDiagnostic(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return "(no diagnostic)"
+	}
+	if i := strings.IndexByte(stderr, '\n'); i >= 0 {
+		stderr = stderr[:i]
+	}
+	const maxLen = 300
+	if len(stderr) > maxLen {
+		stderr = stderr[:maxLen] + "…"
+	}
+	return stderr
 }

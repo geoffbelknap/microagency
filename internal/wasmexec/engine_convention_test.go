@@ -3,6 +3,7 @@ package wasmexec
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +68,43 @@ func TestDataFailureIsNotAQueryRejection(t *testing.T) {
 	if exitErr.BadQuery() {
 		t.Errorf("a data failure exited %d and classified as a query rejection; the query was valid",
 			exitErr.ExitCode)
+	}
+}
+
+// TestBadQueryStderrNamesTheQueryNotTheData extends the convention with the
+// property the gateway now RELIES on: at exit 2 the diagnostic is built from
+// the query text alone, because every engine exits 2 before its first stdin
+// read. The gateway returns that diagnostic to the caller as their own text;
+// this test plants a sentinel in the data and requires it absent from every
+// bad-query diagnostic, so an engine that starts reading data before parsing
+// fails here rather than leaking through the returned message.
+func TestBadQueryStderrNamesTheQueryNotTheData(t *testing.T) {
+	const sentinel = "SECRET-ROW-VALUE-9f2c"
+	tests := []struct {
+		engine string
+		dir    string
+		query  string
+		data   string
+	}{
+		{engine: "jq", dir: "../../engines/jq", query: "this is not valid jq |||", data: `["` + sentinel + `"]`},
+		{engine: "sql", dir: "../../engines/sql", query: "NOT A SELECT AT ALL", data: `[{"a":"` + sentinel + `"}]`},
+		{engine: "text", dir: "../../engines/text", query: "[unclosed", data: sentinel + "\n"},
+		{engine: "html", dir: "../../engines/html", query: ">>>bad selector", data: "<p>" + sentinel + "</p>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.engine, func(t *testing.T) {
+			eng := SandboxEngine{Module: buildWasip1(t, tt.dir)}
+			_, err := eng.Run(context.Background(), tt.query, []byte(tt.data))
+			var exitErr *ExitError
+			if !errors.As(err, &exitErr) || !exitErr.BadQuery() {
+				t.Fatalf("%s: expected a bad-query rejection, got %v", tt.engine, err)
+			}
+			if exitErr.Stderr == "" {
+				t.Errorf("%s produced no diagnostic; the caller is back to fixing the query blind", tt.engine)
+			}
+			if strings.Contains(exitErr.Stderr, sentinel) {
+				t.Errorf("%s: bad-query diagnostic contains data: %q", tt.engine, exitErr.Stderr)
+			}
+		})
 	}
 }

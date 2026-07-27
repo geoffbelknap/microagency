@@ -321,7 +321,15 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 				// would. It also wants the opposite advice from a data failure:
 				// correct the query rather than escalate a typo to the microVM.
 				if exitErr.BadQuery() {
-					return toolError("reduce: the %q engine rejected the query as malformed or unsupported. Correct the query and retry — this is not a size or complexity limit, so running it as code will not help. Its diagnostic was captured for the operator (run %s, /admin/runs), not returned here.", engineName, runID)
+					// The parse diagnostic itself comes back too. Every engine
+					// exits 2 BEFORE its first read of the input, so a bad-query
+					// diagnostic is provably built from the query text alone —
+					// text the caller wrote and already holds. Withholding it
+					// made the agent fix a typo blind; a SQL diagnostic quoting
+					// row values remains impossible in this class by
+					// construction, and runtime failures below stay
+					// operator-only exactly as before.
+					return toolError("reduce: the %q engine rejected the query: %s. Correct the query and retry — this is not a size or complexity limit, so running it as code will not help.", engineName, capQueryDiagnostic(exitErr.Stderr))
 				}
 			}
 			// Turn a dead-end failure into the productive next step. Over a large ref

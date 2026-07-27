@@ -16,6 +16,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "text: missing query (a regular expression)")
 		os.Exit(2)
 	}
+	// INVARIANT: exit 2 must happen before the first stdin read. The host
+	// returns exit-2 stderr to the caller as their own query text; anything
+	// emitted after data has been read must exit 1, whose stderr stays
+	// operator-only.
 	re, err := regexp.Compile(os.Args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "text: bad regular expression: %v\n", err)

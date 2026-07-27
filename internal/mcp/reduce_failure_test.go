@@ -98,3 +98,18 @@ func TestNoClassEverEchoesWorkloadOutput(t *testing.T) {
 		t.Errorf("malformed format directives in message:\n%s", a)
 	}
 }
+
+// TestBadQueryDiagnosticIsBounded pins capQueryDiagnostic's hygiene: first
+// line only, hard length cap, and an honest placeholder when the engine said
+// nothing.
+func TestBadQueryDiagnosticIsBounded(t *testing.T) {
+	if got := capQueryDiagnostic("jq: parse: unexpected token\nline two\nline three"); got != "jq: parse: unexpected token" {
+		t.Errorf("multi-line diagnostic not trimmed to its first line: %q", got)
+	}
+	if got := capQueryDiagnostic(strings.Repeat("x", 1000)); len(got) > 310 {
+		t.Errorf("diagnostic not capped: %d bytes", len(got))
+	}
+	if got := capQueryDiagnostic("  \n"); got != "(no diagnostic)" {
+		t.Errorf("empty stderr not named: %q", got)
+	}
+}
