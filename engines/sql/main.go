@@ -35,6 +35,10 @@ func main() {
 	if len(os.Args) < 2 {
 		die(2, "sql: missing query (argv[1])")
 	}
+	// INVARIANT: exit 2 must happen before the first stdin read. The host
+	// returns exit-2 stderr to the caller as their own query text; anything
+	// emitted after data has been read must exit 1, whose stderr stays
+	// operator-only.
 	stmt, err := sqlparser.Parse(os.Args[1])
 	if err != nil {
 		die(2, "sql: parse: %v", err)

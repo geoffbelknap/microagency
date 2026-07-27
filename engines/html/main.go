@@ -28,6 +28,10 @@ func main() {
 	// Compile the selector explicitly. goquery's Find tolerates an invalid
 	// selector by matching nothing and succeeding, which is indistinguishable
 	// from "no matches" to the agent; the contract says a bad query is exit 2.
+	// INVARIANT: exit 2 must happen before the first stdin read. The host
+	// returns exit-2 stderr to the caller as their own query text; anything
+	// emitted after data has been read must exit 1, whose stderr stays
+	// operator-only.
 	matcher, err := cascadia.Compile(sel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "html: bad CSS selector: %v\n", err)

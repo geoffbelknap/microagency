@@ -642,3 +642,59 @@ func TestFinalizeReduceInlinesSmallReref(t *testing.T) {
 		t.Fatal("a >16 KiB reduce output must stay reffed so the agent reduces further")
 	}
 }
+
+// rejectingEngine fails every run with a fixed exit class and stderr.
+type rejectingEngine struct {
+	code   int
+	stderr string
+}
+
+func (e rejectingEngine) Run(context.Context, string, []byte) ([]byte, error) {
+	return nil, &wasmexec.ExitError{ExitCode: e.code, Stderr: e.stderr}
+}
+
+// TestBadQueryReturnsTheParseDiagnostic pins the message boundary from both
+// sides. A compile diagnostic is the caller's own text (every engine exits 2
+// before its first data read — pinned with a sentinel in wasmexec), so
+// withholding it made the agent fix a typo blind; a runtime failure's stderr
+// can quote the data, so it stays operator-only exactly as before. Same
+// stderr field, opposite handling, decided by the exit class.
+func TestBadQueryReturnsTheParseDiagnostic(t *testing.T) {
+	store := refstore.NewMemStore()
+	s := newTestServer(t, fakeRunner{},
+		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
+		WithWasmEngine("jq", rejectingEngine{code: 2, stderr: "jq: parse error: unexpected token |||"}))
+
+	out := call(t, s, "reduce", map[string]any{"data": `[1,2]`, "query": "bad |||"})
+	raw, _ := json.Marshal(out)
+
+	if !strings.Contains(string(raw), "jq: parse error: unexpected token |||") {
+		t.Errorf("the agent's own parse diagnostic was withheld: %s", raw)
+	}
+	if !strings.Contains(string(raw), "Correct the query") {
+		t.Errorf("no correct-the-query steer: %s", raw)
+	}
+	if strings.Contains(string(raw), "run it as code") || strings.Contains(string(raw), "code=") {
+		t.Errorf("a typo was escalated to the microVM: %s", raw)
+	}
+}
+
+// TestRuntimeStderrStaysOperatorOnly is the other side: the class boundary,
+// not the withholding, is what changed.
+func TestRuntimeStderrStaysOperatorOnly(t *testing.T) {
+	const sentinel = "ROW-VALUE-77-SECRET"
+	store := refstore.NewMemStore()
+	s := newTestServer(t, fakeRunner{},
+		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
+		WithWasmEngine("jq", rejectingEngine{code: 1, stderr: "cannot index string: " + sentinel}))
+
+	out := call(t, s, "reduce", map[string]any{"data": `[1,2]`, "query": ".x"})
+	raw, _ := json.Marshal(out)
+
+	if strings.Contains(string(raw), sentinel) {
+		t.Errorf("runtime stderr reached the agent: %s", raw)
+	}
+	if !strings.Contains(string(raw), "/admin/runs") {
+		t.Errorf("no operator pointer for the withheld diagnostic: %s", raw)
+	}
+}
