@@ -146,7 +146,7 @@ func sandboxComponent(ctx context.Context) InfraComponent {
 	switch {
 	case h.Usable():
 		c.Status = "ok"
-	case !h.Probed():
+	case h.Unknown():
 		c.Status = "warn" // unknown — reduce(code) may still work; the wasm engines don't need it
 	default:
 		c.Status = "bad"
