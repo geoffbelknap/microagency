@@ -148,87 +148,114 @@ func usage() {
 // console's job (/admin), not a startup flag. The HTTP server runs in
 // the BACKGROUND by default (`up` returns the terminal; stop with `microagency
 // down`); --stdio serves over stdin/stdout for a client that spawns the binary.
-func run(args []string) {
-	httpAddr, token := "127.0.0.1:8765", ""
-	issuer, audience, tunnelProvider, adminAddr := "", "", "", ""
-	requireScope := ""
-	wasmMaxMemMB := 512 // per-wasm-run memory ceiling (ASK tenet 8 — bounded ops)
-	// Results larger than this come back as a reference, not raw data. 8 KiB (not 2
-	// KiB): real API responses cluster just over 2 KB, so a low bar parked ordinary
-	// small answers behind a reduce round-trip; genuinely large data (documents, row
-	// dumps) still parks. The ref now carries a structural preview, so even parked
-	// results often need no reduce.
-	maxInlineBytes := 8192
-	stdio, public, noRegister, foreground := false, false, false, false
-	persistRefs := false // opt-in: persist reffed payloads (encrypted, TTL'd) so refs survive restart
-	// reduceEnginesOnly disables the microVM reduce path (arbitrary-code reduce),
-	// leaving only the in-process wasm engines. Required where there is no nested
-	// virtualization to run a microVM in — e.g. microagency itself running inside
-	// a microVM.
-	reduceEnginesOnly := false
-	var engineSpecs []string
+// upOptions is `up`'s argument list in parsed form, split from acting on it
+// so restart can validate arguments while there is still nothing to undo.
+type upOptions struct {
+	httpAddr, token                     string
+	issuer, audience, tunnel, adminAddr string
+	requireScope                        string
+	wasmMaxMemMB                        int // per-wasm-run memory ceiling (ASK tenet 8 — bounded ops)
+	// Results larger than maxInlineBytes come back as a reference, not raw
+	// data. 8 KiB (not 2 KiB): real API responses cluster just over 2 KB, so a
+	// low bar parked ordinary small answers behind a reduce round-trip;
+	// genuinely large data (documents, row dumps) still parks. The ref now
+	// carries a structural preview, so even parked results often need no
+	// reduce.
+	maxInlineBytes                        int
+	stdio, public, noRegister, foreground bool
+	persistRefs                           bool // opt-in: persist reffed payloads (encrypted, TTL'd) so refs survive restart
+	// reduceEnginesOnly disables the microVM reduce path (arbitrary-code
+	// reduce), leaving only the in-process wasm engines. Required where there
+	// is no nested virtualization to run a microVM in — e.g. microagency
+	// itself running inside a microVM.
+	reduceEnginesOnly bool
+	engineSpecs       []string
+	help              bool
+}
+
+func parseUpOptions(args []string) (upOptions, error) {
+	o := upOptions{httpAddr: "127.0.0.1:8765", wasmMaxMemMB: 512, maxInlineBytes: 8192}
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--http" && i+1 < len(args):
-			httpAddr = args[i+1]
+			o.httpAddr = args[i+1]
 			i++
 		case args[i] == "--token" && i+1 < len(args):
-			token = args[i+1]
+			o.token = args[i+1]
 			i++
 		case args[i] == "--issuer" && i+1 < len(args):
-			issuer = args[i+1]
+			o.issuer = args[i+1]
 			i++
 		case args[i] == "--require-scope" && i+1 < len(args):
-			requireScope = args[i+1]
+			o.requireScope = args[i+1]
 			i++
 		case args[i] == "--audience" && i+1 < len(args):
-			audience = args[i+1]
+			o.audience = args[i+1]
 			i++
 		case args[i] == "--tunnel" && i+1 < len(args):
-			tunnelProvider = args[i+1]
+			o.tunnel = args[i+1]
 			i++
 		case args[i] == "--admin-addr" && i+1 < len(args):
-			adminAddr = args[i+1] // bind /admin + /console on their own listener
+			o.adminAddr = args[i+1] // bind /admin + /console on their own listener
 			i++
 		case args[i] == "--engine" && i+1 < len(args):
-			engineSpecs = append(engineSpecs, args[i+1]) // name=path; repeatable
+			o.engineSpecs = append(o.engineSpecs, args[i+1]) // name=path; repeatable
 			i++
 		case args[i] == "--wasm-max-memory-mb" && i+1 < len(args):
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n <= 0 {
-				fmt.Fprintf(os.Stderr, "--wasm-max-memory-mb must be a positive integer, got %q\n", args[i+1])
-				os.Exit(2)
+				return o, fmt.Errorf("--wasm-max-memory-mb must be a positive integer, got %q", args[i+1])
 			}
-			wasmMaxMemMB = n
+			o.wasmMaxMemMB = n
 			i++
 		case args[i] == "--max-inline-bytes" && i+1 < len(args):
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n <= 0 {
-				fmt.Fprintf(os.Stderr, "--max-inline-bytes must be a positive integer, got %q\n", args[i+1])
-				os.Exit(2)
+				return o, fmt.Errorf("--max-inline-bytes must be a positive integer, got %q", args[i+1])
 			}
-			maxInlineBytes = n
+			o.maxInlineBytes = n
 			i++
 		case args[i] == "--stdio":
-			stdio = true
+			o.stdio = true
 		case args[i] == "--public":
-			public = true
+			o.public = true
 		case args[i] == "--persist-refs":
-			persistRefs = true
+			o.persistRefs = true
 		case args[i] == "--reduce-engines-only":
-			reduceEnginesOnly = true
+			o.reduceEnginesOnly = true
 		case args[i] == "--no-register":
-			noRegister = true
+			o.noRegister = true
 		case args[i] == "--foreground":
-			foreground = true // run attached (don't background) — for debugging
+			o.foreground = true // run attached (don't background) — for debugging
 		case args[i] == "-h" || args[i] == "--help" || args[i] == "help":
-			usage()
-			return
+			o.help = true
+			return o, nil
 		default:
-			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", args[i])
-			os.Exit(2)
+			return o, fmt.Errorf("unknown argument: %s", args[i])
 		}
 	}
+	return o, nil
+}
+
+func run(args []string) {
+	o, err := parseUpOptions(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if o.help {
+		usage()
+		return
+	}
+	httpAddr, token := o.httpAddr, o.token
+	issuer, audience, tunnelProvider, adminAddr := o.issuer, o.audience, o.tunnel, o.adminAddr
+	requireScope := o.requireScope
+	wasmMaxMemMB := o.wasmMaxMemMB
+	maxInlineBytes := o.maxInlineBytes
+	stdio, public, noRegister, foreground := o.stdio, o.public, o.noRegister, o.foreground
+	persistRefs := o.persistRefs
+	reduceEnginesOnly := o.reduceEnginesOnly
+	engineSpecs := o.engineSpecs
 
 	if public && tunnelProvider == "" {
 		tunnelProvider = "cloudflare"
@@ -439,6 +466,22 @@ func runDown(args []string) {
 // tokens), so only the server process is cycled. If nothing is running, it's just
 // a start.
 func runRestart(args []string) {
+	// Parse before acting. restart used to stop the server first and look at
+	// its arguments never: `restart --help` killed the gateway and printed
+	// usage over its corpse, and `restart --bogus` killed it and started
+	// nothing. Validation has to finish while there is still nothing to undo.
+	o, err := parseUpOptions(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "the server was not stopped")
+		os.Exit(2)
+	}
+	if o.help {
+		fmt.Fprintln(os.Stderr, "usage: microagency restart [up flags]")
+		fmt.Fprintln(os.Stderr, "  stop the background server, then start a fresh one with the given flags")
+		fmt.Fprintln(os.Stderr, "  (managed OpenBao keeps running; see `microagency up --help` for the flags)")
+		return
+	}
 	if pid := stopRunningServer(); pid != 0 {
 		fmt.Fprintf(os.Stderr, "microagency: stopped (pid %d)\n", pid)
 	}
