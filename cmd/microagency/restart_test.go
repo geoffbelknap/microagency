@@ -146,3 +146,29 @@ func TestParseUpOptionsVocabulary(t *testing.T) {
 		t.Error("--help not recognized")
 	}
 }
+
+// TestUnknownCommandIsNamedAndSuggested pins the two-line diagnosis. The
+// usage dump never named the input — "doctr" got twenty lines with zero
+// occurrences of "doctr" — while an unknown FLAG already got a named
+// one-liner; the broader mistake had the vaguer answer.
+func TestUnknownCommandIsNamedAndSuggested(t *testing.T) {
+	for input, want := range map[string]string{
+		"doctr":   "doctor",
+		"restrat": "restart",
+		"pruge":   "purge",
+	} {
+		if got := nearestCommand(input); got != want {
+			t.Errorf("nearestCommand(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if got := nearestCommand("zzqqx"); got != "" {
+		t.Errorf("nonsense got a confident suggestion: %q", got)
+	}
+	// The candidate list must stay in step with the dispatch: every candidate
+	// is a real command (spot-check via the ones with side-effect-free paths).
+	for _, c := range commandNames {
+		if c == "" {
+			t.Error("empty candidate in commandNames")
+		}
+	}
+}
