@@ -90,9 +90,57 @@ func main() {
 	case "hook":
 		runHook(args[1:])
 	default:
-		usage()
+		// The usage dump never named the input, so "doctr" got 20 lines with
+		// zero occurrences of "doctr" and no suggestion — while an unknown
+		// FLAG already got a named one-liner. Echo it, suggest the near miss
+		// from the same switch above, and point at help.
+		if near := nearestCommand(args[0]); near != "" {
+			fmt.Fprintf(os.Stderr, "microagency: unknown command %q (did you mean %q?)\n", args[0], near)
+		} else {
+			fmt.Fprintf(os.Stderr, "microagency: unknown command %q\n", args[0])
+		}
+		fmt.Fprintln(os.Stderr, "Run 'microagency help' for the command list.")
 		os.Exit(2)
 	}
+}
+
+// commandNames is the dispatch set above, for suggestions — keep in step with
+// the switch.
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "hook"}
+
+// nearestCommand suggests the closest command: edit distance ≤ 2, or a
+// unique 3+ character prefix. Nonsense gets no confident wrong guess.
+func nearestCommand(input string) string {
+	best, bestDist := "", 3
+	for _, c := range commandNames {
+		if d := editDistance(input, c); d < bestDist {
+			best, bestDist = c, d
+		}
+		if len(input) >= 3 && strings.HasPrefix(c, input) && bestDist > 1 {
+			best, bestDist = c, 1
+		}
+	}
+	return best
+}
+
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, min(cur[j-1]+1, prev[j-1]+cost))
+		}
+		prev = cur
+	}
+	return prev[len(b)]
 }
 
 // localSubject is the identity the built-in single-user OAuth server stamps on
