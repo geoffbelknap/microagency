@@ -45,7 +45,13 @@ type Result struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
-	Audit    []AuditEvent
+	// StartError is the guest's own diagnosis when the workload NEVER RAN —
+	// a failed mount, an unresolvable command, a failed exec. It is
+	// substrate-generated text (never workload output), so it cannot echo
+	// the data the ref model keeps off-context. Non-empty StartError means
+	// the exit code describes the environment, not the code.
+	StartError string
+	Audit      []AuditEvent
 	// AuditErr is non-nil if the egress audit could not be read after an
 	// otherwise-successful run; Audit may then be empty/incomplete.
 	AuditErr error

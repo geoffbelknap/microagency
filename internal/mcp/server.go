@@ -176,6 +176,11 @@ type runRecord struct {
 	// tokenized) on this proxy call — the field-level minimization impact.
 	Protected int `json:"protected,omitempty"`
 	ExitCode  int `json:"exit_code"`
+	// StartError is the guest's own diagnosis when the code never ran (failed
+	// mount, unresolvable command, failed exec) — substrate text, never
+	// workload output. It also shapes the agent-facing message: a run with
+	// StartError set is classified as an environment failure, not a code bug.
+	StartError string `json:"start_error,omitempty"`
 	// Stderr is the guest's captured stderr (or console log on a guest failure),
 	// bounded — OPERATOR-BOUND diagnostics surfaced via /admin/runs. It is never
 	// part of the agent-facing tool result: guest output over the input can echo

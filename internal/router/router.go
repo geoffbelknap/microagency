@@ -52,6 +52,9 @@ type Decision struct {
 	Ref      refstore.Ref
 	Summary  refstore.Summary
 	ExitCode int
+	// StartError is the guest's diagnosis when the code never ran (see
+	// sandbox.Result.StartError). Substrate-generated, safe to surface.
+	StartError string
 	// Stderr is the guest's captured stderr — OPERATOR-BOUND diagnostics for the
 	// run's audit record (bounded by maxStderrBytes). It must never be returned
 	// to the model: a traceback or stray print over the input can echo the exact
@@ -102,13 +105,14 @@ func (r Router) Run(ctx context.Context, req Request) (Decision, error) {
 
 	out := r.Gate.Apply(res.Stdout, req.Owner)
 	return Decision{
-		Reffed:   out.Reffed,
-		Inline:   out.Inline,
-		Ref:      out.Ref,
-		Summary:  out.Summary,
-		ExitCode: res.ExitCode,
-		Stderr:   CapStderr(res.Stderr),
-		Audit:    res.Audit,
-		AuditErr: res.AuditErr,
+		Reffed:     out.Reffed,
+		Inline:     out.Inline,
+		Ref:        out.Ref,
+		Summary:    out.Summary,
+		ExitCode:   res.ExitCode,
+		StartError: res.StartError,
+		Stderr:     CapStderr(res.Stderr),
+		Audit:      res.Audit,
+		AuditErr:   res.AuditErr,
 	}, nil
 }
