@@ -316,6 +316,13 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 					ExitCode:   exitErr.ExitCode, Stderr: router.CapStderr(exitErr.Stderr),
 				})
 				err = fmt.Errorf("engine module exited %d; its stderr was captured for the operator (run %s, /admin/runs), not returned here", exitErr.ExitCode, runID)
+				// A rejected query is a statement about text the caller wrote and
+				// already holds, so naming that class discloses nothing the stderr
+				// would. It also wants the opposite advice from a data failure:
+				// correct the query rather than escalate a typo to the microVM.
+				if exitErr.BadQuery() {
+					return toolError("reduce: the %q engine rejected the query as malformed or unsupported. Correct the query and retry — this is not a size or complexity limit, so running it as code will not help. Its diagnostic was captured for the operator (run %s, /admin/runs), not returned here.", engineName, runID)
+				}
 			}
 			// Turn a dead-end failure into the productive next step. Over a large ref
 			// the likely cause is jq exhausting the engine timeout (or the MCP client's

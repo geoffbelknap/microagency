@@ -52,6 +52,35 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("wasmexec: engine module exited %d (stderr withheld from this message; captured for the operator)", e.ExitCode)
 }
 
+// Engine exit-code convention, implemented consistently by every bundled
+// engine (see engines/*/main.go):
+//
+//	2  the query is bad or unsupported — a missing query, a parse failure, a bad
+//	   regular expression, a bad CSS selector, an unsupported SELECT
+//	1  the data or I/O is the problem — reading input, input not valid JSON,
+//	   an error encountered part-way through the document
+const (
+	exitBadQuery = 2
+)
+
+// BadQuery reports whether the module rejected the query itself rather than
+// failing over the data.
+//
+// This distinction is safe to surface to the caller where the stderr text is
+// not. A rejected query is a statement about text the caller wrote and already
+// holds, derived from the module's exit path rather than from any data it read,
+// so reporting it discloses nothing new. A failure over the data may have
+// touched the referenced content, which is why Stderr stays operator-only in
+// both cases.
+//
+// It matters because the two want opposite advice: a malformed query should be
+// corrected, not escalated to the microVM, and telling an agent to "run it as
+// code instead" for a typo sends it to a slower, higher-privilege substrate to
+// fix something a corrected query would have solved.
+func (e *ExitError) BadQuery() bool {
+	return e.ExitCode == exitBadQuery
+}
+
 // Run satisfies Engine: query → argv[1], data → stdin, stdout → summary. A
 // non-zero module exit is an error (the summary is not trustworthy) — an
 // *ExitError carrying the module's stderr for the operator's audit record.
