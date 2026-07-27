@@ -80,13 +80,13 @@ func main() {
 	case "up":
 		run(args[1:])
 	case "down":
-		runDown()
+		runDown(args[1:])
 	case "restart":
 		runRestart(args[1:])
 	case "purge":
 		runPurge(args[1:])
 	case "doctor":
-		runDoctor()
+		runDoctor(args[1:])
 	case "hook":
 		runHook(args[1:])
 	default:
@@ -405,7 +405,21 @@ func parseFormulaVersion(formula string) string {
 }
 
 // runDown stops the background server and the managed OpenBao.
-func runDown() {
+func runDown(args []string) {
+	// --help must never act. Parse arguments before touching the running
+	// server: this used to discard args entirely, so `down --help` stopped
+	// the gateway instead of explaining it.
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "help":
+			fmt.Fprintln(os.Stderr, "usage: microagency down")
+			fmt.Fprintln(os.Stderr, "  stop the background server (and any managed OpenBao)")
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
+			os.Exit(2)
+		}
+	}
 	if pid := runningPID(); pid != 0 {
 		if kerr := syscall.Kill(pid, syscall.SIGTERM); kerr != nil {
 			fmt.Fprintf(os.Stderr, "microagency: stop pid %d: %v\n", pid, kerr)
