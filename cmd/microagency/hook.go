@@ -24,6 +24,13 @@ func runHook(args []string) {
 		os.Exit(2)
 	}
 	switch args[0] {
+	// Asking for help was the one input hook treated as an error ("unknown
+	// hook \"--help\"", exit 2) while every sibling command answered it.
+	case "-h", "--help", "help":
+		fmt.Fprintln(os.Stdout, "usage: microagency hook <egress-guard|install>")
+		fmt.Fprintln(os.Stdout, "  install       print the Claude Code config that adds the egress-guard hook")
+		fmt.Fprintln(os.Stdout, "  egress-guard  the hook body Claude Code invokes (tool-call JSON on stdin);")
+		fmt.Fprintln(os.Stdout, "                warns when a call would reach a governed host outside the gateway")
 	case "egress-guard":
 		egressGuard(os.Stdin, os.Stdout, os.Stderr)
 	case "install":

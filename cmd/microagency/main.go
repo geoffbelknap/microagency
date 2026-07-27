@@ -69,12 +69,12 @@ func main() {
 	gateway.ClientVersion = version // identify the real build to upstream MCP servers
 	args := os.Args[1:]
 	if len(args) < 1 {
-		usage()
+		usage(os.Stderr)
 		os.Exit(2)
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
-		usage()
+		usage(os.Stdout)
 	case "version", "--version", "-v":
 		printVersion()
 	case "up":
@@ -164,32 +164,50 @@ func printVersion() {
 	fmt.Printf("microagency %s\n", version)
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  microagency up [flags]    start the MCP server (runs in the background)")
-	fmt.Fprintln(os.Stderr, "  microagency down          stop the background server")
-	fmt.Fprintln(os.Stderr, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
-	fmt.Fprintln(os.Stderr, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
-	fmt.Fprintln(os.Stderr, "  microagency doctor        check runtime + engine health")
-	fmt.Fprintln(os.Stderr, "  microagency hook install  print the Claude Code egress-guard hook setup")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  up flags:")
-	fmt.Fprintln(os.Stderr, "    --http <addr>         bind address (default 127.0.0.1:8765)")
-	fmt.Fprintln(os.Stderr, "    --public              expose a public URL via a tunnel (web apps)")
-	fmt.Fprintln(os.Stderr, "    --foreground          run attached instead of backgrounding")
-	fmt.Fprintln(os.Stderr, "    --stdio               serve over stdin/stdout (client-spawned)")
-	fmt.Fprintln(os.Stderr, "    --no-register         don't auto-register with Claude Code")
-	fmt.Fprintln(os.Stderr, "    --token <tok>         use a static bearer instead of OAuth")
-	fmt.Fprintln(os.Stderr, "    --issuer/--audience   external OAuth resource-server mode")
-	fmt.Fprintln(os.Stderr, "    --require-scope <s>   with --issuer: refuse tokens not granted this OAuth scope")
-	fmt.Fprintln(os.Stderr, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
-	fmt.Fprintln(os.Stderr, "                          (defaults to "+defaultAdminAddr+" when a tunnel is used)")
-	fmt.Fprintln(os.Stderr, "    --engine name=path    add a query engine (a wasip1 module)")
-	fmt.Fprintln(os.Stderr, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
-	fmt.Fprintln(os.Stderr, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
-	fmt.Fprintln(os.Stderr, "    --reduce-engines-only disable the microVM reduce path (wasm engines only; for hosts without nested virt)")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  Add MCP servers from the console (http://<addr>/console), not here.")
+// usage writes the whole surface: the command list plus up's flags, which
+// dominate the CLI. Help paths pass stdout; failure paths pass stderr, so a
+// script capturing output never confuses an answer with a complaint.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  microagency up [flags]    start the MCP server (runs in the background)")
+	fmt.Fprintln(w, "  microagency down          stop the background server")
+	fmt.Fprintln(w, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
+	fmt.Fprintln(w, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
+	fmt.Fprintln(w, "  microagency doctor        check runtime + engine health")
+	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
+	fmt.Fprintln(w, "")
+	upFlags(w)
+}
+
+// upHelp answers `up --help` with up's own contract instead of the global
+// dump. Before the split, up was the one command whose --help produced the
+// full command list — the same bytes a typo produced — so "did I ask a
+// question or make a mistake" was unanswerable from the output.
+func upHelp(w io.Writer) {
+	fmt.Fprintln(w, "usage: microagency up [flags]")
+	fmt.Fprintln(w, "  start the MCP server (runs in the background; stop with `microagency down`)")
+	fmt.Fprintln(w, "")
+	upFlags(w)
+}
+
+func upFlags(w io.Writer) {
+	fmt.Fprintln(w, "  up flags:")
+	fmt.Fprintln(w, "    --http <addr>         bind address (default 127.0.0.1:8765)")
+	fmt.Fprintln(w, "    --public              expose a public URL via a tunnel (web apps)")
+	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
+	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
+	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
+	fmt.Fprintln(w, "    --token <tok>         use a static bearer instead of OAuth")
+	fmt.Fprintln(w, "    --issuer/--audience   external OAuth resource-server mode")
+	fmt.Fprintln(w, "    --require-scope <s>   with --issuer: refuse tokens not granted this OAuth scope")
+	fmt.Fprintln(w, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
+	fmt.Fprintln(w, "                          (defaults to "+defaultAdminAddr+" when a tunnel is used)")
+	fmt.Fprintln(w, "    --engine name=path    add a query engine (a wasip1 module)")
+	fmt.Fprintln(w, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
+	fmt.Fprintln(w, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
+	fmt.Fprintln(w, "    --reduce-engines-only disable the microVM reduce path (wasm engines only; for hosts without nested virt)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  Add MCP servers from the console (http://<addr>/console), not here.")
 }
 
 // run starts the server. That's all it does — adding upstream MCPs is the
@@ -292,7 +310,7 @@ func run(args []string) {
 		os.Exit(2)
 	}
 	if o.help {
-		usage()
+		upHelp(os.Stdout)
 		return
 	}
 	httpAddr, token := o.httpAddr, o.token
@@ -487,8 +505,8 @@ func runDown(args []string) {
 	for _, a := range args {
 		switch a {
 		case "-h", "--help", "help":
-			fmt.Fprintln(os.Stderr, "usage: microagency down")
-			fmt.Fprintln(os.Stderr, "  stop the background server (and any managed OpenBao)")
+			fmt.Fprintln(os.Stdout, "usage: microagency down")
+			fmt.Fprintln(os.Stdout, "  stop the background server (and any managed OpenBao)")
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
@@ -525,9 +543,9 @@ func runRestart(args []string) {
 		os.Exit(2)
 	}
 	if o.help {
-		fmt.Fprintln(os.Stderr, "usage: microagency restart [up flags]")
-		fmt.Fprintln(os.Stderr, "  stop the background server, then start a fresh one with the given flags")
-		fmt.Fprintln(os.Stderr, "  (managed OpenBao keeps running; see `microagency up --help` for the flags)")
+		fmt.Fprintln(os.Stdout, "usage: microagency restart [up flags]")
+		fmt.Fprintln(os.Stdout, "  stop the background server, then start a fresh one with the given flags")
+		fmt.Fprintln(os.Stdout, "  (managed OpenBao keeps running; see `microagency up --help` for the flags)")
 		return
 	}
 	if pid := stopRunningServer(); pid != 0 {
@@ -571,10 +589,10 @@ func runPurge(args []string) {
 		case "--yes", "-y":
 			yes = true
 		case "-h", "--help", "help":
-			fmt.Fprintln(os.Stderr, "usage: microagency purge [--full] [--yes]")
-			fmt.Fprintln(os.Stderr, "  (default) delete parked data (refs) + run/audit history; keep connections & auth")
-			fmt.Fprintln(os.Stderr, "  --full    delete EVERYTHING under ~/.microagency (re-authenticate afterward)")
-			fmt.Fprintln(os.Stderr, "  --yes,-y  skip the confirmation prompt")
+			fmt.Fprintln(os.Stdout, "usage: microagency purge [--full] [--yes]")
+			fmt.Fprintln(os.Stdout, "  (default) delete parked data (refs) + run/audit history; keep connections & auth")
+			fmt.Fprintln(os.Stdout, "  --full    delete EVERYTHING under ~/.microagency (re-authenticate afterward)")
+			fmt.Fprintln(os.Stdout, "  --yes,-y  skip the confirmation prompt")
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
