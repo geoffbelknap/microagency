@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,9 +84,13 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	}
 	opts.ExecCommand = spec.Command
 
-	// Reset only this workspace's state dir (append-only audit would otherwise
-	// accumulate). Never touch anything else under StateDir (image cache).
-	_ = os.RemoveAll(filepath.Join(stateDir, spec.Name))
+	// Reset this workspace fully before the run, through the library's own
+	// delete (record, rootfs, and supervisor state dir together). The old
+	// reset removed only stateDir/<name> while the record lives under
+	// stateDir/workspaces/<name>, so every run left a permanent workspace
+	// record behind. Not-found is the common case and fine; anything else is
+	// best-effort — the run itself will surface a real problem.
+	cleanupWorkspace(ctx, opts, spec.Name)
 
 	res, err := workspace.Run(ctx, opts)
 	if err != nil {
@@ -118,4 +123,22 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 		}
 	}
 	return out, nil
+}
+
+// cleanupWorkspace removes one sandbox workspace via the public library
+// delete, tolerating absence. Confirmation is an adapter concern per the
+// library contract; the gateway's policy is that sandbox workspaces are
+// disposable by construction.
+func cleanupWorkspace(ctx context.Context, opts workspace.Options, name string) {
+	delOpts := opts
+	delOpts.Name = name
+	if _, err := workspace.Delete(ctx, delOpts, workspace.DeleteOptions{Force: true}); err != nil {
+		if !errors.Is(err, workspace.WorkspaceNotFoundError{}) {
+			// Best-effort: log-worthy at most; the subsequent run reports
+			// anything real.
+			_ = err
+		}
+	}
+	// Belt and suspenders for the legacy layout the old reset targeted.
+	_ = os.RemoveAll(filepath.Join(opts.StateDir, name))
 }

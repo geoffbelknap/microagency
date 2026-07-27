@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"microagency/internal/baomanager"
 	"microagency/internal/mcp"
@@ -82,7 +83,31 @@ func runDoctor(args []string) {
 
 	fmt.Fprintln(out)
 	if h.Usable() {
-		fmt.Fprintln(out, "  ✓ microVM runtime is healthy — reduce(code) will work.")
+		// Prerequisites alone earned this verdict once, and it was false for
+		// two days: every prerequisite present, every reduce failing on a
+		// poisoned rootfs. The claim is now gated on the whole path it
+		// promises — boot the real image, run real code, see the output come
+		// back — per the verdict rule that a capability claim covers every
+		// step or is not made.
+		fmt.Fprint(out, "    end-to-end      running a probe reduce(code)…")
+		sc := sandbox.SelfCheck(context.Background(), sandbox.ReduceImage, sandbox.ReduceCodePath, 30*time.Second)
+		switch {
+		case sc.OK:
+			fmt.Fprintln(out, " ok")
+			fmt.Fprintln(out, "  ✓ microVM runtime is healthy — reduce(code) verified end to end (booted and ran).")
+		case sc.TimedOut:
+			fmt.Fprintln(out, " timed out")
+			fmt.Fprintln(out, "  ⚠ prerequisites are present, but the end-to-end probe did not finish in 30s.")
+			fmt.Fprintln(out, "    A cold image cache pulls the workload image on first use, which can take")
+			fmt.Fprintln(out, "    longer than the probe allows. Run a reduce(code=…) once to confirm and warm it.")
+		default:
+			fmt.Fprintln(out, " FAILED")
+			fmt.Fprintf(out, "  ✗ prerequisites are present but reduce(code) fails end to end: %s\n", sc.Detail)
+			if sc.Kept {
+				fmt.Fprintln(out, "    The failed workspace is kept for inspection: `microagent result m2-doctor-selfcheck`,")
+				fmt.Fprintln(out, "    `microagent logs m2-doctor-selfcheck`. The query engines above work regardless.")
+			}
+		}
 		return
 	}
 	if h.Unknown() {
