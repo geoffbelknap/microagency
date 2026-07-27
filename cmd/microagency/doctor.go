@@ -69,6 +69,9 @@ func runDoctor(args []string) {
 	if h.Version != "" {
 		fmt.Fprintf(out, "    version         %s\n", h.Version)
 	}
+	if h.Issues != "" {
+		fmt.Fprintf(out, "    issues          %s\n", h.Issues)
+	}
 	if h.ProbeError != "" {
 		fmt.Fprintf(out, "    probe error     %s\n", h.ProbeError)
 	}
