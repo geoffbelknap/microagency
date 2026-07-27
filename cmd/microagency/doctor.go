@@ -82,8 +82,8 @@ func runDoctor(args []string) {
 		fmt.Fprintln(out, "  ✓ microVM runtime is healthy — reduce(code) will work.")
 		return
 	}
-	if !h.Probed() {
-		fmt.Fprintln(out, "  ⚠ could not probe the microVM runtime — it may still be fine.")
+	if h.Unknown() {
+		fmt.Fprintln(out, "  ⚠ could not establish microVM runtime readiness — it may still be fine.")
 		fmt.Fprintln(out, "    Verify with a quick reduce(code=…) (it reads /app/input).")
 		fmt.Fprintln(out, "    The query engines above work regardless.")
 		return
