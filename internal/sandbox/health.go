@@ -25,9 +25,25 @@ type Health struct {
 }
 
 // Usable reports whether the microVM (code) substrate can actually run:
-// virtualization plus both host binaries present.
+// virtualization plus both host binaries present, established by a probe that
+// itself succeeded.
+//
+// ProbeError is part of the condition deliberately. It used to be rendered to
+// the operator and then ignored here, so a probe error and a healthy verdict
+// printed together — doctor asserted "reduce(code) will work" directly beneath
+// the reason it could not establish that. A failed probe means the readiness
+// flags below were never confirmed, so nothing may be claimed from them.
 func (h Health) Usable() bool {
-	return h.Virtualization && h.SupervisorReady && h.GuestInitReady
+	return h.ProbeError == "" && h.Virtualization && h.SupervisorReady && h.GuestInitReady
+}
+
+// Unknown reports whether readiness could not be established at all: the probe
+// returned no data, or returned an error alongside it. This is distinct from a
+// definitive "not usable" — the substrate may well work — and callers must not
+// collapse the two, or an operator gets told their host is broken when the
+// truth is that it was never inspected.
+func (h Health) Unknown() bool {
+	return h.ProbeError != "" || !h.Probed()
 }
 
 // Probed reports whether the host probe returned data. When false (with a
