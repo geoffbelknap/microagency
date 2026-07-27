@@ -36,21 +36,6 @@ func toolDefs() []map[string]any {
 	}
 	return []map[string]any{
 		{
-			"name":        "reduce",
-			"description": "Compute over stored result references OR small inline data, off-context, returning only the result. Inputs (choose one): `ref` (one <ref_> handle from a large tool result), `refs` (several — to JOIN/correlate/diff across multiple large results), or `data` (small inline JSON/text you already have). Then EITHER a `query` (a declarative reduction over a SINGLE input — you need not name the `engine`, it's inferred) OR `code` (Python that reads the input from /app/input, or /app/input_1..N when you passed multiple refs, and prints the result). Use `data` for EXACT DETERMINISTIC work the model is unreliable at even when the data is small and already in context — exact/big-number arithmetic, money-precision decimals, date & timezone math, unit conversions, hashing/encoding, parsing — do it here deterministically, don't compute it in your head. Use `ref`/`refs` to shape or combine large results without pulling them into context (a large reduction is itself returned as a new reference). Pick the engine by shape: sql for tabular/aggregate work, jq for structured JSON; multiple inputs, large data, regex, or non-trivial logic → code.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ref":    strProp("a reference handle like <ref_3> from a prior result"),
-					"refs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
-					"data":   strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
-					"query":  strProp("a declarative reduction over a single input (sql/jq/text/html)"),
-					"engine": strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
-					"code":   strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
-				},
-			},
-		},
-		{
 			"name":        "find_tools",
 			"description": "Discover aggregated upstream tools by keyword. These tools are NOT in your tool list (kept out of context on purpose); search here to find the relevant few. Returns each tool's name, description, and inputSchema. To use one, call `call_tool` with its name and arguments.",
 			"inputSchema": map[string]any{
@@ -72,6 +57,21 @@ func toolDefs() []map[string]any {
 					"arguments": map[string]any{"type": "object", "description": "arguments matching the tool's inputSchema"},
 				},
 				"required": []string{"name"},
+			},
+		},
+		{
+			"name":        "reduce",
+			"description": "Compute over stored result references OR small inline data, off-context, returning only the result. Inputs (choose one): `ref` (one <ref_> handle from a large tool result), `refs` (several — to JOIN/correlate/diff across multiple large results), or `data` (small inline JSON/text you already have). Then EITHER a `query` (a declarative reduction over a SINGLE input — you need not name the `engine`, it's inferred) OR `code` (Python that reads the input from /app/input, or /app/input_1..N when you passed multiple refs, and prints the result). Use `data` for EXACT DETERMINISTIC work the model is unreliable at even when the data is small and already in context — exact/big-number arithmetic, money-precision decimals, date & timezone math, unit conversions, hashing/encoding, parsing — do it here deterministically, don't compute it in your head. Use `ref`/`refs` to shape or combine large results without pulling them into context (a large reduction is itself returned as a new reference). Pick the engine by shape: sql for tabular/aggregate work, jq for structured JSON; multiple inputs, large data, regex, or non-trivial logic → code.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ref":    strProp("a reference handle like <ref_3> from a prior result"),
+					"refs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
+					"data":   strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
+					"query":  strProp("a declarative reduction over a single input (sql/jq/text/html)"),
+					"engine": strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
+					"code":   strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
+				},
 			},
 		},
 	}
