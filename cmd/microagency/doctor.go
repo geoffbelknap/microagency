@@ -26,9 +26,9 @@ func runDoctor(args []string) {
 	for _, a := range args {
 		switch a {
 		case "-h", "--help", "help":
-			fmt.Fprintln(os.Stderr, "usage: microagency doctor")
-			fmt.Fprintln(os.Stderr, "  check runtime + engine health (server, secret store, query engines,")
-			fmt.Fprintln(os.Stderr, "  microVM runtime, enforcement-hygiene bypasses)")
+			fmt.Fprintln(os.Stdout, "usage: microagency doctor")
+			fmt.Fprintln(os.Stdout, "  check runtime + engine health (server, secret store, query engines,")
+			fmt.Fprintln(os.Stdout, "  microVM runtime, enforcement-hygiene bypasses)")
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
