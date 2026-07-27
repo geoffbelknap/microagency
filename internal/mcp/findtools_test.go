@@ -249,3 +249,47 @@ func TestFindToolsNarrowQueryKeepsFullSchema(t *testing.T) {
 		t.Fatalf("narrow query did not return the full schema: %s", topSchema)
 	}
 }
+
+// TestFindToolsEmptyStatesAreDistinguishable pins the empty-state split. A
+// bare {"tools":[]} was three indistinguishable states — nothing connected,
+// nothing matched, broken index — on the agent's primary discovery entry
+// point, in the state every new gateway starts in. Only the operator can fix
+// an empty gateway; only the agent can vary its keywords. The note says
+// which, so the agent neither retries against an unconfigured gateway nor
+// tells its user a connected capability does not exist.
+func TestFindToolsEmptyStatesAreDistinguishable(t *testing.T) {
+	// Unconfigured: no upstreams at all → the operator's problem, by name.
+	s := newTestServer(t, fakeRunner{})
+	out := call(t, s, "find_tools", map[string]any{"query": "send email"})
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), "No upstream MCP servers are connected") ||
+		!strings.Contains(string(raw), "operator") {
+		t.Errorf("unconfigured gateway does not name the operator action: %s", raw)
+	}
+	if strings.Contains(string(raw), "vary the keywords") {
+		t.Errorf("unconfigured gateway tells the agent to vary keywords it cannot help with: %s", raw)
+	}
+
+	// Connected but unmatched: the agent's cue, with the searched count.
+	ts := cannedUpstream(t) // exposes "search"
+	defer ts.Close()
+	s2 := newTestServer(t, fakeRunner{})
+	if err := s2.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
+		t.Fatalf("add upstream: %v", err)
+	}
+	out = call(t, s2, "find_tools", map[string]any{"query": "zzzz nothing matches this"})
+	raw, _ = json.Marshal(out)
+	if !strings.Contains(string(raw), "0 of 1 indexed tools matched") {
+		t.Errorf("no-match note missing the searched count: %s", raw)
+	}
+	if !strings.Contains(string(raw), "vary the keywords") {
+		t.Errorf("no-match note missing the vary-keywords cue: %s", raw)
+	}
+
+	// A real match carries no empty-state note.
+	out = call(t, s2, "find_tools", map[string]any{"query": "search the corpus"})
+	raw, _ = json.Marshal(out)
+	if strings.Contains(string(raw), "No upstream MCP servers") || strings.Contains(string(raw), "0 of ") {
+		t.Errorf("a successful search carries an empty-state note: %s", raw)
+	}
+}
