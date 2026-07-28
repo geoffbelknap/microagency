@@ -53,7 +53,7 @@ To stop, `microagency down`. To disconnect a client,
 Your upstream credentials are held in a secret store, not in the clear:
 OpenBao/Vault when available (or a managed OpenBao if the binary is on your
 PATH), otherwise an encrypted file store under `~/.microagency`. See
-[where credentials live](ARCHITECTURE.md#where-credentials-live).
+[where credentials live](docs/connect-clients.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency
 up`. Go is the only build dependency for the gateway itself (the wasm query
@@ -93,12 +93,14 @@ the gateway; only the answer comes back.
 
 ## Going deeper
 
-[ARCHITECTURE.md](ARCHITECTURE.md) covers how it all works: the auth modes
-(built-in OAuth, static bearer, external issuer, stdio), where credentials
-live, the tool index and how invocation is gated, off-context data handling
-and the query engines and microVM, field minimization, public mode for the
-Claude and ChatGPT web apps, multi-user gateways, and the security model,
-including how to write your own engine.
+[ARCHITECTURE.md](ARCHITECTURE.md) is the conceptual overview — why
+microagency exists and the shape of the system. The [docs](docs/index.md)
+cover each mechanism: the auth modes (built-in OAuth, static bearer,
+external issuer, stdio), where credentials live, the tool index and how
+invocation is gated, off-context data handling and the query engines and
+microVM (including how to write your own engine), field minimization, the
+audit chain, public mode for the Claude and ChatGPT web apps, multi-user
+gateways, and the security model.
 
 `microagency --help` shows the CLI surface, and `microagency doctor` checks
 runtime and engine health.
