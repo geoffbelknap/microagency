@@ -39,6 +39,16 @@ for d in engines/*/; do (cd "$d" && go test ./...); done
 `make test` runs `go test ./...` for the main module. CI also runs the race
 detector (`go test -race -short`) on push to main.
 
+## Docs
+
+User-facing documentation lives under `docs/`, one page per mechanism, with
+`ARCHITECTURE.md` as the conceptual overview that maps into it and
+`README.md` as the front door. When behavior changes — flags, auth modes,
+state files, the engine contract — update the matching page in the same PR.
+Docs prose is checked by the shared style/link sweep the workspace runs
+across sibling repositories; page frontmatter and the last-updated stamp
+follow the same shape microagent's docs use.
+
 ## Pull requests
 
 - Keep changes narrowly scoped.
