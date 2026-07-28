@@ -53,11 +53,18 @@ brews:
     conflicts:
       - microagency
     dependencies:
+      # Recommended, not required — see .goreleaser.yaml. Dev machines tracking
+      # microagent-latest opt out with --without-microagent.
       - name: microagent
+        type: recommended
       - name: openbao
     caveats: |
       This is the latest build from main, refreshed on every merge. It conflicts
       with the stable `microagency` formula (both install `microagency`).
+
+      On a machine tracking microagent-latest, install with
+      `--without-microagent` so the stable microagent formula does not
+      shadow-fight the latest train over the same binary names.
 
       Get started:  microagency up
     test: |
