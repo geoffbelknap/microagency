@@ -41,7 +41,8 @@ func runDoctor(args []string) {
 
 	// The two questions a first-run operator most often has: is the server up, and
 	// where do my credentials actually live.
-	if pid := runningPID(); pid != 0 {
+	pid := runningPID()
+	if pid != 0 {
 		fmt.Fprintf(out, "\n  server            ✓ running (pid %d)\n", pid)
 	} else {
 		fmt.Fprintf(out, "\n  server            ✗ not running — start it with `microagency up`\n")
@@ -58,12 +59,14 @@ func runDoctor(args []string) {
 	fmt.Fprintf(out, "\n  query engines     %s\n", join(names))
 	fmt.Fprintln(out, "                    (WebAssembly, in-process; always available — reduce uses these for query work, no VM)")
 
-	// microVM runtime — the code substrate: reduce(code).
+	// microVM runtime — the code substrate: reduce(code). A passing line
+	// carries no path — the path is remediation detail, and it returns on the
+	// failing line where someone actually needs to know where the lookup went.
 	h := sandbox.InspectRuntime(context.Background())
 	fmt.Fprintf(out, "\n  microVM runtime   backend=%s arch=%s\n", dash(h.Backend), dash(h.Architecture))
 	fmt.Fprintf(out, "    virtualization  %s\n", mark(h.Virtualization))
-	fmt.Fprintf(out, "    supervisor      %s  %s\n", mark(h.SupervisorReady), h.SupervisorPath)
-	fmt.Fprintf(out, "    guest-init      %s  %s\n", mark(h.GuestInitReady), h.GuestInitPath)
+	fmt.Fprintf(out, "    supervisor      %s%s\n", mark(h.SupervisorReady), pathWhenMissing(h.SupervisorReady, h.SupervisorPath))
+	fmt.Fprintf(out, "    guest-init      %s%s\n", mark(h.GuestInitReady), pathWhenMissing(h.GuestInitReady, h.GuestInitPath))
 	if runtime.GOOS == "linux" {
 		fmt.Fprintf(out, "    kvm / vsock     %s / %s\n", mark(h.KVM), mark(h.Vsock))
 	}
@@ -79,12 +82,15 @@ func runDoctor(args []string) {
 
 	// Enforcement hygiene: warn about any upstream reachable BOTH through microagency
 	// AND directly from the local client (a back door around the governed well).
-	reportBypasses(out)
+	bypassWarnings := reportBypasses(out)
 
 	fmt.Fprintln(out)
-	if h.Usable() {
-		// Prerequisites alone earned this verdict once, and it was false for
-		// two days: every prerequisite present, every reduce failing on a
+	runtimeHealthy := false
+	var runtimeClause string
+	switch {
+	case h.Usable():
+		// Prerequisites alone earned a healthy verdict once, and it was false
+		// for two days: every prerequisite present, every reduce failing on a
 		// poisoned rootfs. The claim is now gated on the whole path it
 		// promises — boot the real image, run real code, see the output come
 		// back — per the verdict rule that a capability claim covers every
@@ -94,41 +100,74 @@ func runDoctor(args []string) {
 		switch {
 		case sc.OK:
 			fmt.Fprintln(out, " ok")
-			fmt.Fprintln(out, "  ✓ microVM runtime is healthy — reduce(code) verified end to end (booted and ran).")
+			runtimeHealthy = true
+			runtimeClause = "reduce(code) is verified end to end (booted and ran)"
 		case sc.TimedOut:
 			fmt.Fprintln(out, " timed out")
 			fmt.Fprintln(out, "  ⚠ prerequisites are present, but the end-to-end probe did not finish in 30s.")
 			fmt.Fprintln(out, "    A cold image cache pulls the workload image on first use, which can take")
 			fmt.Fprintln(out, "    longer than the probe allows. Run a reduce(code=…) once to confirm and warm it.")
+			runtimeClause = "the end-to-end reduce(code) probe timed out (likely a cold image cache)"
 		default:
 			fmt.Fprintln(out, " FAILED")
 			fmt.Fprintf(out, "  ✗ prerequisites are present but reduce(code) fails end to end: %s\n", sc.Detail)
 			if sc.Kept {
 				fmt.Fprintln(out, "    The failed workspace is kept for inspection: `microagent result m2-doctor-selfcheck`,")
-				fmt.Fprintln(out, "    `microagent logs m2-doctor-selfcheck`. The query engines above work regardless.")
+				fmt.Fprintln(out, "    `microagent logs m2-doctor-selfcheck`.")
 			}
+			runtimeClause = "reduce(code) fails end to end; the query engines work regardless"
 		}
-		return
-	}
-	if h.Unknown() {
+	case h.Unknown():
 		fmt.Fprintln(out, "  ⚠ could not establish microVM runtime readiness — it may still be fine.")
 		fmt.Fprintln(out, "    Verify with a quick reduce(code=…) (it reads /app/input).")
-		fmt.Fprintln(out, "    The query engines above work regardless.")
-		return
+		runtimeClause = "microVM runtime readiness could not be established; the query engines work regardless"
+	default:
+		fmt.Fprintln(out, "  ✗ microVM runtime is NOT usable — reduce(code) will fail.")
+		fmt.Fprintln(out, "    Install the microagent runtime:")
+		fmt.Fprintln(out, "      brew install geoffbelknap/tap/microagent")
+		fmt.Fprintln(out, "    or from a microagent source checkout:")
+		if runtime.GOOS == "darwin" {
+			fmt.Fprintln(out, "      make signed-supervisor && make install")
+			fmt.Fprintln(out, "      (macOS uses Apple Virtualization; the supervisor must be code-signed)")
+		} else {
+			fmt.Fprintln(out, "      make install")
+		}
+		fmt.Fprintln(out, "    Then `microagency doctor` again — microagency finds the binaries via the")
+		fmt.Fprintln(out, "    installed `microagent` on PATH (it does not manage them itself).")
+		runtimeClause = "reduce(code) will fail until the microVM runtime is installed; the query engines work regardless"
 	}
-	fmt.Fprintln(out, "  ✗ microVM runtime is NOT usable — reduce(code) will fail.")
-	fmt.Fprintln(out, "    The query engines above still work without it (no VM needed).")
-	fmt.Fprintln(out, "    Install the microagent runtime:")
-	fmt.Fprintln(out, "      brew install geoffbelknap/tap/microagent")
-	fmt.Fprintln(out, "    or from a microagent source checkout:")
-	if runtime.GOOS == "darwin" {
-		fmt.Fprintln(out, "      make signed-supervisor && make install")
-		fmt.Fprintln(out, "      (macOS uses Apple Virtualization; the supervisor must be code-signed)")
-	} else {
-		fmt.Fprintln(out, "      make install")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause))
+}
+
+// closingVerdict composes the page's rollup sentence, gated on everything the
+// page reported: the server, the bypass check, and the runtime clause from the
+// end-to-end probe. It exists so a dead server can never sit above an ending
+// that reads green — the closing sentence answers for the whole page or it
+// does not claim readiness.
+func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string) string {
+	switch {
+	case !serverUp:
+		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), and %s.", runtimeClause)
+	case bypassWarnings == 1:
+		return fmt.Sprintf("The server is running and %s, but one upstream is reachable around the gateway — remove the direct entry above so every call is governed and audited.", runtimeClause)
+	case bypassWarnings > 1:
+		return fmt.Sprintf("The server is running and %s, but %d upstreams are reachable around the gateway — remove the direct entries above so every call is governed and audited.", runtimeClause, bypassWarnings)
+	case runtimeHealthy:
+		return fmt.Sprintf("microagency is ready: the server is running, and %s.", runtimeClause)
+	default:
+		return fmt.Sprintf("The server is running, but %s.", runtimeClause)
 	}
-	fmt.Fprintln(out, "    Then `microagency doctor` again — microagency finds the binaries via the")
-	fmt.Fprintln(out, "    installed `microagent` on PATH (it does not manage them itself).")
+}
+
+// pathWhenMissing returns the remediation detail for a failed lookup line: the
+// path the lookup went through. Healthy lines stay path-free.
+func pathWhenMissing(ok bool, path string) string {
+	if ok || strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return "  not found (expected at " + path + ")"
 }
 
 // reportBypasses prints the enforcement-hygiene bypass check: for each upstream
@@ -139,23 +178,27 @@ func runDoctor(args []string) {
 // Advisory only: it reads config, never writes it, and it can only see LOCAL client
 // config on this machine. A separate or remote client holding its own token to the
 // same upstream is invisible here — this raises hygiene, it does not enforce.
-func reportBypasses(out *os.File) {
+func reportBypasses(out *os.File) int {
 	upstreams := mcp.ReadUpstreamRegistrations(microagencyDir())
 	if len(upstreams) == 0 {
-		return // nothing proxied yet — nothing to bypass
+		// Not applicable is a rendered state: an absent line is
+		// indistinguishable from a check that was forgotten.
+		fmt.Fprintln(out, "\n  bypass check      — not applicable (no upstreams proxied yet)")
+		return 0
 	}
 	warnings := detectBypasses(upstreams, gatherClientServers(clientConfigPaths()))
 	fmt.Fprintf(out, "\n  bypass check      %s\n", bypassStatus(len(warnings)))
 	if len(warnings) == 0 {
 		fmt.Fprintln(out, "                    (no upstream is also a DIRECT MCP server in the local client config;")
 		fmt.Fprintln(out, "                     note: only local config is visible — a separate/remote client isn't)")
-		return
+		return 0
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(out, "    ⚠ upstream %q (%s) is ALSO directly connected as %q in %s\n",
 			w.UpstreamName, w.URL, w.ClientName, w.ConfigPath)
 		fmt.Fprintln(out, "      that's a back door around microagency — remove the direct entry so every call goes through the gateway.")
 	}
+	return len(warnings)
 }
 
 // reportSecretPosture tells the operator where upstream credentials are held —
