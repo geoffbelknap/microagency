@@ -66,7 +66,14 @@ brews:
     conflicts:
       - microagency-latest
     dependencies:
-      - name: microagent # microVM supervisor + guest binaries (the reduce code path)
+      # microVM supervisor + guest binaries (the reduce code path). Recommended,
+      # not required: it installs by default so `microagency up` works out of
+      # the box, but a dev machine tracking microagent-latest (same binary
+      # names, so the stable formula would shadow-fight it) can opt out with
+      # `brew install microagency --without-microagent`. `microagency doctor`
+      # reports a missing substrate with remediation either way.
+      - name: microagent
+        type: recommended
       - name: openbao # at-rest secret store for upstream credentials
     caveats: |
       Get started:  microagency up
