@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-31_
 
 ## Built-in OAuth (the default)
 
@@ -56,10 +56,10 @@ claude mcp add --transport http microagency http://127.0.0.1:8765/mcp \
 ```
 
 For a shared or hosted deployment, `up --issuer <url>` validates tokens
-from an external authorization server; clients log in there — and this works
-over a tunnel too (`up --tunnel … --issuer …`, see
-[public mode](public-mode.md)), so external OAuth over the tunnel is
-available today. What's still planned is serving the **built-in**
+from an external authorization server, and clients log in there. This works
+over a tunnel too: `up --tunnel … --issuer …`, see
+[public mode](public-mode.md). External OAuth over the tunnel is available
+today. What's still planned is serving the **built-in**
 authorization server over the tunnel; until then, a tunnel without
 `--issuer` uses a static bearer (a distinct MCP bearer, minted at
 `~/.microagency/mcp-bearer`, never the operator token).

@@ -4,7 +4,7 @@ description: Install microagency, connect a client, and add your first servers.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-31_
 
 ## Install and start
 
@@ -66,7 +66,12 @@ bundle, so "Go only" does not apply to that target.
 
 ## Check the install
 
-`microagency doctor` checks runtime and engine health: whether the server
-is running, where your credentials actually live, which query engines are
-loaded, whether the microVM runtime can boot, and whether any client is wired
-around the gateway. Run it first when something misbehaves.
+`microagency doctor` checks runtime and engine health:
+
+- Whether the server is running.
+- Where your credentials live.
+- Which query engines are loaded.
+- Whether the microVM runtime can boot.
+- Whether any client is wired around the gateway.
+
+Run it first when something misbehaves.

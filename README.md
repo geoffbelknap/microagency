@@ -93,14 +93,18 @@ the gateway; only the answer comes back.
 
 ## Going deeper
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the conceptual overview — why
+[ARCHITECTURE.md](ARCHITECTURE.md) is the conceptual overview: why
 microagency exists and the shape of the system. The [docs](docs/index.md)
-cover each mechanism: the auth modes (built-in OAuth, static bearer,
-external issuer, stdio), where credentials live, the tool index and how
-invocation is gated, off-context data handling and the query engines and
-microVM (including how to write your own engine), field minimization, the
-audit chain, public mode for the Claude and ChatGPT web apps, multi-user
-gateways, and the security model.
+cover each mechanism:
+
+- The auth modes: built-in OAuth, static bearer, external issuer, stdio.
+- Where credentials live.
+- The tool index, and how invocation is gated.
+- Off-context data handling, the query engines, and the microVM, including
+  how to write your own engine.
+- Field minimization and the audit chain.
+- Public mode for the Claude and ChatGPT web apps.
+- Multi-user gateways, and the security model.
 
 `microagency --help` shows the CLI surface, and `microagency doctor` checks
 runtime and engine health.
