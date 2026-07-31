@@ -22,7 +22,7 @@ data.
 
 That's a default, not an absolute. Results under the inline threshold
 (`--max-inline-bytes`, default 8192) still return directly, and an answer
-can itself be sensitive. The honest claim is a much smaller aperture, not
+can itself be sensitive. The accurate claim is a much smaller aperture, not
 zero: what reaches the model drops from whole datasets to the answers pulled
 out of them.
 
