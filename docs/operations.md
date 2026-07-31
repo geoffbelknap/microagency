@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-31_
 
 ## The CLI
 
@@ -55,8 +55,11 @@ Everything lives under `~/.microagency`:
 
 ## Doctor
 
-`microagency doctor` reports what it can verify: whether the server is
-running, the secret-store posture (where your credentials actually are),
-the loaded query engines, whether the microVM runtime can boot a real
-workload, and enforcement hygiene — any upstream the gateway proxies that a
-client is also wired to directly, bypassing the gateway.
+`microagency doctor` reports what it can verify:
+
+- Whether the server is running.
+- The secret-store posture, meaning where your credentials are.
+- The loaded query engines.
+- Whether the microVM runtime can boot a real workload.
+- Enforcement hygiene: any upstream the gateway proxies that a client is
+  also wired to directly, bypassing the gateway.
