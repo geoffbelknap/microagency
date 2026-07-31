@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-31_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -26,10 +26,10 @@ an IdP that doesn't model scopes.
 The tunnel exposes only `/mcp` and the OAuth endpoints. The operator
 surface (`/admin` and the console) moves to its own loopback listener,
 `127.0.0.1:8766` by default or wherever `--admin-addr` points, so it
-isn't network-reachable from the public bind at all. It's also gated by the
-operator token — which is a **different secret** from the `/mcp` bearer: a
+isn't network-reachable from the public bind at all. It is also gated by the
+operator token, which is a **different secret** from the `/mcp` bearer. A
 tunnel with no `--token` mints a distinct MCP bearer at
-`~/.microagency/mcp-bearer` for the connector, so the token you paste into
+`~/.microagency/mcp-bearer` for the connector. The token you paste into
 a public web app is not the one that gates `/admin`. Both the network
 split and the credential split hold, so an agent's bearer can never reach
 admin. If you front `--issuer` with your own reverse proxy instead of a
