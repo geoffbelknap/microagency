@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -14,15 +15,50 @@ func requireVM(t *testing.T) {
 	if testing.Short() {
 		t.Skip("microVM integration test; needs the microagent runtime — run without -short")
 	}
-	if runtime.GOOS != "linux" {
-		t.Skip("requires linux")
+	backend := ""
+	switch runtime.GOOS {
+	case "linux":
+		backend = "linux-kvm"
+	case "darwin":
+		if runtime.GOARCH != "arm64" {
+			t.Skipf("apple-vf live validation requires macOS arm64, got %s", runtime.GOARCH)
+		}
+		backend = "apple-vf"
+	default:
+		t.Skipf("no supported live backend on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		t.Skip("requires /dev/kvm")
+	if selected := os.Getenv("MICROAGENT_E2E_BACKEND"); selected != "" && selected != backend {
+		t.Fatalf("MICROAGENT_E2E_BACKEND=%q does not match this host backend %q", selected, backend)
+	}
+	if backend == "linux-kvm" {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			if os.Getenv("MICROAGENCY_LIVE_REDUCE") == "1" {
+				t.Fatalf("linux-kvm live validation requires /dev/kvm: %v", err)
+			}
+			t.Skip("requires /dev/kvm")
+		}
 	}
 }
 
 const pyImage = "docker.io/library/python:3.13-slim"
+
+func TestProviderRejectsUnsafeNameBeforeCleanup(t *testing.T) {
+	stateDir := t.TempDir()
+	marker := filepath.Join(filepath.Dir(stateDir), "must-remain")
+	if err := os.WriteFile(marker, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := MicroagentProvider{StateDir: stateDir}
+	if _, err := p.Run(context.Background(), Spec{Name: "../must-remain", Command: "true"}); err == nil {
+		t.Fatal("unsafe provider name was accepted")
+	}
+	if err := p.DeleteWorkspace(context.Background(), "../must-remain"); err == nil {
+		t.Fatal("unsafe cleanup name was accepted")
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "sentinel" {
+		t.Fatalf("unsafe name affected path outside state dir: data=%q err=%v", got, err)
+	}
+}
 
 // TestProviderRunsScript: the seam runs a script and returns its stdout.
 func TestProviderRunsScript(t *testing.T) {
