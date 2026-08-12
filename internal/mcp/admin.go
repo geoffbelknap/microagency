@@ -111,6 +111,15 @@ func (s *Server) AdminHandler(token string) http.Handler {
 		w.Header().Set("Content-Type", PrometheusContentType)
 		_, _ = w.Write([]byte(s.Metrics().Prometheus()))
 	}))
+	mux.HandleFunc("GET /admin/tools/rank", g(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		subject := q.Get("subject")
+		if subject == "" {
+			subject = "local"
+		}
+		writeJSON(w, http.StatusOK, s.RankTools(subject, q.Get("q"), limit))
+	}))
 	mux.HandleFunc("GET /admin/infra", g(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, s.InfraStatus(r.Context())) }))
 	mux.HandleFunc("GET /admin/upstreams", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.UpstreamList()) }))
 	mux.HandleFunc("GET /admin/egress-policy", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.EgressPolicy()) }))
