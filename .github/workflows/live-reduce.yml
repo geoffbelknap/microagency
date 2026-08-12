@@ -29,16 +29,17 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Resolve pinned microagent
-        id: microagent
-        run: echo "version=$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout pinned microagent
-        uses: actions/checkout@v7
-        with:
-          repository: geoffbelknap/microagent
-          ref: ${{ steps.microagent.outputs.version }}
-          path: .live/microagent
+      - name: Materialize pinned microagent source
+        run: |
+          module="$(go mod download -json github.com/geoffbelknap/microagent)"
+          version="$(jq -r '.Version' <<< "$module")"
+          source="$(jq -r '.Dir' <<< "$module")"
+          test -n "$version"
+          test -d "$source"
+          mkdir -p .live/microagent
+          cp -R "$source"/. .live/microagent/
+          chmod -R u+w .live/microagent
+          echo "Pinned microagent: $version"
 
       - name: Prepare Linux KVM host
         run: |
