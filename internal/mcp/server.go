@@ -190,12 +190,19 @@ type runRecord struct {
 	SummarizedEntries   int  `json:"summarized_entries,omitempty"`
 	OmittedEntries      int  `json:"omitted_entries,omitempty"`
 	ExactSchemaLookup   bool `json:"exact_schema_lookup,omitempty"`
-	// FusedInvocation is reserved for a governed invoke+reduce path. It remains
-	// false for today's separate call_tool then reduce flow.
-	FusedInvocation bool   `json:"fused_invocation,omitempty"`
-	Reffed          bool   `json:"reffed"`
-	Ref             string `json:"ref,omitempty"`
-	Bytes           int    `json:"bytes"`
+	// A fused invocation records the declarative transform without retaining its
+	// query or source result. The digest, engine, byte counts, latency, and status
+	// are sufficient to reconstruct the governed chain.
+	FusedInvocation      bool   `json:"fused_invocation,omitempty"`
+	TransformEngine      string `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int    `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int    `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64  `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string `json:"transform_status,omitempty"`
+	Reffed               bool   `json:"reffed"`
+	Ref                  string `json:"ref,omitempty"`
+	Bytes                int    `json:"bytes"`
 	// Protected is the count of sensitive field values minimized (redacted or
 	// tokenized) on this proxy call — the field-level minimization impact.
 	Protected int `json:"protected,omitempty"`

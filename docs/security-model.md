@@ -36,7 +36,10 @@ The guarantees, and where each one is enforced:
   inserted, or reordered line is detectable by anyone with the public key —
   not just the operator who holds the private one. Wholesale tail truncation
   is caught by a signed, out-of-band head anchor in the secret store (real
-  protection under OpenBao/Vault); see [the audit chain](audit.md).
+  protection under OpenBao/Vault); see [the audit chain](audit.md). A
+  declarative transform fused into `call_tool` records its engine, query
+  digest, byte counts, latency, and outcome under that same run without
+  retaining the query or raw result.
 - **Plane separation.** The operator surface (admin API and console) uses
   its own token — distinct from the agent's `/mcp` bearer, including the
   tunnel path, which mints a dedicated MCP bearer rather than reusing the

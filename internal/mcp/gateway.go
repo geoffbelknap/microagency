@@ -494,7 +494,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, out.rawBytes, marshalLen(out.result), out.minimizedBytes, start, out.err, out.outcome, out.egressHost, out.protected, out.extra...)
+	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out)
 	return out.result, true
 }
 
@@ -502,14 +502,19 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 // proxyCall returns it on every path, so the single recordProxy in invokeUpstream
 // can't be bypassed by a new early return.
 type proxyOutcome struct {
-	result         map[string]any
-	rawBytes       int
-	minimizedBytes int
-	err            error
-	outcome        budget.Outcome
-	egressHost     string // "" when no egress reached the upstream (a pre-dial refusal)
-	protected      int
-	extra          []sandbox.AuditEvent
+	result               map[string]any
+	rawBytes             int
+	minimizedBytes       int
+	err                  error
+	outcome              budget.Outcome
+	egressHost           string // "" when no egress reached the upstream (a pre-dial refusal)
+	protected            int
+	extra                []sandbox.AuditEvent
+	transformRan         bool
+	transformInputBytes  int
+	transformOutputBytes int
+	transformLatencyMs   int64
+	transformStatus      string
 }
 
 // proxyCall dials the upstream (after the read-only and pre-egress write gates),
@@ -566,6 +571,9 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), rawBytes: len(res), err: uerr, egressHost: upHost}
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
+	if transform := transformOf(ctx); transform != nil && !resultIsError(passthrough) {
+		return s.fusedProxyResult(ctx, runID, upName, tool, name, transform, passthrough, res, upHost)
+	}
 	// Reference-by-default: a large result is held off-context as a handle the agent
 	// reduces, not flooded into context. Errors and small results pass through inline.
 	if s.budget.Store != nil && !resultIsError(passthrough) {
@@ -669,33 +677,51 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string) ([]byte, error
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, rawBytes, contextBytes, minimizedBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, protected int, extra ...sandbox.AuditEvent) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome) {
 	exit, auditErr := 0, ""
-	if callErr != nil {
-		exit, auditErr = 1, callErr.Error()
+	if out.err != nil {
+		exit, auditErr = 1, out.err.Error()
 	}
 	var audit []sandbox.AuditEvent
-	if egressHost != "" {
-		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: egressHost})
+	if out.egressHost != "" {
+		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: out.egressHost})
 	}
-	audit = append(audit, extra...) // e.g. minimize_alert events from field minimization
+	audit = append(audit, out.extra...) // e.g. minimize_alert events from field minimization
 	parkedBytes := 0
-	if out.Reffed {
-		parkedBytes = out.Summary.Bytes
+	if out.outcome.Reffed {
+		parkedBytes = out.outcome.Summary.Bytes
+	}
+	transform := transformOf(ctx)
+	transformEngine, transformQuerySHA256, transformStatus := "", "", out.transformStatus
+	if transform != nil {
+		transformEngine = transform.Engine
+		transformQuerySHA256 = transformDigest(transform.Query)
+		if transformStatus == "" {
+			transformStatus = "not_run"
+		}
+	}
+	substrate, engine := "", ""
+	if out.transformRan {
+		substrate, engine = "wasm", transformEngine
 	}
 	s.putRun(runID, runRecord{
 		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: string(args),
 		User:            principalOf(ctx).Subject,
 		InputBytes:      len(args), // the tool arguments are the call's input payload
-		RawBytes:        rawBytes,
+		RawBytes:        out.rawBytes,
 		ParkedBytes:     parkedBytes,
-		MinimizedBytes:  minimizedBytes,
+		MinimizedBytes:  out.minimizedBytes,
 		OutputBytes:     contextBytes,
 		ContextMeasured: true,
 		Bytes:           parkedBytes,
 		LatencyMs:       time.Since(start).Milliseconds(),
-		Reffed:          out.Reffed, Ref: string(out.Ref),
-		Protected: protected,
+		Substrate:       substrate, Engine: engine,
+		FusedInvocation: out.transformRan,
+		TransformEngine: transformEngine, TransformQuerySHA256: transformQuerySHA256,
+		TransformInputBytes: out.transformInputBytes, TransformOutputBytes: out.transformOutputBytes,
+		TransformLatencyMs: out.transformLatencyMs, TransformStatus: transformStatus,
+		Reffed: out.outcome.Reffed, Ref: string(out.outcome.Ref),
+		Protected: out.protected,
 		ExitCode:  exit, AuditErr: auditErr, Audit: audit,
 	})
 }
@@ -759,6 +785,7 @@ func (s *Server) callTool(ctx context.Context, args json.RawMessage) map[string]
 	var in struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Transform json.RawMessage `json:"transform"`
 		TaskID    string          `json:"task_id"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil || in.Name == "" {
@@ -768,7 +795,13 @@ func (s *Server) callTool(ctx context.Context, args json.RawMessage) map[string]
 	if err != nil {
 		return toolError("call_tool: %v", err)
 	}
-	if res, ok := s.invokeUpstream(withTaskID(ctx, taskID), in.Name, in.Arguments); ok {
+	transform, err := s.parseTransform(in.Transform)
+	if err != nil {
+		return toolError("call_tool: %v", err)
+	}
+	ctx = withTaskID(ctx, taskID)
+	ctx = withTransform(ctx, transform)
+	if res, ok := s.invokeUpstream(ctx, in.Name, in.Arguments); ok {
 		return res
 	}
 	return toolError("unknown tool %q; discover tools with find_tools", in.Name)

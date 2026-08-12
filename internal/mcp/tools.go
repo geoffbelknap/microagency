@@ -55,13 +55,22 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "call_tool",
-			"description": "Invoke a tool discovered via find_tools. Pass its `name` and `arguments` (matching the tool's inputSchema). Use this for aggregated upstream tools, which aren't in your tool list.",
+			"description": "Invoke a tool discovered via find_tools. Pass its `name` and `arguments` (matching the tool's inputSchema). Optionally apply one configured declarative `transform` before the result enters context. Use this for aggregated upstream tools, which aren't in your tool list.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":      strProp("the tool name from find_tools"),
 					"arguments": map[string]any{"type": "object", "description": "arguments matching the tool's inputSchema"},
-					"task_id":   taskProp,
+					"transform": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"description": "optional deterministic post-processing inside the gateway; arbitrary code is not accepted",
+						"properties": map[string]any{
+							"query":  strProp("declarative jq/sql/text/html projection, filter, or aggregate"),
+							"engine": strProp("optional query language: sql | jq | text | html; inferred when omitted"),
+						},
+						"required": []string{"query"},
+					},
+					"task_id": taskProp,
 				},
 				"required": []string{"name"},
 			},

@@ -140,9 +140,8 @@ func (s *Server) Metrics() MetricsSummary {
 		if !ok {
 			continue
 		}
-		// by_substrate is "where reduce ran" — only reduce runs land on a substrate
-		// (wasm/microvm). Proxy calls have none, so they don't belong in this
-		// breakdown (otherwise they pile up under a bogus "unknown" substrate).
+		// by_substrate is where reduction ran: standalone reduce or a declarative
+		// transform fused into a proxied invocation.
 		if sub := rec.Substrate; sub != "" {
 			st := m.BySubstrate[sub]
 			if st == nil {
@@ -150,9 +149,14 @@ func (s *Server) Metrics() MetricsSummary {
 				m.BySubstrate[sub] = st
 			}
 			st.Runs++
-			st.InputBytesTotal += rec.InputBytes
-			st.OutputBytesTotal += rec.OutputBytes
-			lat[sub] = append(lat[sub], rec.LatencyMs)
+			inputBytes, outputBytes, latencyMs := rec.InputBytes, rec.OutputBytes, rec.LatencyMs
+			if rec.FusedInvocation {
+				inputBytes, outputBytes = rec.TransformInputBytes, rec.TransformOutputBytes
+				latencyMs = rec.TransformLatencyMs
+			}
+			st.InputBytesTotal += inputBytes
+			st.OutputBytesTotal += outputBytes
+			lat[sub] = append(lat[sub], latencyMs)
 		}
 		if rec.Engine != "" {
 			m.ByEngine[rec.Engine]++

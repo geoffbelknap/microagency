@@ -4,7 +4,7 @@ description: Reference handles, query engines, the microVM path, and writing you
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-08-12_
 
 A result too large to return inline is stored server-side, and the agent
 gets a `<ref_N>` handle with a structural preview: field names, row counts,
@@ -34,6 +34,38 @@ work with a right answer, so it runs as code, not inference.
 Only the computed answer returns to the agent, and a large answer becomes a
 new reference. If you need the raw data yourself, download it from the
 console; that path never touches the model.
+
+## Transform during call_tool
+
+When you already know the projection, filter, or aggregate, include one
+declarative `transform` in `call_tool` instead of waiting for a reference and
+making a second `reduce` call:
+
+```json
+{
+  "name": "reports__search",
+  "arguments": {"status": "open"},
+  "transform": {"engine": "jq", "query": "length"},
+  "task_id": "run-123"
+}
+```
+
+The gateway validates the engine and query before contacting the upstream.
+It invokes the upstream once, gives only the result bytes to the configured
+WebAssembly engine, applies field minimization to the answer, and enforces the
+normal inline threshold. The raw upstream result never enters model context
+or the code microVM. A large transformed answer becomes a reference owned by
+the caller.
+
+The response carries the source tool, engine, run ID, and a SHA-256 digest of
+the query. The audit record adds input/output byte counts, latency, and status
+under that same run. It does not retain the query or raw result.
+
+This path accepts only `query` and optional `engine`; it does not accept
+arbitrary code. Use a separate `reduce` for an existing reference, several
+inputs, or Python. If a transformation fails after a mutating call, the raw
+result is withheld and the upstream call is never repeated. Reconcile the
+upstream state from the run record before deciding whether to retry.
 
 ## The built-in query engines
 
