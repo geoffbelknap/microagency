@@ -16,6 +16,7 @@ microagency purge [--full] # delete your data (both tiers confirm first)
 microagency doctor         # check runtime + engine health
 microagency openbao        # inspect or migrate managed OpenBao custody
 microagency hook install   # print the Claude Code egress-guard hook setup
+microagency mediation      # configure or inspect enforced workspace mediation
 ```
 
 Every command answers `--help` with its own usage; `microagency help`
@@ -37,6 +38,7 @@ Everything lives under `~/.microagency`:
 | `auth-posture.json` | the active public auth mode, issuer, and resource |
 | `upstreams.json` | non-secret connection registrations, ownership, template identity, and revoked state |
 | `connection-templates.json` | operator-approved self-service provider, scope, parameter, and quota bounds; never OAuth client secrets |
+| `mediation.json` | non-secret enforced workspace, gateway URL/host, and policy digest |
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
@@ -81,6 +83,11 @@ copy-then-switch migration, restart requirements, backup, and recovery.
 - Whether the microVM runtime can boot a real workload.
 - Enforcement hygiene: any upstream the gateway proxies that a client is
   also wired to directly, bypassing the gateway.
+- Direct-mediation posture: advisory local checks or configured/enforced
+  workspace policy, plus every client class outside that boundary.
+
+See [direct-upstream mediation](mediation.md) for the gateway-only workspace
+contract, fail-closed mutation behavior, and structured denial evidence.
 
 ## Metrics
 

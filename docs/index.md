@@ -32,7 +32,9 @@ the conceptual overview. These pages cover each mechanism:
   byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](public-mode.md) — remote MCP for the
   Claude/ChatGPT web apps, and sharing one gateway safely.
+- [Direct-upstream mediation](mediation.md) — advisory local checks and a
+  gateway-only locked egress policy for governed workspaces.
 - [The security model](security-model.md) — each guarantee and where it is
-  enforced, plus the egress-guard hook.
+  enforced.
 - [Operating the gateway](operations.md) — the CLI surface, state files,
   doctor, and purge.

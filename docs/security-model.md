@@ -32,11 +32,12 @@ The guarantees, and where each one is enforced:
   redacted or tokenized before they reach the model, on by default; a
   tokenized value is resolved back only on the principal's outbound call to
   the same upstream (see [field minimization](field-minimization.md)).
-- **Mediation.** The [egress-guard hook](#the-egress-guard) warns when an
-  agent tries to reach a connected host directly instead of through the
-  gateway; `microagency doctor` additionally flags any upstream the
-  gateway proxies that a client is ALSO wired to directly — a back door
-  around the gateway.
+- **Mediation.** [Enforced workspace mode](mediation.md) gives one governed
+  microagent workspace a host-owned locked allowlist: the gateway host is its
+  only direct network destination, so upstream calls must cross `call_tool`.
+  The default local-host posture is explicitly advisory. The
+  [egress-guard hook](#the-egress-guard) warns, and `microagency doctor` finds
+  duplicate local MCP wiring, but neither is described as packet enforcement.
 - **Isolation.** Query engines run in WebAssembly modules with no network or
   credential access; Python runs in an isolated microVM that sees only its
   input data. An experimental governed program may also receive a narrow,
@@ -106,3 +107,8 @@ when a Bash or WebFetch call would go straight to a host that's behind the
 gateway, steering the agent back through `call_tool`. It warns rather than
 blocks, and it fails open: if the gateway isn't running or has no token, the
 guard stays silent.
+
+This is the advisory local-host layer. It does not cover shell forms it cannot
+parse, direct IPs, remote clients, or alternate processes. Use
+[`microagency mediation enforce`](mediation.md) for a governed workspace whose
+network boundary denies direct upstream access.

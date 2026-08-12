@@ -5,7 +5,7 @@ go 1.26.3
 toolchain go1.26.5
 
 require (
-	github.com/geoffbelknap/microagent v0.9.0
+	github.com/geoffbelknap/microagent v0.9.1-0.20260812103440-453ab744a287
 	github.com/golang-jwt/jwt/v5 v5.3.1
 )
 

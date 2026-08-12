@@ -77,14 +77,24 @@ func TestEgressPolicyDedup(t *testing.T) {
 func TestEgressPolicySkipsBadUpstreamURL(t *testing.T) {
 	s := NewServer(nil)
 
-	putUp(s, "bad", "://not a url", true)    // parse error → skipped
-	putUp(s, "empty", "mcp-tool-name", true) // parses but no host → skipped
+	putUp(s, "bad", "://not a url", true)         // parse error → skipped
+	putUp(s, "empty", "mcp-tool-name", true)      // parses but no host → skipped
+	putUp(s, "stdio", "stdio://local/tool", true) // no network destination → skipped
 	putUp(s, "ok", "https://ok.example.com", true)
 
 	got := s.EgressPolicy()
 	want := []string{"ok.example.com"}
 	if !reflect.DeepEqual(got.Hosts, want) {
 		t.Fatalf("bad upstream URLs not skipped: got %v want %v", got.Hosts, want)
+	}
+}
+
+func TestEgressPolicyCanonicalizesHostIdentity(t *testing.T) {
+	s := NewServer(nil)
+	putUp(s, "upper", "https://API.Example.COM./mcp", true)
+	got := s.EgressPolicy()
+	if !reflect.DeepEqual(got.Hosts, []string{"api.example.com"}) {
+		t.Fatalf("canonical hosts = %v", got.Hosts)
 	}
 }
 

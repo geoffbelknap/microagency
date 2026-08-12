@@ -110,3 +110,8 @@ cover each mechanism:
 
 `microagency --help` shows the CLI surface, and `microagency doctor` checks
 runtime and engine health.
+
+Local clients get advisory bypass warnings by default. For a governed
+microagent workspace, [enforced direct-upstream mediation](docs/mediation.md)
+locks workspace egress to the gateway host so upstream network paths must go
+through `call_tool`.

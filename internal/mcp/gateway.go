@@ -155,6 +155,11 @@ func (s *Server) registerUpstream(name string, u *upstream, opts ...UpstreamOpti
 	for _, opt := range opts {
 		opt(u)
 	}
+	if u.enabled && !u.revoked {
+		if err := s.validateMediationEndpoint(u.conn.Endpoint()); err != nil {
+			return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
+		}
+	}
 	s.reg.conns[name] = u
 	return nil
 }
@@ -265,6 +270,9 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	if cur.conn != rec.conn {
 		return fmt.Errorf("gateway: upstream %q changed while enabling; retry", name)
 	}
+	if err := s.validateMediationEndpoint(cur.conn.Endpoint()); err != nil {
+		return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
+	}
 	cur.tools = tools
 	cur.minimizeSuggested = sug
 	cur.enabled = true
@@ -299,6 +307,9 @@ func (s *Server) rebindUpstream(ctx context.Context, name string, conn upstreamC
 	}
 	if expectedGeneration != nil && rec.authGeneration != *expectedGeneration {
 		return fmt.Errorf("gateway: upstream %q authorization changed while rebinding; start again", name)
+	}
+	if err := s.validateMediationEndpoint(conn.Endpoint()); err != nil {
+		return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
 	}
 	rec.conn = conn
 	rec.tools = tools

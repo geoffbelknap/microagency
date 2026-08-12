@@ -86,7 +86,9 @@ Each part of the system has its own page:
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
   for web apps, built-in or external OAuth, the admin/tunnel split, and
   operator-approved self-service connections with principal-bound credentials.
+- [Direct-upstream mediation](docs/mediation.md) — the explicit advisory
+  local-host posture and the enforced gateway-only workspace contract.
 - [The security model](docs/security-model.md) — each guarantee and where it
-  is enforced, plus the egress-guard hook.
+  is enforced.
 - [Operating the gateway](docs/operations.md) — the CLI, state files,
   doctor, and purge.
