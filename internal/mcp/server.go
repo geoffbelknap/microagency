@@ -134,6 +134,7 @@ type runStore struct {
 	maxKept int                  // window cap (0 = unbounded)
 	total   int                  // all-time run count, for Metrics.TotalRuns
 	impact  Impact               // all-time cumulative impact
+	context ContextCost          // all-time stage/context counters; rebuilt from audit
 }
 
 // oauthFlowStore holds pending console OAuth-add flows, keyed by state.
@@ -152,10 +153,11 @@ type Option func(*Server)
 
 // runRecord is the routing outcome retained for the audit log and explain-by-run.
 type runRecord struct {
-	// Kind is "reduce" (an off-context reduction over a ref) or "proxy" (an
-	// aggregated upstream MCP tool call). Proxy records carry Upstream/Tool/Args;
-	// a reduce carries the ref it reduced in SourceID.
+	// Kind is "discovery" (find_tools), "reduce" (an off-context reduction over
+	// a ref), or "proxy" (an aggregated upstream MCP tool call). Proxy records
+	// carry Upstream/Tool/Args; a reduce carries the ref it reduced in SourceID.
 	Kind     string `json:"kind,omitempty"`
+	TaskID   string `json:"task_id,omitempty"` // bounded opaque correlation id; never a metric label
 	SourceID string `json:"source_id,omitempty"`
 	Upstream string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
 	Tool     string `json:"tool,omitempty"`     // proxy: the upstream tool name
@@ -170,9 +172,30 @@ type runRecord struct {
 	LatencyMs   int64  `json:"latency_ms"`
 	InputBytes  int    `json:"input_bytes"`
 	OutputBytes int    `json:"output_bytes"`
-	Reffed      bool   `json:"reffed"`
-	Ref         string `json:"ref,omitempty"`
-	Bytes       int    `json:"bytes"`
+	// RawBytes is the upstream/reducer output before parking or minimization.
+	// ParkedBytes is the payload retained behind a reference. MinimizedBytes is
+	// the non-negative serialized-byte reduction from field minimization. None
+	// stores the payload itself.
+	RawBytes       int `json:"raw_bytes,omitempty"`
+	ParkedBytes    int `json:"parked_bytes,omitempty"`
+	MinimizedBytes int `json:"minimized_bytes,omitempty"`
+	// ContextMeasured distinguishes new exact context-byte records from older
+	// audit lines whose OutputBytes meant raw tool output. It prevents an upgrade
+	// from relabeling historical raw bytes as model-context bytes.
+	ContextMeasured bool `json:"context_measured,omitempty"`
+	// Discovery detail counts describe the bounded find_tools response without
+	// retaining its query, schemas, descriptions, or result.
+	FullSchemaEntries   int  `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries int  `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries   int  `json:"summarized_entries,omitempty"`
+	OmittedEntries      int  `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup   bool `json:"exact_schema_lookup,omitempty"`
+	// FusedInvocation is reserved for a governed invoke+reduce path. It remains
+	// false for today's separate call_tool then reduce flow.
+	FusedInvocation bool   `json:"fused_invocation,omitempty"`
+	Reffed          bool   `json:"reffed"`
+	Ref             string `json:"ref,omitempty"`
+	Bytes           int    `json:"bytes"`
 	// Protected is the count of sensitive field values minimized (redacted or
 	// tokenized) on this proxy call — the field-level minimization impact.
 	Protected int `json:"protected,omitempty"`
@@ -458,11 +481,20 @@ func (s *Server) accumulateImpactLocked(rec runRecord) {
 	s.rs.impact.Calls++
 	if rec.Reffed {
 		s.rs.impact.Parked++
-		s.rs.impact.BytesKeptOut += int64(rec.Bytes)
-	} else {
+		parked := rec.ParkedBytes
+		if parked == 0 { // backward-compatible replay of older audit records
+			parked = rec.Bytes
+		}
+		s.rs.impact.BytesKeptOut += int64(parked)
+	}
+	// A reference handle and preview still enter context on newly measured
+	// records. Preserve the old inline-only interpretation when replaying audit
+	// lines written before ContextMeasured existed.
+	if rec.ContextMeasured || !rec.Reffed {
 		s.rs.impact.BytesToContext += int64(rec.OutputBytes)
 	}
 	s.rs.impact.FieldsProtected += rec.Protected
+	s.accumulateContextLocked(rec)
 }
 
 func (s *Server) getRun(id string) (runRecord, bool) {

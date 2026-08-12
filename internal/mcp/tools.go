@@ -34,6 +34,11 @@ func toolDefs() []map[string]any {
 	strProp := func(desc string) map[string]any {
 		return map[string]any{"type": "string", "description": desc}
 	}
+	taskProp := map[string]any{
+		"type": "string", "maxLength": maxTaskIDBytes,
+		"pattern":     "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+		"description": "optional opaque id shared across this task's find_tools, call_tool, and reduce calls; do not put user data in it",
+	}
 	return []map[string]any{
 		{
 			"name":        "find_tools",
@@ -41,8 +46,9 @@ func toolDefs() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query": strProp("what you want to do, in keywords"),
-					"limit": map[string]any{"type": "integer", "description": "max results (default 10)"},
+					"query":   strProp("what you want to do, in keywords"),
+					"limit":   map[string]any{"type": "integer", "description": "max results (default 10)"},
+					"task_id": taskProp,
 				},
 				"required": []string{"query"},
 			},
@@ -55,6 +61,7 @@ func toolDefs() []map[string]any {
 				"properties": map[string]any{
 					"name":      strProp("the tool name from find_tools"),
 					"arguments": map[string]any{"type": "object", "description": "arguments matching the tool's inputSchema"},
+					"task_id":   taskProp,
 				},
 				"required": []string{"name"},
 			},
@@ -65,12 +72,13 @@ func toolDefs() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"ref":    strProp("a reference handle like <ref_3> from a prior result"),
-					"refs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
-					"data":   strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
-					"query":  strProp("a declarative reduction over a single input (sql/jq/text/html)"),
-					"engine": strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
-					"code":   strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
+					"ref":     strProp("a reference handle like <ref_3> from a prior result"),
+					"refs":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
+					"data":    strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
+					"query":   strProp("a declarative reduction over a single input (sql/jq/text/html)"),
+					"engine":  strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
+					"code":    strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
+					"task_id": taskProp,
 				},
 				// The contract, machine-checkable instead of prose-only: exactly
 				// one input (ref | refs | data), exactly one operation (query |
@@ -233,8 +241,13 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 		Query  string   `json:"query"`
 		Engine string   `json:"engine"`
 		Code   string   `json:"code"`
+		TaskID string   `json:"task_id"`
 	}
 	_ = json.Unmarshal(args, &in)
+	taskID, err := validateTaskID(in.TaskID)
+	if err != nil {
+		return toolError("reduce: %v", err)
+	}
 	if s.budget.Store == nil {
 		return toolError("references are not enabled on this server")
 	}
@@ -329,15 +342,17 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			// referenced data — RELOCATE it to the operator's audit record (bounded)
 			// and keep the agent-facing error content-free: exit code + where the
 			// operator can read the diagnostic.
+			rec := runRecord{
+				Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
+				Substrate: "wasm", Engine: engineName, LatencyMs: time.Since(start).Milliseconds(),
+				InputBytes: len(payload), ContextMeasured: true,
+			}
+			clientErr := fmt.Sprintf("reduce: the %q engine failed (%v). For large data, regex, or complex logic, run it as code instead — reduce(%s, code=<python that reads /app/input>).", engineName, err, selfRef)
 			var exitErr *wasmexec.ExitError
 			if errors.As(err, &exitErr) {
-				s.putRun(runID, runRecord{
-					Kind: "reduce", SourceID: refLabel, User: user,
-					Substrate: "wasm", Engine: engineName, LatencyMs: time.Since(start).Milliseconds(),
-					InputBytes: len(payload),
-					ExitCode:   exitErr.ExitCode, Stderr: router.CapStderr(exitErr.Stderr),
-				})
-				err = fmt.Errorf("engine module exited %d; its stderr was captured for the operator (run %s, /admin/runs), not returned here", exitErr.ExitCode, runID)
+				rec.ExitCode = exitErr.ExitCode
+				rec.Stderr = router.CapStderr(exitErr.Stderr)
+				safeErr := fmt.Errorf("engine module exited %d; its stderr was captured for the operator (run %s, /admin/runs), not returned here", exitErr.ExitCode, runID)
 				// A rejected query is a statement about text the caller wrote and
 				// already holds, so naming that class discloses nothing the stderr
 				// would. It also wants the opposite advice from a data failure:
@@ -351,26 +366,34 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 					// row values remains impossible in this class by
 					// construction, and runtime failures below stay
 					// operator-only exactly as before.
-					return toolError("reduce: the %q engine rejected the query: %s. Correct the query and retry — this is not a size or complexity limit, so running it as code will not help.", engineName, capQueryDiagnostic(exitErr.Stderr))
+					clientErr = fmt.Sprintf("reduce: the %q engine rejected the query: %s. Correct the query and retry — this is not a size or complexity limit, so running it as code will not help.", engineName, capQueryDiagnostic(exitErr.Stderr))
+				} else if len(payload) >= largeReduceThreshold && engineName == "jq" {
+					clientErr = fmt.Sprintf("reduce: the jq engine failed over ~%s of data (%v). At MB scale jq is the wrong substrate — reformulate as %s.", mbOf(len(payload)), safeErr, s.largeReduceAlt(selfRef))
+				} else {
+					clientErr = fmt.Sprintf("reduce: the %q engine failed (%v). For large data, regex, or complex logic, run it as code instead — reduce(%s, code=<python that reads /app/input>).", engineName, safeErr, selfRef)
 				}
+			} else if len(payload) >= largeReduceThreshold && engineName == "jq" {
+				clientErr = fmt.Sprintf("reduce: the jq engine failed over ~%s of data (%v). At MB scale jq is the wrong substrate — reformulate as %s.", mbOf(len(payload)), err, s.largeReduceAlt(selfRef))
 			}
-			// Turn a dead-end failure into the productive next step. Over a large ref
-			// the likely cause is jq exhausting the engine timeout (or the MCP client's
-			// ~60s call cancellation, since the engine runs synchronously inside the
-			// tool call) on MB-scale data — so make the steer size-aware and concrete.
-			if len(payload) >= largeReduceThreshold && engineName == "jq" {
-				return toolError("reduce: the jq engine failed over ~%s of data (%v). At MB scale jq is the wrong substrate — reformulate as %s.", mbOf(len(payload)), err, s.largeReduceAlt(selfRef))
-			}
-			return toolError("reduce: the %q engine failed (%v). For large data, regex, or complex logic, run it as code instead — reduce(%s, code=<python that reads /app/input>).", engineName, err, selfRef)
+			response := toolError("%s", clientErr)
+			rec.OutputBytes = marshalLen(response)
+			s.putRun(runID, rec)
+			return response
 		}
 		out := s.finalizeReduce(s.budget.Apply(string(summary), user)) // reduce output is owned by its caller
+		response := s.reduceResult(runID, out, s.largeReduceHint(engineName, len(payload)))
+		parkedBytes := 0
+		if out.Reffed {
+			parkedBytes = out.Summary.Bytes
+		}
 		s.putRun(runID, runRecord{
-			Kind: "reduce", SourceID: refLabel, User: user,
+			Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
 			Substrate: "wasm", Engine: engineName, LatencyMs: time.Since(start).Milliseconds(),
-			InputBytes: len(payload), OutputBytes: len(summary),
-			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: out.Summary.Bytes,
+			InputBytes: len(payload), RawBytes: len(summary), ParkedBytes: parkedBytes,
+			OutputBytes: marshalLen(response), ContextMeasured: true,
+			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: parkedBytes,
 		})
-		return s.reduceResult(runID, out, s.largeReduceHint(engineName, len(payload)))
+		return response
 
 	case strings.TrimSpace(in.Code) != "":
 		dec, err := s.runner.Run(ctx, router.Request{
@@ -384,15 +407,23 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			// (bounded) and keep the agent-facing error content-free.
 			var gf *sandbox.GuestFailureError
 			if errors.As(err, &gf) {
+				response := toolError("reduce: the sandbox failed before returning a result. Its console log was captured for the operator (run %s, /admin/runs), not returned here. Retry, or ask the operator to check that run.", runID)
 				s.putRun(runID, runRecord{
-					Kind: "reduce", SourceID: refLabel, User: user,
+					Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
 					Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
-					InputBytes: totalIn, ExitCode: -1,
+					InputBytes: totalIn, OutputBytes: marshalLen(response), ContextMeasured: true, ExitCode: -1,
 					Stderr: router.CapStderr(gf.SerialLog),
 				})
-				return toolError("reduce: the sandbox failed before returning a result. Its console log was captured for the operator (run %s, /admin/runs), not returned here. Retry, or ask the operator to check that run.", runID)
+				return response
 			}
-			return toolError("reduce: %v", err)
+			response := toolError("reduce: %v", err)
+			s.putRun(runID, runRecord{
+				Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
+				Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
+				InputBytes: totalIn, OutputBytes: marshalLen(response), ContextMeasured: true,
+				ExitCode: -1, AuditErr: err.Error(),
+			})
+			return response
 		}
 		outputBytes := len(dec.Inline)
 		if dec.Reffed {
@@ -403,18 +434,27 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			auditErr = dec.AuditErr.Error()
 		}
 		out := s.finalizeReduce(budget.Outcome{Reffed: dec.Reffed, Inline: dec.Inline, Ref: dec.Ref, Summary: dec.Summary})
+		response := s.reduceResult(runID, out, "")
+		if dec.ExitCode != 0 || dec.StartError != "" {
+			response = toolError("%s", classifyReduceFailure(dec.ExitCode, dec.StartError, runID))
+		}
+		parkedBytes := 0
+		if out.Reffed {
+			parkedBytes = out.Summary.Bytes
+		}
 		s.putRun(runID, runRecord{
-			Kind: "reduce", SourceID: refLabel, User: user,
+			Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
 			Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
-			InputBytes: totalIn, OutputBytes: outputBytes,
-			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: out.Summary.Bytes,
+			InputBytes: totalIn, RawBytes: outputBytes, ParkedBytes: parkedBytes,
+			OutputBytes: marshalLen(response), ContextMeasured: true,
+			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: parkedBytes,
 			ExitCode: dec.ExitCode, Stderr: dec.Stderr, StartError: dec.StartError,
 			Audit: dec.Audit, AuditErr: auditErr,
 		})
 		if dec.ExitCode != 0 || dec.StartError != "" {
-			return toolError("%s", classifyReduceFailure(dec.ExitCode, dec.StartError, runID))
+			return response
 		}
-		return s.reduceResult(runID, out, "") // code already handles any size — no advisory
+		return response // code already handles any size — no advisory
 
 	default:
 		return toolError("reduce requires either query+engine (declarative) or code (Python)")

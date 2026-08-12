@@ -4,7 +4,7 @@ description: One MCP connection for every server, with credentials, datasets, an
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-08-12_
 
 microagency is an MCP gateway. Point Claude Code, Claude Desktop, Cursor, or
 any MCP client at it and put your servers behind it; one connection replaces
@@ -28,6 +28,8 @@ the conceptual overview. These pages cover each mechanism:
   sensitive fields in inline results.
 - [The audit chain](audit.md) — the signed, hash-chained log and how to
   verify it.
+- [Measuring context cost](context-metrics.md) — exact schema and response
+  byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](public-mode.md) — remote MCP for the
   Claude/ChatGPT web apps, and sharing one gateway safely.
 - [The security model](security-model.md) — each guarantee and where it is

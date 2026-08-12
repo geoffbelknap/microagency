@@ -79,6 +79,8 @@ Each part of the system has its own page:
   tokenization of sensitive fields in the small results that return inline.
 - [The audit chain](docs/audit.md) — the signed, hash-chained log, the head
   anchor that catches tail truncation, and how to verify.
+- [Measuring context cost](docs/context-metrics.md) — exact schema and response
+  byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
   for the Claude/ChatGPT web apps, the admin/tunnel split, and per-user
   connection ownership.

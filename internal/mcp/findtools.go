@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // find_tools is the one data path that must stay inline — reffing the menu would
@@ -37,11 +38,24 @@ const (
 // description. Keyword match keeps it dependency-free; an embedding ranker can
 // replace the scorer later behind this same tool, without changing the surface.
 func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string]any {
+	start := time.Now()
 	var in struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Query  string `json:"query"`
+		Limit  int    `json:"limit"`
+		TaskID string `json:"task_id"`
 	}
 	_ = json.Unmarshal(args, &in)
+	taskID, err := validateTaskID(in.TaskID)
+	if err != nil {
+		response := toolError("find_tools: %v", err)
+		s.putRun(s.nextRunID(), runRecord{
+			Kind: "discovery", User: principalOf(ctx).Subject,
+			LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
+			OutputBytes: marshalLen(response), ContextMeasured: true,
+			ExitCode: 1, AuditErr: err.Error(),
+		})
+		return response
+	}
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 10 // default
@@ -82,7 +96,8 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		limit = len(hits)
 	}
 	out := make([]map[string]any, 0, limit)
-	total, summarized, omitted := 0, 0, 0
+	total, fullSchemas, schemaDigests, summarized, omitted := 0, 0, 0, 0, 0
+	exactSchemaLookup := false
 	for i := 0; i < limit; i++ {
 		h := hits[i]
 		desc, _ := h.tool["description"].(string)
@@ -109,6 +124,10 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		if i == 0 || total+full <= findToolsFullBudget {
 			total += full
 			out = append(out, entry)
+			fullSchemas++
+			if name, _ := h.tool["name"].(string); strings.EqualFold(strings.TrimSpace(in.Query), name) {
+				exactSchemaLookup = true
+			}
 			continue
 		}
 		// Over the full budget. Beyond the absolute ceiling, drop the rest rather than
@@ -122,6 +141,7 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		entry["truncated"] = true
 		total += marshalLen(entry)
 		out = append(out, entry)
+		schemaDigests++
 		summarized++
 	}
 	result := map[string]any{"tools": out}
@@ -151,7 +171,16 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		}
 		result["note"] = note + " Narrow your query, or call find_tools with a tool's exact name for its full description and inputSchema."
 	}
-	return toolResult(result)
+	response := toolResult(result)
+	s.putRun(s.nextRunID(), runRecord{
+		Kind: "discovery", TaskID: taskID, User: principalOf(ctx).Subject,
+		LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
+		OutputBytes: marshalLen(response), ContextMeasured: true,
+		FullSchemaEntries: fullSchemas, SchemaDigestEntries: schemaDigests,
+		SummarizedEntries: summarized, OmittedEntries: omitted,
+		ExactSchemaLookup: exactSchemaLookup,
+	})
+	return response
 }
 
 // marshalLen is the serialized byte size of v, used to track the running menu size.

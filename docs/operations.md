@@ -68,3 +68,11 @@ deleted by `purge --full`.
 - Whether the microVM runtime can boot a real workload.
 - Enforcement hygiene: any upstream the gateway proxies that a client is
   also wired to directly, bypassing the gateway.
+
+## Metrics
+
+The console's impact view separates tool-schema context from invocation and
+reduction responses. Read the same aggregate data from `GET /admin/metrics`,
+or scrape `GET /admin/metrics/prometheus`; both endpoints require the operator
+token. See [Measuring context cost](context-metrics.md) for exact byte
+semantics, task correlation, privacy boundaries, and the offline baseline.
