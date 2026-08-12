@@ -13,6 +13,10 @@ permissions:
   contents: write
 
 jobs:
+  live-reduce:
+    name: supported-backend-live-validation
+    uses: ./.github/workflows/live-reduce.yml
+
   validate:
     name: release-validation
     runs-on: ubuntu-latest
@@ -41,7 +45,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   release:
-    needs: validate
+    needs: [live-reduce, validate]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

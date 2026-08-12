@@ -22,6 +22,9 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	if spec.Name == "" {
 		return Result{}, fmt.Errorf("sandbox: spec.Name must be non-empty")
 	}
+	if err := workspace.ValidateName(spec.Name); err != nil {
+		return Result{}, fmt.Errorf("sandbox: invalid spec.Name: %w", err)
+	}
 	if spec.Command == "" {
 		return Result{}, fmt.Errorf("sandbox: spec.Command must be non-empty")
 	}
@@ -130,15 +133,35 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 // library contract; the gateway's policy is that sandbox workspaces are
 // disposable by construction.
 func cleanupWorkspace(ctx context.Context, opts workspace.Options, name string) {
+	_ = deleteWorkspace(ctx, opts, name)
+}
+
+// DeleteWorkspace removes one provider-owned workspace and its legacy state
+// path. Live validation uses this only after every assertion succeeds; failed
+// runs remain intact for operator diagnosis.
+func (p MicroagentProvider) DeleteWorkspace(ctx context.Context, name string) error {
+	opts := workspace.DefaultOptions()
+	if p.StateDir != "" {
+		opts.StateDir = p.StateDir
+	}
+	return deleteWorkspace(ctx, opts, name)
+}
+
+func deleteWorkspace(ctx context.Context, opts workspace.Options, name string) error {
+	if err := workspace.ValidateName(name); err != nil {
+		return fmt.Errorf("sandbox: invalid workspace name: %w", err)
+	}
 	delOpts := opts
 	delOpts.Name = name
+	var errs []error
 	if _, err := workspace.Delete(ctx, delOpts, workspace.DeleteOptions{Force: true}); err != nil {
 		if !errors.Is(err, workspace.WorkspaceNotFoundError{}) {
-			// Best-effort: log-worthy at most; the subsequent run reports
-			// anything real.
-			_ = err
+			errs = append(errs, err)
 		}
 	}
 	// Belt and suspenders for the legacy layout the old reset targeted.
-	_ = os.RemoveAll(filepath.Join(opts.StateDir, name))
+	if err := os.RemoveAll(filepath.Join(opts.StateDir, name)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }

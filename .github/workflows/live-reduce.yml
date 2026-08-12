@@ -1,0 +1,178 @@
+name: Live reduce(code)
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-reduce-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-kvm:
+    name: live-reduce-linux-kvm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MICROAGENT_E2E_BACKEND: linux-kvm
+    steps:
+      - name: Checkout microagency
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve pinned microagent
+        id: microagent
+        run: echo "version=$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned microagent
+        uses: actions/checkout@v7
+        with:
+          repository: geoffbelknap/microagent
+          ref: ${{ steps.microagent.outputs.version }}
+          path: .live/microagent
+
+      - name: Prepare Linux KVM host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs nftables passt
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm -a -w /dev/kvm
+
+      - name: Build pinned microagent runtime
+        working-directory: .live/microagent
+        run: |
+          runtime="$RUNNER_TEMP/microagent-live"
+          mkdir -p "$runtime/bin" "$runtime/libexec"
+          go build -buildvcs=false -o "$runtime/bin/microagent" ./cmd/microagent
+          go build -buildvcs=false -o "$runtime/bin/microagent-firecracker-supervisor" ./cmd/microagent-firecracker-supervisor
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -o "$runtime/libexec/microagent-guestinit-amd64" ./cmd/microagent-guestinit
+          echo "$runtime/bin" >> "$GITHUB_PATH"
+          echo "MICROAGENT_FIRECRACKER_SUPERVISOR=$runtime/bin/microagent-firecracker-supervisor" >> "$GITHUB_ENV"
+
+      - name: Install pinned Firecracker and kernel
+        working-directory: .live/microagent
+        run: |
+          source scripts/dev/firecracker-release.env
+          archive="$RUNNER_TEMP/firecracker.tgz"
+          curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${PINNED_FIRECRACKER_VERSION}/firecracker-${PINNED_FIRECRACKER_VERSION}-x86_64.tgz" -o "$archive"
+          echo "$PINNED_FIRECRACKER_SHA256_X86_64  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sudo install "$RUNNER_TEMP/release-${PINNED_FIRECRACKER_VERSION}-x86_64/firecracker-${PINNED_FIRECRACKER_VERSION}-x86_64" /usr/local/bin/firecracker
+          microagent kernel install --backend linux-kvm --arch amd64
+
+      - name: Run live reduce(code)
+        env:
+          MICROAGENCY_LIVE_STATE_DIR: /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}
+          MICROAGENCY_LIVE_ARTIFACT_DIR: ${{ runner.temp }}/microagency-live-artifacts/linux-kvm
+        run: scripts/dev/live-reduce.sh
+
+      - name: Upload live result and bounded failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-reduce-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/microagency-live-artifacts/linux-kvm
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/serial.log
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/result.json
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/egress-audit.jsonl
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/events.jsonl
+
+  apple-vf:
+    name: live-reduce-apple-vf
+    runs-on: [self-hosted, macOS, ARM64, applevf]
+    timeout-minutes: 30
+    env:
+      MICROAGENT_E2E_BACKEND: apple-vf
+    steps:
+      - name: Checkout microagency
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve pinned microagent
+        id: microagent
+        run: echo "version=$(go list -m -f '{{.Version}}' github.com/geoffbelknap/microagent)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned microagent
+        uses: actions/checkout@v7
+        with:
+          repository: geoffbelknap/microagent
+          ref: ${{ steps.microagent.outputs.version }}
+          path: .live/microagent
+
+      - name: Build pinned microagent runtime
+        working-directory: .live/microagent
+        run: |
+          runtime="$RUNNER_TEMP/microagent-live"
+          mkdir -p "$runtime/bin" "$runtime/libexec"
+          go build -buildvcs=false -o "$runtime/bin/microagent" ./cmd/microagent
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o "$runtime/libexec/microagent-guestinit-arm64" ./cmd/microagent-guestinit
+          scripts/dev/applevf-supervisor-build.sh
+          cp supervisors/applevf/.build/release/microagent-applevf-supervisor "$runtime/bin/"
+          echo "$runtime/bin" >> "$GITHUB_PATH"
+          echo "MICROAGENT_APPLEVF_SUPERVISOR=$runtime/bin/microagent-applevf-supervisor" >> "$GITHUB_ENV"
+
+      - name: Verify Apple VF prerequisites
+        run: |
+          test "$(uname -m)" = arm64
+          command -v mke2fs >/dev/null || test -x /opt/homebrew/opt/e2fsprogs/sbin/mke2fs
+          microagent kernel install --backend apple-vf --arch arm64
+
+      - name: Run live reduce(code)
+        env:
+          MICROAGENCY_LIVE_STATE_DIR: /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}
+          MICROAGENCY_LIVE_ARTIFACT_DIR: ${{ runner.temp }}/microagency-live-artifacts/apple-vf
+        run: scripts/dev/live-reduce.sh
+
+      - name: Upload live result and bounded failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-reduce-apple-vf-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/microagency-live-artifacts/apple-vf
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/serial.log
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/result.json
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/egress-audit.jsonl
+            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/events.jsonl
+
+  apple-vf-queue-watchdog:
+    name: report unavailable Apple VF runner
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel a recurring run that cannot reach an Apple VF host
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 300
+          status="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" --jq '.jobs[] | select(.name == "live-reduce-apple-vf") | .status')"
+          if [ "$status" = queued ]; then
+            echo "No Apple VF runner accepted the live job; recording this workflow as unavailable."
+            gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}"
+          else
+            echo "Apple VF job status: ${status:-not found}"
+          fi
