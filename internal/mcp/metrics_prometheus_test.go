@@ -11,6 +11,13 @@ func TestMetricsPrometheusRendering(t *testing.T) {
 	m := MetricsSummary{
 		TotalRuns: 5,
 		Impact:    Impact{Calls: 5, Parked: 2, BytesKeptOut: 1 << 20, EstTokensSaved: 262144, FieldsProtected: 4, ReductionPercent: 87.5},
+		Context: ContextCost{
+			BytesToContext: 900, EstTokensToContext: 225,
+			Discovery:  DiscoveryCost{Calls: 2, ContextBytes: 300, P50LatencyMs: 2},
+			Invocation: InvocationCost{Calls: 2, RawUpstreamBytes: 4000, ParkedBytes: 3500, ContextBytes: 400, P50LatencyMs: 8},
+			Reduction:  ReductionCost{Calls: 1, InputBytes: 3500, RawOutputBytes: 100, ContextBytes: 200, P50LatencyMs: 12},
+			Tasks:      TaskCost{CorrelatedTasks: 1, SchemaEscalations: 1, SeparateInvokeReduceTrips: 1},
+		},
 		BySubstrate: map[string]*SubstrateStats{
 			"wasm": {Runs: 3, P50LatencyMs: 12, InputBytesTotal: 100, OutputBytesTotal: 20},
 		},
@@ -27,10 +34,17 @@ func TestMetricsPrometheusRendering(t *testing.T) {
 		`microagency_substrate_runs{substrate="wasm"} 3`,
 		`microagency_substrate_p50_latency_ms{substrate="wasm"} 12`,
 		`microagency_engine_runs{engine="jq"} 3`,
+		"microagency_context_bytes_total 900",
+		"microagency_invocation_raw_upstream_bytes_total 4000",
+		`microagency_context_stage_p50_latency_ms{stage="discovery"} 2`,
+		"microagency_task_schema_escalations 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("Prometheus output missing %q\n---\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "task_id=") {
+		t.Fatalf("task ids must not become Prometheus labels:\n%s", out)
 	}
 }
 

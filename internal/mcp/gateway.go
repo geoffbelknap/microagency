@@ -494,7 +494,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, out.outBytes, start, out.err, out.outcome, out.egressHost, out.protected, out.extra...)
+	s.recordProxy(ctx, runID, upName, tool, args, out.rawBytes, marshalLen(out.result), out.minimizedBytes, start, out.err, out.outcome, out.egressHost, out.protected, out.extra...)
 	return out.result, true
 }
 
@@ -502,13 +502,14 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 // proxyCall returns it on every path, so the single recordProxy in invokeUpstream
 // can't be bypassed by a new early return.
 type proxyOutcome struct {
-	result     map[string]any
-	outBytes   int
-	err        error
-	outcome    budget.Outcome
-	egressHost string // "" when no egress reached the upstream (a pre-dial refusal)
-	protected  int
-	extra      []sandbox.AuditEvent
+	result         map[string]any
+	rawBytes       int
+	minimizedBytes int
+	err            error
+	outcome        budget.Outcome
+	egressHost     string // "" when no egress reached the upstream (a pre-dial refusal)
+	protected      int
+	extra          []sandbox.AuditEvent
 }
 
 // proxyCall dials the upstream (after the read-only and pre-egress write gates),
@@ -558,11 +559,11 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	}
 	s.recordUpstreamHealth(upName, err) // last-call health, for the operator view
 	if err != nil {
-		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), outBytes: len(res), err: err, egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), rawBytes: len(res), err: err, egressHost: upHost}
 	}
 	var passthrough map[string]any
 	if uerr := json.Unmarshal(res, &passthrough); uerr != nil {
-		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), outBytes: len(res), err: uerr, egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), rawBytes: len(res), err: uerr, egressHost: upHost}
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
 	// Reference-by-default: a large result is held off-context as a handle the agent
@@ -583,7 +584,7 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 		// A truncated / malformed payload is a NOTICE, not data — surface it inline so
 		// the agent reads the guidance instead of parking broken bytes behind a ref.
 		if notice, ok := truncatedNotice(payload); ok {
-			return proxyOutcome{result: truncatedResult(notice), outBytes: len(notice), egressHost: upHost}
+			return proxyOutcome{result: truncatedResult(notice), rawBytes: len(res), egressHost: upHost}
 		}
 		// Gate on the LARGER of the extracted payload and the full upstream result, so
 		// a compact structuredContent beside a large content[].text can't ride inline.
@@ -593,10 +594,10 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 				stored = string(res) // extraction dropped data — ref the full result instead
 			}
 			ref, sum := s.budget.Store.Put(stored, principalOf(ctx).Subject)
-			return proxyOutcome{result: s.refHandleResult(ref, sum, name), outBytes: sum.Bytes, outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
+			return proxyOutcome{result: s.refHandleResult(ref, sum, name), rawBytes: max(len(res), len(stored)), outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
-			return proxyOutcome{result: rehydratedResult(payload), outBytes: len(payload), egressHost: upHost}
+			return proxyOutcome{result: rehydratedResult(payload), rawBytes: len(payload), egressHost: upHost}
 		}
 	}
 	// Tier 2 — on an upstream tool error, append the tool's full description +
@@ -608,11 +609,16 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	// Field-level minimization: scrub sensitive VALUES out of a small inline result
 	// before it enters model context. No-op unless a minimizer and policy are
 	// configured for this upstream. Fails closed.
+	preMinimizeBytes := marshalLen(passthrough)
 	scrubbed, alerts, protected, merr := s.scrubInbound(ctx, upName, tool, passthrough)
 	if merr != nil {
-		return proxyOutcome{result: toolError("upstream %q: field minimization failed; result withheld", upName), err: fmt.Errorf("minimize: %w", merr), egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: field minimization failed; result withheld", upName), rawBytes: len(res), err: fmt.Errorf("minimize: %w", merr), egressHost: upHost}
 	}
-	return proxyOutcome{result: scrubbed, outBytes: len(res), egressHost: upHost, protected: protected, extra: minimizeAlertEvents(alerts)}
+	minimizedBytes := preMinimizeBytes - marshalLen(scrubbed)
+	if minimizedBytes < 0 {
+		minimizedBytes = 0
+	}
+	return proxyOutcome{result: scrubbed, rawBytes: len(res), minimizedBytes: minimizedBytes, egressHost: upHost, protected: protected, extra: minimizeAlertEvents(alerts)}
 }
 
 // fetchOffload retrieves an upstream offload URL host-side through the SSRF-guarded
@@ -663,7 +669,7 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string) ([]byte, error
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, protected int, extra ...sandbox.AuditEvent) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, rawBytes, contextBytes, minimizedBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, protected int, extra ...sandbox.AuditEvent) {
 	exit, auditErr := 0, ""
 	if callErr != nil {
 		exit, auditErr = 1, callErr.Error()
@@ -673,13 +679,22 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: egressHost})
 	}
 	audit = append(audit, extra...) // e.g. minimize_alert events from field minimization
+	parkedBytes := 0
+	if out.Reffed {
+		parkedBytes = out.Summary.Bytes
+	}
 	s.putRun(runID, runRecord{
-		Kind: "proxy", Upstream: upstream, Tool: tool, Args: string(args),
-		User:        principalOf(ctx).Subject,
-		InputBytes:  len(args), // the tool arguments are the call's input payload
-		OutputBytes: outBytes, Bytes: outBytes,
-		LatencyMs: time.Since(start).Milliseconds(),
-		Reffed:    out.Reffed, Ref: string(out.Ref),
+		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: string(args),
+		User:            principalOf(ctx).Subject,
+		InputBytes:      len(args), // the tool arguments are the call's input payload
+		RawBytes:        rawBytes,
+		ParkedBytes:     parkedBytes,
+		MinimizedBytes:  minimizedBytes,
+		OutputBytes:     contextBytes,
+		ContextMeasured: true,
+		Bytes:           parkedBytes,
+		LatencyMs:       time.Since(start).Milliseconds(),
+		Reffed:          out.Reffed, Ref: string(out.Ref),
 		Protected: protected,
 		ExitCode:  exit, AuditErr: auditErr, Audit: audit,
 	})
@@ -744,11 +759,16 @@ func (s *Server) callTool(ctx context.Context, args json.RawMessage) map[string]
 	var in struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		TaskID    string          `json:"task_id"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil || in.Name == "" {
 		return toolError("call_tool requires a tool name; discover tools with find_tools")
 	}
-	if res, ok := s.invokeUpstream(ctx, in.Name, in.Arguments); ok {
+	taskID, err := validateTaskID(in.TaskID)
+	if err != nil {
+		return toolError("call_tool: %v", err)
+	}
+	if res, ok := s.invokeUpstream(withTaskID(ctx, taskID), in.Name, in.Arguments); ok {
 		return res
 	}
 	return toolError("unknown tool %q; discover tools with find_tools", in.Name)

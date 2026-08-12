@@ -6,9 +6,9 @@ description: The signed, hash-chained log every call lands in, and how to verify
 <!-- docs-last-updated -->
 _Last updated: 2026-08-12_
 
-Every run and proxied call is written to an append-only audit log. Each line
-is hash-chained to its predecessor and **signed** (ES256) over that hash
-with a per-gateway key at `~/.microagency/audit-key`.
+Every discovery, proxied call, and reduction is written to an append-only
+audit log. Each line is hash-chained to its predecessor and **signed** (ES256)
+over that hash with a per-gateway key at `~/.microagency/audit-key`.
 
 The signature is what makes the log tamper-evident against someone who can
 write the file. The chain hash is public and recomputable, so a hash chain
