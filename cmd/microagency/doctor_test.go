@@ -3,13 +3,39 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"microagency/internal/secretstore"
 )
+
+func TestReportAuthPostureNamesPublicIssuerResourceAndConsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-posture.json")
+	posture := authPosture{
+		Mode: "oauth-tunnel", Tunnel: "cloudflare",
+		Issuer: "https://gateway.example", Resource: "https://gateway.example/mcp",
+		Audience:  "https://gateway.example/mcp",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	b, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	reportAuthPostureAt(&out, path)
+	for _, want := range []string{"built-in OAuth", "cloudflare", posture.Issuer, posture.Resource, posture.Audience, "loopback operator listener"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("auth posture %q is missing %q", out.String(), want)
+		}
+	}
+}
 
 // doctor reports the secret-store posture so "where are my credentials" has an
 // answer. An external Vault/OpenBao (VAULT_ADDR) is named explicitly.

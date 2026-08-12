@@ -41,11 +41,11 @@ The guarantees, and where each one is enforced:
   digest, byte counts, latency, and outcome under that same run without
   retaining the query or raw result.
 - **Plane separation.** The operator surface (admin API and console) uses
-  its own token — distinct from the agent's `/mcp` bearer, including the
-  tunnel path, which mints a dedicated MCP bearer rather than reusing the
-  operator token — and in public mode it moves to a loopback listener the
-  tunnel never exposes. Neither the credential split nor the network split
-  alone is load-bearing: an agent's bearer can never reach admin.
+  its own token. The public `/mcp` surface accepts audience-bound OAuth
+  access tokens, or a separate user-supplied bearer in compatibility mode.
+  Public consent and all operator routes stay on a loopback listener that
+  the tunnel never exposes. An MCP token cannot authenticate the operator
+  API, and the operator token cannot authenticate `/mcp`.
 
 ## The egress guard
 

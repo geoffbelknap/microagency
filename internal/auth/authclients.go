@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // persistedClient is the on-disk form of one dynamic client registration.
@@ -20,6 +21,7 @@ type persistedClient struct {
 	ClientID     string   `json:"client_id"`
 	RedirectURIs []string `json:"redirect_uris"`
 	Name         string   `json:"name"`
+	Issuer       string   `json:"issuer,omitempty"`
 }
 
 // LoadClients enables client-registration persistence at path and loads any
@@ -39,6 +41,25 @@ func (s *AuthServer) LoadClients(path string) {
 		return
 	}
 	for _, pc := range pcs {
+		if pc.ClientID == "" || len(pc.RedirectURIs) == 0 || len(pc.RedirectURIs) > 8 {
+			continue
+		}
+		// A public tunnel URL is the AS issuer. When an ephemeral URL changes,
+		// registrations from the old issuer are not silently rebound to the new
+		// public origin. Issuer-less records are a legacy local-only format.
+		if pc.Issuer != s.issuer && !(pc.Issuer == "" && strings.HasPrefix(s.issuer, "http://")) {
+			continue
+		}
+		valid := true
+		for _, redirectURI := range pc.RedirectURIs {
+			if !validRedirectURI(redirectURI, s.requireResource) {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
 		s.clients[pc.ClientID] = clientReg{redirectURIs: pc.RedirectURIs, name: pc.Name}
 	}
 }
@@ -51,7 +72,7 @@ func (s *AuthServer) persistClientsLocked() {
 	}
 	pcs := make([]persistedClient, 0, len(s.clients))
 	for id, c := range s.clients {
-		pcs = append(pcs, persistedClient{ClientID: id, RedirectURIs: c.redirectURIs, Name: c.name})
+		pcs = append(pcs, persistedClient{ClientID: id, RedirectURIs: c.redirectURIs, Name: c.name, Issuer: s.issuer})
 	}
 	if err := os.MkdirAll(filepath.Dir(s.clientsPath), 0o700); err != nil {
 		slog.Error("persist oauth clients failed", "err", err)

@@ -131,7 +131,7 @@ func TestAuthServerFullFlow(t *testing.T) {
 
 	// Refresh yields a fresh, valid access token.
 	status, rf := postForm(t, c, ts.URL+"/oauth/token", url.Values{
-		"grant_type": {"refresh_token"}, "refresh_token": {refresh},
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
 	})
 	if status != http.StatusOK {
 		t.Fatalf("refresh = %d (%v)", status, rf)
@@ -172,7 +172,7 @@ func TestRefreshRestampsCurrentSubject(t *testing.T) {
 	as.Subject = "alice"
 
 	status, rf := postForm(t, c, ts.URL+"/oauth/token", url.Values{
-		"grant_type": {"refresh_token"}, "refresh_token": {refresh},
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
 	})
 	if status != http.StatusOK {
 		t.Fatalf("refresh = %d (%v)", status, rf)
@@ -248,7 +248,8 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	// rather than reject it as unknown (400).
 	q := url.Values{
 		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
-		"code_challenge": {"x"}, "code_challenge_method": {"S256"}, "state": {"s"}, "scope": {"mcp"},
+		"code_challenge":        {pkceS256("a-sufficiently-long-pkce-code-verifier-1234567890")},
+		"code_challenge_method": {"S256"}, "state": {"s"}, "scope": {"mcp"},
 	}
 	r, err := c.Get(ts2.URL + "/oauth/authorize?" + q.Encode())
 	if err != nil {
@@ -256,5 +257,37 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	}
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("reloaded server rejected persisted client: authorize = %d, want 200", r.StatusCode)
+	}
+}
+
+func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
+	dir := t.TempDir()
+	signer, err := LoadOrCreateSigner(filepath.Join(dir, "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientsPath := filepath.Join(dir, "oauth-clients.json")
+	as1 := NewAuthServer(signer, "https://first.example", "https://first.example/mcp", time.Hour)
+	as1.LoadClients(clientsPath)
+	mux1 := http.NewServeMux()
+	as1.Register(mux1)
+	ts1 := httptest.NewServer(mux1)
+	defer ts1.Close()
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	clientID := registerClient(t, ts1, c)
+
+	as2 := NewAuthServer(signer, "https://second.example", "https://second.example/mcp", time.Hour)
+	as2.LoadClients(clientsPath)
+	mux2 := http.NewServeMux()
+	as2.Register(mux2)
+	rec := httptest.NewRecorder()
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
+		"code_challenge":        {pkceS256("a-sufficiently-long-pkce-code-verifier-1234567890")},
+		"code_challenge_method": {"S256"}, "state": {"s"}, "scope": {"mcp"},
+	}
+	mux2.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("registration from old issuer was rebound: status=%d", rec.Code)
 	}
 }

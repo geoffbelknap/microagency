@@ -51,6 +51,7 @@ func runDoctor(args []string) {
 		fmt.Fprintf(out, "\n  server            ✗ not running — start it with `microagency up`\n")
 	}
 	reportSecretPosture(out)
+	reportAuthPosture(out)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
 	// query path (filter / count / extract) in-process, no VM.
@@ -142,6 +143,42 @@ func runDoctor(args []string) {
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause))
+}
+
+func reportAuthPosture(out io.Writer) {
+	reportAuthPostureAt(out, authPosturePath())
+}
+
+func reportAuthPostureAt(out io.Writer, path string) {
+	posture, err := readAuthPosture(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(out, "  public auth      ⚠ unreadable posture: %v\n", err)
+		}
+		return
+	}
+	switch posture.Mode {
+	case "oauth-tunnel":
+		fmt.Fprintf(out, "  public auth      built-in OAuth (%s)\n", dash(posture.Tunnel))
+		fmt.Fprintf(out, "    issuer          %s\n", dash(posture.Issuer))
+		fmt.Fprintf(out, "    resource        %s\n", dash(posture.Resource))
+		fmt.Fprintf(out, "    audience        %s\n", dash(posture.Audience))
+		fmt.Fprintln(out, "    consent         loopback operator listener")
+	case "oauth-external":
+		fmt.Fprintf(out, "  public auth      external OAuth (issuer %s)\n", dash(posture.Issuer))
+		if posture.Resource != "" {
+			fmt.Fprintf(out, "    resource        %s\n", posture.Resource)
+		}
+		if posture.Audience != "" {
+			fmt.Fprintf(out, "    audience        %s\n", posture.Audience)
+		}
+	case "bearer":
+		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
+	case "oauth-local":
+		fmt.Fprintln(out, "  public auth      local built-in OAuth")
+	default:
+		fmt.Fprintf(out, "  public auth      ⚠ unknown posture %q\n", posture.Mode)
+	}
 }
 
 // closingVerdict composes the page's rollup sentence, gated on everything the
