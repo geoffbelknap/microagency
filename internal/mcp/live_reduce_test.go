@@ -2,15 +2,21 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"microagency/internal/budget"
+	"microagency/internal/gateway"
 	"microagency/internal/refstore"
 	"microagency/internal/router"
 	"microagency/internal/sandbox"
@@ -72,25 +78,139 @@ print("LIVE_MULTI|" + open("/app/input_1").read() + "|" + open("/app/input_2").r
 	})
 	assertLiveReduceResult(t, multi, "LIVE_MULTI|ALPHA|BETA")
 
+	// A governed program receives only a run-scoped broker endpoint. The broker
+	// performs both paginated calls host-side with the gateway-held credential,
+	// while unrelated guest networking remains denied.
+	const upstreamSecret = "LIVE_HOST_ONLY_CREDENTIAL"
+	var upstreamCalls, authFailures int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+upstreamSecret {
+			atomic.AddInt32(&authFailures, 1)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var request struct {
+			Method string `json:"method"`
+			Params struct {
+				Arguments struct {
+					Page int `json:"page"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "bad JSON", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch request.Method {
+		case "initialize":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"live-program","version":"1"}}}`)
+		case "tools/list":
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"list-records","description":"List one page of records","inputSchema":{"type":"object","properties":{"page":{"type":"integer"}},"required":["page"]},"annotations":{"readOnlyHint":true}}]}}`)
+		case "tools/call":
+			atomic.AddInt32(&upstreamCalls, 1)
+			page := request.Params.Arguments.Page
+			payload := map[string]any{"items": []map[string]any{{"id": "ALPHA", "private": "row-a"}}}
+			switch page {
+			case 1:
+				payload["next"] = 2
+			case 2:
+				payload["items"] = []map[string]any{{"id": "BETA", "private": "row-b"}}
+			default:
+				http.Error(w, "unexpected page", http.StatusBadRequest)
+				return
+			}
+			payloadJSON, _ := json.Marshal(payload)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": 1,
+				"result": map[string]any{"content": []map[string]any{{"type": "text", "text": string(payloadJSON)}}, "isError": false},
+			})
+		default:
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	if err := s.AddUpstream(context.Background(), "live", &gateway.Upstream{
+		Name: "live", URL: upstream.URL, Token: upstreamSecret, Client: upstream.Client(),
+	}); err != nil {
+		t.Fatalf("add live governed-program upstream: %v", err)
+	}
+	program := call(t, s, "reduce", map[string]any{
+		"data": "{}",
+		"code": `import socket
+from microagency import call_tool, find_tools
+
+schemas = find_tools("live__list-records", 5)
+if not any(tool.get("name") == "live__list-records" for tool in schemas.get("tools", [])):
+    raise RuntimeError("granted schema missing")
+rows = []
+page = 1
+while page:
+    result = call_tool("live__list-records", {"page": page})
+    rows.extend(result["items"])
+    page = result.get("next")
+try:
+    with socket.create_connection(("198.51.100.10", 443), timeout=2):
+        pass
+except Exception:
+    pass
+print("LIVE_PROGRAM|" + ",".join(row["id"] for row in rows))`,
+		"program": map[string]any{
+			"allowed_tools": []string{"live__list-records"},
+			"max_calls":     4,
+			"max_bytes":     4096,
+			"max_seconds":   300,
+		},
+	})
+	assertLiveReduceResult(t, program, "LIVE_PROGRAM|ALPHA,BETA")
+	if atomic.LoadInt32(&upstreamCalls) != 2 || atomic.LoadInt32(&authFailures) != 0 {
+		t.Fatalf("governed pagination calls=%d auth_failures=%d", atomic.LoadInt32(&upstreamCalls), atomic.LoadInt32(&authFailures))
+	}
+	if encoded, _ := json.Marshal(program); strings.Contains(string(encoded), upstreamSecret) || strings.Contains(string(encoded), "row-a") || strings.Contains(string(encoded), "row-b") {
+		t.Fatalf("credential or intermediate rows entered model-facing output: %s", encoded)
+	}
+
 	runs := s.RunLog()
-	if len(runs) != 2 {
-		t.Fatalf("live reduce audit records = %d, want 2", len(runs))
-	}
-	if runs[0].Substrate != "microvm" || runs[0].ExitCode != 0 || runs[1].Substrate != "microvm" || runs[1].ExitCode != 0 {
-		t.Fatalf("live reduce run metadata = %+v", runs)
-	}
-	hasDeny := false
-	for _, run := range runs {
-		for _, event := range run.Audit {
-			if strings.Contains(strings.ToLower(event.Event), "deny") &&
-				(strings.Contains(event.Dst, "198.51.100.10") || strings.Contains(event.Host, "198.51.100.10")) {
-				hasDeny = true
-				break
+	reduceRuns := make([]RunInfo, 0, 3)
+	var programRun *RunInfo
+	for i := range runs {
+		run := runs[i]
+		if run.Kind == "reduce" {
+			reduceRuns = append(reduceRuns, run)
+			if len(run.ProgramTools) > 0 {
+				programRun = &runs[i]
 			}
 		}
 	}
-	if !hasDeny {
-		t.Fatalf("%s live reduce did not record the denied destination: %+v", backend, runs)
+	if len(reduceRuns) != 3 {
+		t.Fatalf("live reduce runs = %d, want 3; all records=%+v", len(reduceRuns), runs)
+	}
+	for _, run := range reduceRuns {
+		if run.Substrate != "microvm" || run.ExitCode != 0 {
+			t.Fatalf("live reduce run metadata = %+v", run)
+		}
+	}
+	if programRun == nil || programRun.ProgramCalls != 2 || programRun.ProgramStatus != "completed" {
+		t.Fatalf("governed program audit summary = %+v", programRun)
+	}
+	for _, run := range runs {
+		if run.ParentRunID == programRun.RunID && run.Delivery == "program" && run.OutputBytes != 0 {
+			t.Fatalf("program intermediate counted as model context: %+v", run)
+		}
+	}
+	if encoded, _ := json.Marshal(runs); strings.Contains(string(encoded), upstreamSecret) || strings.Contains(string(encoded), "row-a") || strings.Contains(string(encoded), "row-b") {
+		t.Fatalf("credential or intermediate rows leaked into audit: %s", encoded)
+	}
+	hasProgramDeny := false
+	for _, event := range programRun.Audit {
+		if strings.Contains(strings.ToLower(event.Event), "deny") &&
+			(strings.Contains(event.Dst, "198.51.100.10") || strings.Contains(event.Host, "198.51.100.10")) {
+			hasProgramDeny = true
+			break
+		}
+	}
+	if !hasProgramDeny {
+		t.Fatalf("%s governed program did not record the denied destination: %+v", backend, programRun)
 	}
 	t.Logf("live reduce(code) passed on %s; state=%s", backend, stateDir)
 }

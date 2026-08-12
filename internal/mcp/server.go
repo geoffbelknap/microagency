@@ -157,14 +157,20 @@ type runRecord struct {
 	// Kind is "discovery" (find_tools), "reduce" (an off-context reduction over
 	// a ref), or "proxy" (an aggregated upstream MCP tool call). Proxy records
 	// carry Upstream/Tool/Args; a reduce carries the ref it reduced in SourceID.
-	Kind     string `json:"kind,omitempty"`
-	TaskID   string `json:"task_id,omitempty"` // bounded opaque correlation id; never a metric label
-	SourceID string `json:"source_id,omitempty"`
-	Upstream string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
-	Tool     string `json:"tool,omitempty"`     // proxy: the upstream tool name
-	Args     string `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
-	User     string `json:"user,omitempty"`     // the OAuth sub that ran it
-	Session  string `json:"session,omitempty"`  // per-run SPIFFE identity
+	Kind   string `json:"kind,omitempty"`
+	TaskID string `json:"task_id,omitempty"` // bounded opaque correlation id; never a metric label
+	// ParentRunID correlates a discovery/invocation performed inside a governed
+	// reduce program to the outer microVM run. Delivery="program" means the
+	// response went to that sandbox, not directly into model context.
+	ParentRunID      string `json:"parent_run_id,omitempty"`
+	Delivery         string `json:"delivery,omitempty"`
+	ProgramRequestID string `json:"program_request_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	Upstream         string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
+	Tool             string `json:"tool,omitempty"`     // proxy: the upstream tool name
+	Args             string `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
+	User             string `json:"user,omitempty"`     // the OAuth sub that ran it
+	Session          string `json:"session,omitempty"`  // per-run SPIFFE identity
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.
@@ -201,9 +207,15 @@ type runRecord struct {
 	TransformOutputBytes int    `json:"transform_output_bytes,omitempty"`
 	TransformLatencyMs   int64  `json:"transform_latency_ms,omitempty"`
 	TransformStatus      string `json:"transform_status,omitempty"`
-	Reffed               bool   `json:"reffed"`
-	Ref                  string `json:"ref,omitempty"`
-	Bytes                int    `json:"bytes"`
+	// Program* summarizes the bounded broker attached to an outer reduce run.
+	// Child calls carry ParentRunID/ProgramRequestID instead.
+	ProgramTools  []string `json:"program_tools,omitempty"`
+	ProgramCalls  int      `json:"program_calls,omitempty"`
+	ProgramBytes  int      `json:"program_bytes,omitempty"`
+	ProgramStatus string   `json:"program_status,omitempty"`
+	Reffed        bool     `json:"reffed"`
+	Ref           string   `json:"ref,omitempty"`
+	Bytes         int      `json:"bytes"`
 	// Protected is the count of sensitive field values minimized (redacted or
 	// tokenized) on this proxy call — the field-level minimization impact.
 	Protected int `json:"protected,omitempty"`

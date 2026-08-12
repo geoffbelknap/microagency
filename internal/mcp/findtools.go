@@ -37,6 +37,13 @@ const (
 // call_tool. It ranks the caller-scoped index locally with deterministic exact-name
 // lookup followed by BM25 over names, descriptions, and schema property names.
 func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string]any {
+	return s.findToolsAllowed(ctx, args, nil)
+}
+
+// findToolsAllowed is the same caller-scoped discovery path with an optional
+// run capability filter. Governed programs use it so their in-sandbox schema
+// view cannot exceed the exact names granted by the outer reduce call.
+func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, allowed map[string]struct{}) map[string]any {
 	start := time.Now()
 	var in struct {
 		Query  string `json:"query"`
@@ -63,7 +70,17 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
 	// The index is scoped to the caller: shared connections + the caller's own.
-	indexed := s.indexedTools(principalOf(ctx).Subject)
+	allIndexed := s.indexedTools(principalOf(ctx).Subject)
+	indexed := allIndexed
+	if allowed != nil {
+		indexed = make([]map[string]any, 0, len(allowed))
+		for _, tool := range allIndexed {
+			name, _ := tool["name"].(string)
+			if _, ok := allowed[name]; ok {
+				indexed = append(indexed, tool)
+			}
+		}
+	}
 	hits := rankIndexedTools(in.Query, indexed)
 
 	if limit > len(hits) {
@@ -128,9 +145,11 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		// variations cannot conjure an upstream), while zero matches over a
 		// real index is the agent's cue to vary terms, not to conclude the
 		// capability does not exist.
-		if len(indexed) == 0 {
+		if len(allIndexed) == 0 {
 			result["note"] = "No upstream MCP servers are connected to this gateway yet, so there are no tools to find. " +
 				"This is an operator action, not something to retry: ask the operator to connect servers in the microagency console."
+		} else if allowed != nil && len(indexed) == 0 {
+			result["note"] = "None of this run's granted tools remain available. The gateway may have disabled, revoked, or refreshed a connection after the program started."
 		} else {
 			result["note"] = fmt.Sprintf("0 of %d indexed tools matched %q. The servers are connected and the index is live — "+
 				"vary the keywords (names and descriptions are matched) rather than concluding the capability is missing.",
@@ -146,10 +165,16 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		result["note"] = note + " Narrow your query, or call find_tools with a tool's exact name for its full description and inputSchema."
 	}
 	response := toolResult(result)
+	parentRun, delivery, requestID := programAuditContext(ctx)
+	outputBytes := marshalLen(response)
+	if delivery == "program" {
+		outputBytes = 0 // delivered to the sandbox, not to model context
+	}
 	s.putRun(s.nextRunID(), runRecord{
 		Kind: "discovery", TaskID: taskID, User: principalOf(ctx).Subject,
+		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
 		LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
-		OutputBytes: marshalLen(response), ContextMeasured: true,
+		OutputBytes: outputBytes, ContextMeasured: true,
 		FullSchemaEntries: fullSchemas, SchemaDigestEntries: schemaDigests,
 		SummarizedEntries: summarized, OmittedEntries: omitted,
 		ExactSchemaLookup: exactSchemaLookup,

@@ -75,7 +75,8 @@ Each part of the system has its own page:
   invocation, and index refresh.
 - [Large results and reduce](docs/reduce.md) — reference handles and their
   structural previews, the query engines, the microVM path for real code,
-  and the contract for writing your own engine.
+  the experimental read-only program broker, and the contract for writing
+  your own engine.
 - [Field minimization](docs/field-minimization.md) — redaction and
   tokenization of sensitive fields in the small results that return inline.
 - [The audit chain](docs/audit.md) — the signed, hash-chained log, the head

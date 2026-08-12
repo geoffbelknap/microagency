@@ -606,6 +606,26 @@ type proxyOutcome struct {
 func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, upName, tool, name string, rec upstream, args json.RawMessage) proxyOutcome {
 	upHost := hostFromURL(rec.conn.Endpoint()) // the egress target for calls that reach the upstream
 	spec, haveSpec := findTool(rec.tools, tool)
+	// A governed reduce program carries an exact, immutable per-run allowlist and
+	// is read-only even when the underlying connection permits writes. Enforce
+	// both properties inside the ordinary proxy path so the same owner/enable,
+	// schema, credential, transport, result, and audit machinery remains the
+	// single invocation path. State is reclassified on every call, closing the
+	// validation-to-invocation race if an upstream refresh changes annotations.
+	if policy := programPolicyOf(ctx); policy != nil {
+		if _, allowed := policy.allowed[name]; !allowed {
+			return proxyOutcome{
+				result: toolError("tool %q is not granted to this governed program", name),
+				err:    fmt.Errorf("governed program allowlist refused tool"),
+			}
+		}
+		if !haveSpec || isWriteTool(spec) {
+			return proxyOutcome{
+				result: toolError("governed programs are read-only; tool %q is write/destructive or unclassifiable", name),
+				err:    fmt.Errorf("governed program read-only policy refused tool"),
+			}
+		}
+	}
 	// Read-only gate: a read-only upstream refuses writes (and unclassifiable tools,
 	// which default to write). Enforced OUTSIDE the agent, at the single invocation
 	// gate — the agent can't widen it. No egress happened, so egressHost stays "".
@@ -785,8 +805,13 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 	if out.transformRan {
 		substrate, engine = "wasm", transformEngine
 	}
+	parentRun, delivery, requestID := programAuditContext(ctx)
+	if delivery == "program" {
+		contextBytes = 0 // the raw/intermediate response went to the sandbox only
+	}
 	s.putRun(runID, runRecord{
 		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: string(args),
+		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
 		User:            principalOf(ctx).Subject,
 		InputBytes:      len(args), // the tool arguments are the call's input payload
 		RawBytes:        out.rawBytes,

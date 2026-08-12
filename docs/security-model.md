@@ -39,7 +39,10 @@ The guarantees, and where each one is enforced:
   around the gateway.
 - **Isolation.** Query engines run in WebAssembly modules with no network or
   credential access; Python runs in an isolated microVM that sees only its
-  input data.
+  input data. An experimental governed program may also receive a narrow,
+  run-scoped broker capability. It still receives no credential and has no
+  ambient network access; every brokered read crosses the normal gateway
+  invocation path.
 - **Auditability.** Every proxied call and every reduce run is written to an
   append-only, hash-chained log whose lines are ES256-signed, so an edited,
   inserted, or reordered line is detectable by anyone with the public key —
@@ -58,6 +61,43 @@ The guarantees, and where each one is enforced:
   The public `/connections` account API accepts the MCP principal token but
   cannot route to `/admin`; its unauthenticated provider callback is protected
   by expiring, single-use OAuth state and PKCE.
+
+## Governed-program threat model
+
+File-only `reduce(code)` gives guest code input files and compute, with no
+route back to the gateway. A governed program adds one authority: it may ask
+the host to invoke a fixed set of read-only tools. Treat the supplied Python
+and every upstream response as untrusted.
+
+The added risks are confused-deputy calls, authority widening after a schema
+refresh, cross-user reference access, duplicate calls, resource exhaustion,
+credential disclosure, and using the broker as ambient network access. The
+controls are enforced outside the guest:
+
+- the outer caller supplies exact names, and the gateway validates ownership,
+  enabled state, and read classification before VM boot;
+- the ordinary proxy gate repeats the allowlist and read classification checks
+  immediately before every upstream call;
+- the gateway retains the caller principal and supplies credentials only in
+  its existing upstream transport;
+- references are materialized only after an owner match, and every delivered
+  schema or result counts against the run byte budget;
+- serialized request IDs make exact retries idempotent within the run and
+  reject mismatched replay;
+- call, operation, request-size, byte, and wall-time bounds limit consumption;
+- the broker binds host loopback, is reachable from the guest only through one
+  vsock mapping, uses a random path, and disappears when the run ends; and
+- normal guest egress remains deny-all and is audited by the sandbox.
+
+The residual authority is intentional: granted read tools can expose all data
+their caller and OAuth scopes permit, and program stdout can deliberately
+return selected values to the model. Use the narrowest tool grant and budgets.
+Client cancellation stops the VM and new broker requests, but a read already
+detached into the gateway's ordinary in-flight cache may finish. Disabling or
+revoking a connection quarantines future calls through the normal gate; this
+experimental mode does not yet provide a separate operator control to kill an
+individual in-flight read. That control, explicit approval, cost accounting,
+and retry semantics are prerequisites for any future write-capable mode.
 
 ## The egress guard
 
