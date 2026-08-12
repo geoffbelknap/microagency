@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   live-reduce:
-    name: linux-live-and-apple-contract-validation
+    name: linux-live-validation
     uses: ./.github/workflows/live-reduce.yml
 
   validate:
