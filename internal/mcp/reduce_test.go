@@ -716,7 +716,7 @@ func TestReduceSchemaEncodesTheContract(t *testing.T) {
 	}
 	schema := reduceDef["inputSchema"].(map[string]any)
 	allOf, ok := schema["allOf"].([]map[string]any)
-	if !ok || len(allOf) != 3 {
+	if !ok || len(allOf) != 4 {
 		t.Fatalf("schema allOf missing or wrong arity: %#v", schema["allOf"])
 	}
 	raw, _ := json.Marshal(schema)
@@ -724,6 +724,7 @@ func TestReduceSchemaEncodesTheContract(t *testing.T) {
 		`"oneOf":[{"required":["ref"]},{"required":["refs"]},{"required":["data"]}]`,
 		`"oneOf":[{"required":["query"]},{"required":["code"]}]`,
 		`"if":{"required":["refs"]}`,
+		`"if":{"required":["program"]}`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("schema missing constraint %s:\n%s", want, raw)

@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/geoffbelknap/microagent/pkg/vmkit"
 	"github.com/geoffbelknap/microagent/pkg/workspace"
 )
+
+const tcpVsockListenersEnv = "MICROAGENT_VSOCK_TCP_LISTENERS"
 
 // MicroagentProvider runs a Spec as a microagent microVM. It always enforces
 // deny-all egress (broker mode with a locked, empty allowlist); the caller
@@ -72,6 +79,21 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	// connection). Callers cannot disable it.
 	opts.EgressMode = "mitm"
 	opts.EgressAllowlistLocked = true
+	var hostService *runHostService
+	if spec.HostService != nil {
+		hostService, err = startRunHostService(spec.HostService)
+		if err != nil {
+			return Result{}, err
+		}
+		defer hostService.Close()
+		opts.VsockListeners = append(opts.VsockListeners, vmkit.VsockListener{
+			Port: hostServiceVsockPort, Target: hostService.listener.Addr().String(),
+		})
+		if opts.Env == nil {
+			opts.Env = map[string]string{}
+		}
+		opts.Env[tcpVsockListenersEnv] = strings.TrimPrefix(HostServiceGuestURL, "http://") + "=" + strconv.FormatUint(uint64(hostServiceVsockPort), 10)
+	}
 	opts.Files = []workspace.File{{SourcePath: codeFile, Path: spec.CodePath}}
 	// Optional input payloads (e.g. a reduce over one or more stored references):
 	// inject each as a guest file the script reads. They never leave the sandbox.
@@ -126,6 +148,39 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 		}
 	}
 	return out, nil
+}
+
+// runHostService owns the host-loopback listener for one sandbox run. The
+// microagent supervisor splices only that exact address to the configured vsock
+// port; Close makes the capability disappear when the run finishes.
+type runHostService struct {
+	listener net.Listener
+	server   *http.Server
+}
+
+func startRunHostService(handler http.Handler) (*runHostService, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: listen for run-scoped host service: %w", err)
+	}
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+	service := &runHostService{listener: listener, server: server}
+	go func() { _ = server.Serve(listener) }()
+	return service, nil
+}
+
+func (s *runHostService) Close() {
+	if s == nil {
+		return
+	}
+	_ = s.server.Close()
 }
 
 // cleanupWorkspace removes one sandbox workspace via the public library

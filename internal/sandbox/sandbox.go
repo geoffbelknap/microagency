@@ -8,6 +8,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -15,13 +16,19 @@ import (
 // egress with no allowlist — deny-all, compute-only; callers no longer supply an
 // egress allowlist or a cred-swap config.
 type Spec struct {
-	Name     string        // workspace name (must be non-empty)
-	Image    string        // OCI image ref
-	Code     string        // script source, written into the guest
-	CodePath string        // absolute guest path for the script
-	Command  string        // exec command, e.g. "python /app/run.py"
-	Inputs   []Input       // optional payload files made available to the guest (read-only)
-	Timeout  time.Duration // 0 uses the provider default
+	Name     string  // workspace name (must be non-empty)
+	Image    string  // OCI image ref
+	Code     string  // script source, written into the guest
+	CodePath string  // absolute guest path for the script
+	Command  string  // exec command, e.g. "python /app/run.py"
+	Inputs   []Input // optional payload files made available to the guest (read-only)
+	// HostService is an optional run-scoped HTTP capability exposed to the guest
+	// only through a loopback-to-vsock bridge. The provider binds it on host
+	// loopback, tears it down with the run, and leaves normal guest egress denied.
+	// The handler decides the application protocol and authorization; no ambient
+	// host network or upstream credential is delivered into the guest.
+	HostService http.Handler
+	Timeout     time.Duration // 0 uses the provider default
 }
 
 // Input is a read-only payload file made available to the guest at Path — a
@@ -80,6 +87,11 @@ func (e *GuestFailureError) Error() string {
 const (
 	ReduceImage    = "docker.io/library/python:3.13-slim"
 	ReduceCodePath = "/app/run.py"
+	// HostServiceGuestURL is the fixed guest-loopback endpoint for Spec.HostService.
+	// The host side binds an ephemeral loopback port; this address is only the
+	// in-guest end of microagent's vsock bridge.
+	HostServiceGuestURL         = "http://127.0.0.1:18887"
+	hostServiceVsockPort uint32 = 62110
 )
 
 type Provider interface {

@@ -21,6 +21,16 @@ Verify from the console, under Activity → verify audit chain, or with
 `GET /admin/audit/verify`. It reports lines checked, how many were chained
 and signed, and the first break.
 
+Governed programs keep the same per-call records. Each brokered discovery and
+proxy call has `delivery: "program"`, the outer reduce's `parent_run_id`, and
+its run-scoped `program_request_id`. Because those results went to the
+sandbox rather than the model, their `output_bytes` contribution to context
+is zero; raw, parked, and minimized byte accounting remains on the proxy
+record. The outer reduce record summarizes `program_tools`, `program_calls`,
+`program_bytes`, and `program_status`. Replay decisions and pre-egress policy
+denials are separate child records under the same parent. The broker
+capability path, credentials, and intermediate result bodies are not logged.
+
 ## Tail truncation and the head anchor
 
 Deleting the last N lines leaves a validly signed prefix, which the in-file

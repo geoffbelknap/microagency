@@ -77,16 +77,27 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "reduce",
-			"description": "Compute over stored result references OR small inline data, off-context, returning only the result. Inputs (choose one): `ref` (one <ref_> handle from a large tool result), `refs` (several — to JOIN/correlate/diff across multiple large results), or `data` (small inline JSON/text you already have). Then EITHER a `query` (a declarative reduction over a SINGLE input — you need not name the `engine`, it's inferred) OR `code` (Python that reads the input from /app/input, or /app/input_1..N when you passed multiple refs, and prints the result). Use `data` for EXACT DETERMINISTIC work the model is unreliable at even when the data is small and already in context — exact/big-number arithmetic, money-precision decimals, date & timezone math, unit conversions, hashing/encoding, parsing — do it here deterministically, don't compute it in your head. Use `ref`/`refs` to shape or combine large results without pulling them into context (a large reduction is itself returned as a new reference). Pick the engine by shape: sql for tabular/aggregate work, jq for structured JSON; multiple inputs, large data, regex, or non-trivial logic → code.",
+			"description": "Compute over stored result references OR small inline data, off-context, returning only the result. Inputs (choose one): `ref` (one <ref_> handle from a large tool result), `refs` (several — to JOIN/correlate/diff across multiple large results), or `data` (small inline JSON/text you already have). Then EITHER a `query` (a declarative reduction over a SINGLE input — you need not name the `engine`, it's inferred) OR `code` (Python that reads the input from /app/input, or /app/input_1..N when you passed multiple refs, and prints the result). Code may optionally declare a bounded, read-only `program` grant and import `find_tools` / `call_tool` from the generated `microagency` module; intermediate tool results stay inside the deny-egress sandbox and only printed output returns. Use `data` for EXACT DETERMINISTIC work the model is unreliable at even when the data is small and already in context — exact/big-number arithmetic, money-precision decimals, date & timezone math, unit conversions, hashing/encoding, parsing — do it here deterministically, don't compute it in your head. Use `ref`/`refs` to shape or combine large results without pulling them into context (a large reduction is itself returned as a new reference). Pick the engine by shape: sql for tabular/aggregate work, jq for structured JSON; multiple inputs, large data, regex, or non-trivial logic → code.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"ref":     strProp("a reference handle like <ref_3> from a prior result"),
-					"refs":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
-					"data":    strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
-					"query":   strProp("a declarative reduction over a single input (sql/jq/text/html)"),
-					"engine":  strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
-					"code":    strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
+					"ref":    strProp("a reference handle like <ref_3> from a prior result"),
+					"refs":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "several reference handles to combine with code; read at /app/input_1..N in guest order"},
+					"data":   strProp("small inline JSON/text to compute over exactly — for deterministic ops (hash, date/timezone math, unit conversion, exact arithmetic, parsing); large data should be a reference instead"),
+					"query":  strProp("a declarative reduction over a single input (sql/jq/text/html)"),
+					"engine": strProp("optional query language: sql | jq | text | html — inferred from the query if omitted"),
+					"code":   strProp("Python that reads the input from /app/input (or /app/input_1..N for multiple refs) and prints the result; required to combine several refs"),
+					"program": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"description": "optional run-scoped read-only tool broker for code; credentials stay in the gateway and ambient guest egress remains denied",
+						"properties": map[string]any{
+							"allowed_tools": map[string]any{"type": "array", "minItems": 1, "maxItems": maxProgramTools, "uniqueItems": true, "items": map[string]any{"type": "string"}, "description": "exact read-only names returned by find_tools"},
+							"max_calls":     map[string]any{"type": "integer", "minimum": 1, "maximum": maxProgramCalls, "description": "total upstream calls (default 16)"},
+							"max_bytes":     map[string]any{"type": "integer", "minimum": 1, "maximum": maxProgramBytes, "description": "total schema/result bytes delivered inside the sandbox (default 16 MiB)"},
+							"max_seconds":   map[string]any{"type": "integer", "minimum": 1, "maximum": maxProgramSeconds, "description": "whole sandbox run deadline, including boot (default 300)"},
+						},
+						"required": []string{"allowed_tools"},
+					},
 					"task_id": taskProp,
 				},
 				// The contract, machine-checkable instead of prose-only: exactly
@@ -107,6 +118,8 @@ func toolDefs() []map[string]any {
 						{"required": []string{"code"}},
 					}},
 					{"if": map[string]any{"required": []string{"refs"}},
+						"then": map[string]any{"required": []string{"code"}}},
+					{"if": map[string]any{"required": []string{"program"}},
 						"then": map[string]any{"required": []string{"code"}}},
 				},
 			},
@@ -244,13 +257,14 @@ func (s *Server) finalizeReduce(out budget.Outcome) budget.Outcome {
 
 func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]any {
 	var in struct {
-		Ref    string   `json:"ref"`
-		Refs   []string `json:"refs"`
-		Data   string   `json:"data"`
-		Query  string   `json:"query"`
-		Engine string   `json:"engine"`
-		Code   string   `json:"code"`
-		TaskID string   `json:"task_id"`
+		Ref     string         `json:"ref"`
+		Refs    []string       `json:"refs"`
+		Data    string         `json:"data"`
+		Query   string         `json:"query"`
+		Engine  string         `json:"engine"`
+		Code    string         `json:"code"`
+		Program *programConfig `json:"program"`
+		TaskID  string         `json:"task_id"`
 	}
 	_ = json.Unmarshal(args, &in)
 	taskID, err := validateTaskID(in.TaskID)
@@ -275,6 +289,9 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 	}
 	if strings.TrimSpace(in.Query) != "" && strings.TrimSpace(in.Code) != "" {
 		return toolError("reduce: give a query (declarative engine) OR code (Python), not both")
+	}
+	if in.Program != nil && strings.TrimSpace(in.Code) == "" {
+		return toolError("reduce: program requires code (Python); declarative query engines do not invoke tools")
 	}
 	var payloads []string
 	var refLabel string
@@ -405,11 +422,36 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 		return response
 
 	case strings.TrimSpace(in.Code) != "":
-		dec, err := s.runner.Run(ctx, router.Request{
+		runCtx := ctx
+		inputs := reduceInputs(payloads)
+		var broker *programBroker
+		var cancelProgram context.CancelFunc
+		if in.Program != nil {
+			broker, cancelProgram, err = s.newProgramBroker(ctx, runID, taskID, *in.Program)
+			if err != nil {
+				response := toolError("reduce: %v", err)
+				s.putRun(runID, runRecord{
+					Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
+					Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
+					InputBytes: totalIn, OutputBytes: marshalLen(response), ContextMeasured: true,
+					ExitCode: -1, AuditErr: err.Error(), ProgramStatus: "rejected",
+				})
+				return response
+			}
+			defer cancelProgram()
+			runCtx = broker.ctx
+			inputs = append(inputs, broker.SDKInput())
+		}
+		dec, err := s.runner.Run(runCtx, router.Request{
 			Name: "reduce-" + runID, Code: in.Code,
-			Inputs: reduceInputs(payloads),
-			Owner:  user, // the microVM reduce output ref is bound to its caller
+			Inputs:      inputs,
+			Owner:       user, // the microVM reduce output ref is bound to its caller
+			HostService: broker,
 		})
+		stats := programStats{}
+		if broker != nil {
+			stats = broker.Stats()
+		}
 		if err != nil {
 			// A guest failure carries the VM console log, which tees guest output and
 			// can echo the input data — RELOCATE it to the operator's audit record
@@ -421,7 +463,8 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 					Kind: "reduce", TaskID: taskID, SourceID: refLabel, User: user,
 					Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
 					InputBytes: totalIn, OutputBytes: marshalLen(response), ContextMeasured: true, ExitCode: -1,
-					Stderr: router.CapStderr(gf.SerialLog),
+					Stderr:       router.CapStderr(gf.SerialLog),
+					ProgramTools: stats.Tools, ProgramCalls: stats.Calls, ProgramBytes: stats.Bytes, ProgramStatus: stats.Status,
 				})
 				return response
 			}
@@ -431,6 +474,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 				Substrate: "microvm", LatencyMs: time.Since(start).Milliseconds(),
 				InputBytes: totalIn, OutputBytes: marshalLen(response), ContextMeasured: true,
 				ExitCode: -1, AuditErr: err.Error(),
+				ProgramTools: stats.Tools, ProgramCalls: stats.Calls, ProgramBytes: stats.Bytes, ProgramStatus: stats.Status,
 			})
 			return response
 		}
@@ -459,6 +503,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			Reffed: out.Reffed, Ref: string(out.Ref), Bytes: parkedBytes,
 			ExitCode: dec.ExitCode, Stderr: dec.Stderr, StartError: dec.StartError,
 			Audit: dec.Audit, AuditErr: auditErr,
+			ProgramTools: stats.Tools, ProgramCalls: stats.Calls, ProgramBytes: stats.Bytes, ProgramStatus: stats.Status,
 		})
 		if dec.ExitCode != 0 || dec.StartError != "" {
 			return response

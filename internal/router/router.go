@@ -8,6 +8,7 @@ package router
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ type Request struct {
 	Name   string
 	Code   string
 	Inputs []sandbox.Input // optional payload files (e.g. /app/input, or /app/input_1..N)
+	// HostService is an optional run-scoped capability transported over the
+	// sandbox's guest-loopback vsock bridge. The sandbox retains deny-all egress.
+	HostService http.Handler
 	// Owner is the subject the result ref is bound to, so only that principal can
 	// reduce over it later. "" for a single-principal deployment.
 	Owner string
@@ -91,13 +95,14 @@ func (r Router) Run(ctx context.Context, req Request) (Decision, error) {
 	}
 
 	res, err := r.Provider.Run(ctx, sandbox.Spec{
-		Name:     req.Name,
-		Image:    r.Image,
-		Code:     req.Code,
-		CodePath: r.CodePath,
-		Command:  "python " + r.CodePath,
-		Inputs:   req.Inputs,
-		Timeout:  r.Timeout,
+		Name:        req.Name,
+		Image:       r.Image,
+		Code:        req.Code,
+		CodePath:    r.CodePath,
+		Command:     "python " + r.CodePath,
+		Inputs:      req.Inputs,
+		HostService: req.HostService,
+		Timeout:     r.Timeout,
 	})
 	if err != nil {
 		return Decision{}, err

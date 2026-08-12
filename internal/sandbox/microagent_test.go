@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,6 +43,35 @@ func requireVM(t *testing.T) {
 }
 
 const pyImage = "docker.io/library/python:3.13-slim"
+
+func TestRunHostServiceBindsLoopbackAndCloses(t *testing.T) {
+	service, err := startRunHostService(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "host-service-ok")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := service.listener.Addr().String()
+	if !strings.HasPrefix(address, "127.0.0.1:") {
+		service.Close()
+		t.Fatalf("run host service bound beyond loopback: %q", address)
+	}
+	response, err := http.Get("http://" + address)
+	if err != nil {
+		service.Close()
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil || string(body) != "host-service-ok" {
+		service.Close()
+		t.Fatalf("host service response = %q, err=%v", body, readErr)
+	}
+	service.Close()
+	if _, err := http.Get("http://" + address); err == nil {
+		t.Fatal("run host service still accepted connections after close")
+	}
+}
 
 func TestProviderRejectsUnsafeNameBeforeCleanup(t *testing.T) {
 	stateDir := t.TempDir()

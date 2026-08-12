@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -43,6 +44,29 @@ type fakeProvider struct{ result sandbox.Result }
 
 func (f fakeProvider) Run(_ context.Context, _ sandbox.Spec) (sandbox.Result, error) {
 	return f.result, nil
+}
+
+type captureProvider struct{ spec sandbox.Spec }
+
+func (p *captureProvider) Run(_ context.Context, spec sandbox.Spec) (sandbox.Result, error) {
+	p.spec = spec
+	return sandbox.Result{Stdout: "ok"}, nil
+}
+
+func TestRouterPassesRunScopedHostService(t *testing.T) {
+	provider := &captureProvider{}
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	r := Router{
+		Provider: provider,
+		Gate:     budget.Gate{MaxBytes: 4096, Store: refstore.NewMemStore()},
+		CodePath: "/app/run.py",
+	}
+	if _, err := r.Run(context.Background(), Request{Name: "host-service", Code: "print(1)", HostService: handler}); err != nil {
+		t.Fatal(err)
+	}
+	if provider.spec.HostService == nil {
+		t.Fatal("router dropped the run-scoped host service")
+	}
 }
 
 // TestRouterPropagatesAuditErrAndCapsStderr verifies two properties without a VM:
