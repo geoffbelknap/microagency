@@ -94,6 +94,8 @@ func main() {
 		runOpenBao(args[1:])
 	case "hook":
 		runHook(args[1:])
+	case "mediation":
+		runMediation(args[1:])
 	default:
 		// The usage dump never named the input, so "doctr" got 20 lines with
 		// zero occurrences of "doctr" and no suggestion — while an unknown
@@ -111,7 +113,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -181,6 +183,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency doctor        check runtime + engine health")
 	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
+	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
 	fmt.Fprintln(w, "")
 	upFlags(w)
 }

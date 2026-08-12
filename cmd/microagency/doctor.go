@@ -14,6 +14,7 @@ import (
 
 	"microagency/internal/baomanager"
 	"microagency/internal/mcp"
+	"microagency/internal/mediation"
 	"microagency/internal/sandbox"
 	"microagency/internal/secretstore"
 )
@@ -87,6 +88,7 @@ func runDoctor(args []string) {
 	// Enforcement hygiene: warn about any upstream reachable BOTH through microagency
 	// AND directly from the local client (a back door around the governed well).
 	bypassWarnings := reportBypasses(out)
+	mediationReady, mediationClause := reportMediation(out, mediation.Inspect(microagencyDir()))
 
 	fmt.Fprintln(out)
 	runtimeHealthy := false
@@ -142,7 +144,7 @@ func runDoctor(args []string) {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause))
+	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause, mediationReady, mediationClause))
 }
 
 func reportAuthPosture(out io.Writer) {
@@ -186,18 +188,44 @@ func reportAuthPostureAt(out io.Writer, path string) {
 // end-to-end probe. It exists so a dead server can never sit above an ending
 // that reads green — the closing sentence answers for the whole page or it
 // does not claim readiness.
-func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string) string {
+func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string, mediationReady bool, mediationClause string) string {
 	switch {
 	case !serverUp:
-		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), and %s.", runtimeClause)
+		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), %s, and %s.", runtimeClause, mediationClause)
 	case bypassWarnings == 1:
 		return fmt.Sprintf("The server is running and %s, but one upstream is reachable around the gateway — remove the direct entry above so every call is governed and audited.", runtimeClause)
 	case bypassWarnings > 1:
 		return fmt.Sprintf("The server is running and %s, but %d upstreams are reachable around the gateway — remove the direct entries above so every call is governed and audited.", runtimeClause, bypassWarnings)
+	case !mediationReady:
+		return fmt.Sprintf("The server is running and %s, but %s.", runtimeClause, mediationClause)
 	case runtimeHealthy:
-		return fmt.Sprintf("microagency is ready: the server is running, and %s.", runtimeClause)
+		return fmt.Sprintf("microagency is ready: the server is running, %s, and %s.", runtimeClause, mediationClause)
 	default:
-		return fmt.Sprintf("The server is running, but %s.", runtimeClause)
+		return fmt.Sprintf("The server is running, but %s; %s.", runtimeClause, mediationClause)
+	}
+}
+
+func reportMediation(out io.Writer, status mediation.Status) (bool, string) {
+	fmt.Fprintf(out, "\n  direct mediation %s (%s)\n", status.Mode, status.State)
+	if status.Workspace != "" {
+		fmt.Fprintf(out, "    workspace       %s (%s)\n", status.Workspace, dash(status.WorkspaceState))
+		fmt.Fprintf(out, "    gateway         %s\n", status.GatewayURL)
+	}
+	if status.Reason != "" {
+		fmt.Fprintf(out, "    detail          %s\n", status.Reason)
+	}
+	if len(status.Uncovered) > 0 {
+		fmt.Fprintf(out, "    uncovered       %s\n", strings.Join(status.Uncovered, ", "))
+	}
+	switch status.State {
+	case "enforced":
+		return true, "direct upstreams are denied in the bound workspace"
+	case "configured":
+		return true, "the bound workspace policy is configured and fails closed when started"
+	case "advisory":
+		return true, "direct-upstream checks are advisory for local and unbound clients"
+	default:
+		return false, "enforced workspace mediation is " + status.State
 	}
 }
 

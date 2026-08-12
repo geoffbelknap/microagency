@@ -3,6 +3,7 @@ package mcp
 import (
 	"net/url"
 	"sort"
+	"strings"
 )
 
 // EgressPolicy is the computed set of governed data hosts: the single source of
@@ -72,8 +73,8 @@ func (s *Server) EgressPolicy() EgressPolicy {
 // so a malformed registration never widens the allowlist.
 func upstreamHost(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
-	return u.Hostname()
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(u.Hostname()), "."))
 }

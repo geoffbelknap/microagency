@@ -141,6 +141,15 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("GET /admin/infra", g(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, s.InfraStatus(r.Context())) }))
 	mux.HandleFunc("GET /admin/upstreams", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.UpstreamList()) }))
 	mux.HandleFunc("GET /admin/egress-policy", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.EgressPolicy()) }))
+	mux.HandleFunc("GET /admin/mediation", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.MediationStatus()) }))
+	mux.HandleFunc("GET /admin/mediation/denials", g(func(w http.ResponseWriter, _ *http.Request) {
+		denials, err := s.MediationDenials()
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, denials)
+	}))
 	mux.HandleFunc("POST /admin/upstreams", g(s.adminAddUpstream))
 	// The OAuth callback is a browser redirect from the upstream — no operator token;
 	// it is protected by the unguessable state + PKCE, not the admin bearer.

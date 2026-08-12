@@ -177,18 +177,20 @@ func TestClosingVerdictGatesOnWholePage(t *testing.T) {
 		serverUp       bool
 		bypassWarnings int
 		runtimeHealthy bool
+		mediationReady bool
 		wantContains   string
 		wantNotReady   bool
 	}{
-		{"all green claims ready", true, 0, true, "microagency is ready", false},
-		{"dead server never reads green", false, 0, true, "The gateway is not ready", true},
-		{"back door blocks the ready claim", true, 1, true, "reachable around the gateway", true},
-		{"multiple back doors are counted", true, 3, true, "3 upstreams", true},
-		{"unhealthy runtime blocks the ready claim", true, 0, false, "The server is running, but", true},
+		{"all green claims ready", true, 0, true, true, "microagency is ready", false},
+		{"dead server never reads green", false, 0, true, true, "The gateway is not ready", true},
+		{"back door blocks the ready claim", true, 1, true, true, "reachable around the gateway", true},
+		{"multiple back doors are counted", true, 3, true, true, "3 upstreams", true},
+		{"unhealthy runtime blocks the ready claim", true, 0, false, true, "The server is running, but", true},
+		{"degraded mediation blocks ready", true, 0, true, false, "mediation is degraded", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := closingVerdict(tt.serverUp, tt.bypassWarnings, tt.runtimeHealthy, healthy)
+			got := closingVerdict(tt.serverUp, tt.bypassWarnings, tt.runtimeHealthy, healthy, tt.mediationReady, "enforced workspace mediation is degraded")
 			if !strings.Contains(got, tt.wantContains) {
 				t.Errorf("verdict %q should contain %q", got, tt.wantContains)
 			}
