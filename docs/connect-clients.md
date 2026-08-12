@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-31_
+_Last updated: 2026-08-12_
 
 ## Built-in OAuth (the default)
 
@@ -28,15 +28,34 @@ The upstream secrets microagency holds — OAuth refresh tokens, static
 bearers, stored client registrations — go in a secret store, not the
 plaintext registration index. On startup `up` picks one:
 
-- If `VAULT_ADDR` (and `VAULT_TOKEN`) are set, it uses that Vault/OpenBao.
+- If `VAULT_ADDR` and `VAULT_TOKEN` are set, it uses that Vault/OpenBao. Both
+  are required; a partial configuration fails startup.
 - Otherwise, if an `openbao`/`bao` binary is on your PATH, `up` starts a
   dedicated OpenBao on `127.0.0.1:8200`, stores its unseal key and root
   token under `~/.microagency/openbao/` (0600), and uses its KV-v2 engine.
   `restart` keeps this OpenBao up; `down` stops it.
-- If neither is available, it falls back to an encrypted-at-rest **file
-  store** under `~/.microagency`. The startup log records which posture you
-  got (watch for it in `~/.microagency/microagency.log` when running
-  backgrounded), so you can tell where your secrets actually are.
+- If neither is available, it falls back to a mode-0600 **plaintext file** at
+  `~/.microagency/upstream-tokens.json`. This is permission isolation, not
+  encryption at rest, and both the startup log and `doctor` report it as
+  degraded.
+
+To encrypt that fallback, supply a separate 32-byte key file outside
+`~/.microagency`:
+
+```sh
+install -d -m 700 ~/.config/microagency
+openssl rand 32 > ~/.config/microagency/secret-store.key
+chmod 600 ~/.config/microagency/secret-store.key
+export MICROAGENCY_SECRET_KEY_FILE=~/.config/microagency/secret-store.key
+microagency up
+```
+
+The encrypted file uses AES-256-GCM. On first startup with the key, microagency
+migrates an existing plaintext `upstream-tokens.json` through a mode-0600
+temporary ciphertext file and an atomic rename. It refuses a key inside
+`~/.microagency`, a key accessible to group or other users, a wrong key, or a
+restart without the configured key. Back up the key separately: losing it makes
+the encrypted credentials unrecoverable.
 
 The managed OpenBao runs with `tls_disable` on the loopback bind (it never
 leaves localhost). Auto-unseal via a system keychain/KMS is a hardening

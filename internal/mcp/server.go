@@ -58,7 +58,8 @@ type Server struct {
 	upstreamClient *http.Client
 
 	// secrets persists acquired credentials (upstream OAuth refresh tokens) in
-	// OpenBao/Vault or a 0600 file. nil = not persisted (in-memory only).
+	// OpenBao/Vault, an encrypted file with a separately held key, or an explicit
+	// degraded mode-0600 plaintext fallback. nil = not persisted (in-memory only).
 	secrets secretstore.Store
 	// stateDir holds non-secret persisted state (the upstream registrations index),
 	// so OAuth upstreams survive a restart. "" = not persisted.
@@ -211,7 +212,7 @@ func NewServer(r Runner, opts ...Option) *Server {
 }
 
 // WithSecretStore installs the store that persists acquired credentials (upstream
-// OAuth refresh tokens) — OpenBao/Vault when configured, else a 0600 file.
+// OAuth refresh tokens).
 func WithSecretStore(s2 secretstore.Store) Option { return func(s *Server) { s.secrets = s2 } }
 
 // WithStateDir sets the directory for non-secret persisted state (the upstream

@@ -351,11 +351,12 @@ func run(args []string) {
 
 	// OpenBao is a managed dependency: bring up microagency's own instance (or use
 	// an external one via VAULT_ADDR) and point the secret store at it. stdio
-	// doesn't aggregate upstreams, so it skips this. If Bao can't come up, fall back
-	// to the local file store rather than failing the whole server.
+	// doesn't aggregate upstreams, so it skips this. If Bao can't come up, the
+	// server builder selects the configured local posture: operator-key encrypted,
+	// or an explicitly degraded mode-0600 plaintext fallback.
 	if !stdio {
 		if addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv); err != nil {
-			slog.Warn("OpenBao unavailable; using the local file store", "err", err)
+			slog.Warn("OpenBao unavailable; evaluating the configured local credential-store fallback", "err", err)
 		} else {
 			_ = os.Setenv("VAULT_ADDR", addr)
 			_ = os.Setenv("VAULT_TOKEN", vaultTok)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"microagency/internal/router"
+	"microagency/internal/secretstore"
 )
 
 // fakeRunner returns a canned Decision without booting a VM.
@@ -21,6 +22,15 @@ func (f fakeRunner) Run(ctx context.Context, req router.Request) (router.Decisio
 func newTestServer(t *testing.T, r Runner, opts ...Option) *Server {
 	t.Helper()
 	return NewServer(r, opts...)
+}
+
+func openTestSecretStore(t *testing.T, dir string) secretstore.Store {
+	t.Helper()
+	s, err := secretstore.Open(dir, func(string) string { return "" }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // call drives one tools/call through Handle and returns the parsed tool result.

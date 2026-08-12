@@ -1,14 +1,20 @@
 // Package secretstore persists the small secrets microagency *acquires* — OAuth
-// refresh-token records for aggregated upstreams — OUTSIDE microagency: in
-// OpenBao/Vault (KV v2) when configured, otherwise a 0600 file. When a vault is
-// present microagency holds no durable secret itself; it reads the refresh token
-// only to mint a fresh access token. (This is the write side; microagent's secret
-// resolver is the read side for operator-placed `vault:` refs.)
+// refresh-token records for aggregated upstreams — in OpenBao/Vault (KV v2) when
+// configured, otherwise in a local file. The local file is encrypted only when an
+// operator supplies a separately held key; without one it is an explicitly
+// degraded, mode-0600 plaintext fallback. When a vault is present microagency
+// holds no durable secret itself; it reads the refresh token only to mint a fresh
+// access token. (This is the write side; microagent's secret resolver is the read
+// side for operator-placed `vault:` refs.)
 package secretstore
 
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,31 +26,69 @@ import (
 	"sync"
 )
 
+const (
+	// FileKeyEnv names the operator-supplied key-file setting for the encrypted
+	// fallback. The key file must live outside microagency's state directory so
+	// copying that directory alone never copies both ciphertext and key.
+	FileKeyEnv = "MICROAGENCY_SECRET_KEY_FILE"
+
+	fileFormat = "microagency-secretstore-v1"
+	fileCipher = "AES-256-GCM"
+)
+
 // ErrNotFound is returned by Load when the key is absent.
 var ErrNotFound = errors.New("secretstore: not found")
+
+// ErrKeyRequired means an encrypted fallback exists but no decryption key was
+// configured. It is deliberately distinct from ErrNotFound: startup must not
+// silently replace an encrypted posture with plaintext after a restart.
+var ErrKeyRequired = errors.New("secretstore: encrypted file exists but no key is configured")
 
 // Store persists secret blobs by key.
 type Store interface {
 	Save(ctx context.Context, key string, value []byte) error
 	Load(ctx context.Context, key string) ([]byte, error) // ErrNotFound if absent
 	Delete(ctx context.Context, key string) error
-	Kind() string // "vault" | "file"
+	Kind() string // "vault" | "encrypted-file" | "file"
 }
 
 // Open returns a Vault-backed store when VAULT_ADDR + VAULT_TOKEN are set (the
-// preferred path), otherwise a 0600 JSON file under dir.
-func Open(dir string, getenv func(string) string, client *http.Client) Store {
+// preferred path). Otherwise it opens the file fallback, encrypting it when
+// MICROAGENCY_SECRET_KEY_FILE names a separately held 32-byte key. Existing
+// plaintext fallback state is migrated atomically when encryption is enabled.
+func Open(dir string, getenv func(string) string, client *http.Client) (Store, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if addr, tok := getenv("VAULT_ADDR"), getenv("VAULT_TOKEN"); addr != "" && tok != "" {
+	addr, tok := strings.TrimSpace(getenv("VAULT_ADDR")), strings.TrimSpace(getenv("VAULT_TOKEN"))
+	if (addr == "") != (tok == "") {
+		return nil, errors.New("secretstore: VAULT_ADDR and VAULT_TOKEN must be configured together")
+	}
+	if addr != "" {
 		mount := getenv("VAULT_MOUNT")
 		if mount == "" {
 			mount = "secret" // OpenBao/Vault dev default KV v2 mount
 		}
-		return &Vault{Addr: addr, Token: tok, Mount: mount, Prefix: "microagency", Client: client}
+		return &Vault{Addr: addr, Token: tok, Mount: mount, Prefix: "microagency", Client: client}, nil
 	}
-	return &File{Path: filepath.Join(dir, "upstream-tokens.json")}
+	path := filepath.Join(dir, "upstream-tokens.json")
+	if err := protectExistingFile(path); err != nil {
+		return nil, err
+	}
+	if keyPath := strings.TrimSpace(getenv(FileKeyEnv)); keyPath != "" {
+		key, err := LoadFileKey(dir, keyPath)
+		if err != nil {
+			return nil, err
+		}
+		return NewEncryptedFile(path, key)
+	}
+	f := &File{Path: path}
+	// Validate existing state now, rather than discovering after startup that an
+	// encrypted store cannot be opened because its key setting disappeared.
+	if _, _, err := f.read(); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // --- Vault / OpenBao (KV v2) ---
@@ -131,44 +175,315 @@ func (v *Vault) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// --- File fallback (0600 JSON) ---
+// --- File fallback ---
+
+type fileEnvelope struct {
+	Format     string `json:"format"`
+	Cipher     string `json:"cipher"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
 
 type File struct {
 	Path string
-	mu   sync.Mutex
+
+	mu       sync.Mutex
+	aead     cipher.AEAD
+	renameFn func(string, string) error // test seam for interrupted atomic writes
 }
 
-func (f *File) Kind() string { return "file" }
-
-func (f *File) read() (map[string]string, error) {
-	b, err := os.ReadFile(f.Path)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
+func (f *File) Kind() string {
+	if f.aead != nil {
+		return "encrypted-file"
 	}
+	return "file"
+}
+
+// NewEncryptedFile opens an AES-256-GCM file store. If path contains the legacy
+// plaintext JSON map, it is encrypted to a sibling temporary file and atomically
+// renamed over the original before this function returns.
+func NewEncryptedFile(path string, key []byte) (*File, error) {
+	aead, err := newFileAEAD(key)
 	if err != nil {
 		return nil, err
 	}
-	m := map[string]string{}
-	if len(b) > 0 {
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil, err
+	if err := protectExistingFile(path); err != nil {
+		return nil, err
+	}
+	f := &File{Path: path, aead: aead}
+	m, legacy, err := f.read()
+	if err != nil {
+		return nil, err
+	}
+	if legacy {
+		if err := f.write(m); err != nil {
+			return nil, fmt.Errorf("secretstore: migrate plaintext fallback: %w", err)
 		}
 	}
-	return m, nil
+	return f, nil
+}
+
+func newFileAEAD(key []byte) (cipher.AEAD, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("secretstore: encrypted file key must be 32 bytes, got %d", len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("secretstore: encrypted file key: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("secretstore: encrypted file cipher: %w", err)
+	}
+	return aead, nil
+}
+
+// InspectFile reports "absent", "file", or "encrypted-file" without modifying
+// path. When an encrypted file exists, key must decrypt it successfully. This is
+// the read-only posture probe used by doctor; it never returns stored values.
+func InspectFile(path string, key []byte) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "absent", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("secretstore: inspect fallback file: %w", err)
+	}
+	if len(b) == 0 {
+		return "file", nil
+	}
+	var marker struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(b, &marker); err != nil {
+		return "", fmt.Errorf("secretstore: inspect fallback file: %w", err)
+	}
+	if marker.Format == "" {
+		var legacy map[string]string
+		if err := json.Unmarshal(b, &legacy); err != nil {
+			return "", fmt.Errorf("secretstore: inspect fallback file: %w", err)
+		}
+		return "file", nil
+	}
+	if len(key) == 0 {
+		return "encrypted-file", ErrKeyRequired
+	}
+	aead, err := newFileAEAD(key)
+	if err != nil {
+		return "encrypted-file", err
+	}
+	f := &File{Path: path, aead: aead}
+	if _, legacy, err := f.read(); err != nil {
+		return "encrypted-file", err
+	} else if legacy {
+		return "file", nil
+	}
+	return "encrypted-file", nil
+}
+
+func protectExistingFile(path string) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("secretstore: inspect fallback file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("secretstore: fallback path must be a regular file")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("secretstore: protect fallback file: %w", err)
+		}
+	}
+	return nil
+}
+
+// LoadFileKey validates and reads the operator-held key for the encrypted file
+// fallback. The key may be 32 raw bytes or base64 text encoding 32 bytes. It must
+// be a mode-0600-or-stronger regular file outside stateDir.
+func LoadFileKey(stateDir, path string) ([]byte, error) {
+	if insidePath(stateDir, path) {
+		return nil, fmt.Errorf("secretstore: %s must point outside the microagency state directory", FileKeyEnv)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("secretstore: read %s: %w", FileKeyEnv, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("secretstore: %s must name a regular file", FileKeyEnv)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("secretstore: %s permissions %04o are too broad; require 0600 or stronger", FileKeyEnv, info.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("secretstore: read %s: %w", FileKeyEnv, err)
+	}
+	if len(b) == 32 {
+		return b, nil
+	}
+	encoded := strings.TrimSpace(string(b))
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
+		if key, err := enc.DecodeString(encoded); err == nil && len(key) == 32 {
+			return key, nil
+		}
+	}
+	return nil, fmt.Errorf("secretstore: %s must contain 32 raw bytes or their base64 encoding", FileKeyEnv)
+}
+
+func insidePath(stateDir, path string) bool {
+	base, err1 := filepath.Abs(stateDir)
+	target, err2 := filepath.Abs(path)
+	if err1 != nil || err2 != nil {
+		return true // fail closed when containment cannot be established
+	}
+	if pathWithin(base, target) {
+		return true
+	}
+	// Resolve symlinks when both paths exist. This also rejects a key whose
+	// apparent location is outside the state directory but whose target is in it.
+	resolvedBase, baseErr := filepath.EvalSymlinks(base)
+	resolvedTarget, targetErr := filepath.EvalSymlinks(target)
+	return baseErr == nil && targetErr == nil && pathWithin(resolvedBase, resolvedTarget)
+}
+
+func pathWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return true
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// read returns legacy=true only when an encrypted File read a plaintext map that
+// must be migrated. An unencrypted File refuses an encrypted envelope so losing
+// the key configuration can never silently downgrade the existing store.
+func (f *File) read() (m map[string]string, legacy bool, err error) {
+	b, err := os.ReadFile(f.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if len(b) == 0 {
+		return map[string]string{}, false, nil
+	}
+
+	var marker struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(b, &marker); err != nil {
+		return nil, false, err
+	}
+	if marker.Format != "" {
+		if f.aead == nil {
+			return nil, false, ErrKeyRequired
+		}
+		var env fileEnvelope
+		if err := json.Unmarshal(b, &env); err != nil {
+			return nil, false, err
+		}
+		if env.Format != fileFormat || env.Cipher != fileCipher {
+			return nil, false, fmt.Errorf("secretstore: unsupported encrypted file format %q cipher %q", env.Format, env.Cipher)
+		}
+		nonce, err := base64.RawStdEncoding.DecodeString(env.Nonce)
+		if err != nil || len(nonce) != f.aead.NonceSize() {
+			return nil, false, errors.New("secretstore: invalid encrypted file nonce")
+		}
+		ct, err := base64.RawStdEncoding.DecodeString(env.Ciphertext)
+		if err != nil {
+			return nil, false, errors.New("secretstore: invalid encrypted file ciphertext")
+		}
+		plaintext, err := f.aead.Open(nil, nonce, ct, []byte(fileFormat))
+		if err != nil {
+			return nil, false, errors.New("secretstore: decrypt encrypted file: wrong key or corrupted data")
+		}
+		m := map[string]string{}
+		if err := json.Unmarshal(plaintext, &m); err != nil {
+			return nil, false, fmt.Errorf("secretstore: decode encrypted file: %w", err)
+		}
+		return m, false, nil
+	}
+
+	m = map[string]string{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false, err
+	}
+	return m, f.aead != nil, nil
 }
 
 func (f *File) write(m map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
 		return err
 	}
-	b, _ := json.Marshal(m)
-	return os.WriteFile(f.Path, b, 0o600)
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if f.aead != nil {
+		nonce := make([]byte, f.aead.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		env := fileEnvelope{
+			Format: fileFormat,
+			Cipher: fileCipher,
+			Nonce:  base64.RawStdEncoding.EncodeToString(nonce),
+			Ciphertext: base64.RawStdEncoding.EncodeToString(
+				f.aead.Seal(nil, nonce, b, []byte(fileFormat))),
+		}
+		b, err = json.Marshal(env)
+		if err != nil {
+			return err
+		}
+	}
+	return f.atomicWrite(b)
+}
+
+func (f *File) atomicWrite(b []byte) error {
+	dir := filepath.Dir(f.Path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(f.Path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	rename := os.Rename
+	if f.renameFn != nil {
+		rename = f.renameFn
+	}
+	if err := rename(tmpName, f.Path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 func (f *File) Save(_ context.Context, key string, value []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	m, err := f.read()
+	m, _, err := f.read()
 	if err != nil {
 		return err
 	}
@@ -179,7 +494,7 @@ func (f *File) Save(_ context.Context, key string, value []byte) error {
 func (f *File) Load(_ context.Context, key string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	m, err := f.read()
+	m, _, err := f.read()
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +508,7 @@ func (f *File) Load(_ context.Context, key string) ([]byte, error) {
 func (f *File) Delete(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	m, err := f.read()
+	m, _, err := f.read()
 	if err != nil {
 		return err
 	}

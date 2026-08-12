@@ -107,7 +107,7 @@ func (s *Server) secretsComponent(ctx context.Context) InfraComponent {
 	if s.secrets == nil {
 		return c
 	}
-	kind := s.secrets.Kind() // "vault" | "file"
+	kind := s.secrets.Kind() // "vault" | "encrypted-file" | "file"
 	c.Label = kind
 	// A cheap Load probes reachability; ErrNotFound still means the store answered.
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -120,13 +120,16 @@ func (s *Server) secretsComponent(ctx context.Context) InfraComponent {
 	switch {
 	case !reachable:
 		c.Status = "bad"
+	case kind == "encrypted-file":
+		c.Status = "ok"
+		c.Detail["note"] = "using the AES-256-GCM file store with a separately supplied operator key"
 	case kind == "file":
 		// OpenBao is the managed default and is always attempted; the file store is
-		// only reached when Bao couldn't come up. It works (0600 file) but it's a
-		// degraded posture — not the encrypted vault, and it diverges from a Bao that
-		// later recovers — so warn rather than report a healthy "ok".
+		// only reached when Bao couldn't come up. It works, but mode 0600 is
+		// permission isolation rather than encryption at rest, so warn rather than
+		// report a healthy "ok".
 		c.Status = "warn"
-		c.Detail["note"] = "OpenBao unavailable — using the local file store (0600). Credentials persist, but not in the encrypted vault; check the openbao logs under ~/.microagency/openbao."
+		c.Detail["note"] = "OpenBao unavailable — using the degraded mode-0600 plaintext file store. Configure MICROAGENCY_SECRET_KEY_FILE with a separately held key for encrypted fallback storage."
 	default:
 		c.Status = "ok"
 	}

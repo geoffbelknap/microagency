@@ -4,7 +4,7 @@ description: Install microagency, connect a client, and add your first servers.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-31_
+_Last updated: 2026-08-12_
 
 ## Install and start
 
@@ -25,9 +25,10 @@ To stop, `microagency down`. To disconnect a client,
 state (add `--full` to wipe everything; both confirm first).
 [Operating the gateway](operations.md) covers the full CLI surface.
 
-Your upstream credentials are held in a secret store, not in the clear:
-OpenBao/Vault when available (or a managed OpenBao if the binary is on your
-PATH), otherwise an encrypted file store under `~/.microagency`. See
+Your upstream credentials stay in the gateway's secret store and never enter
+the agent's configuration or context. OpenBao/Vault is preferred. If it is
+unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded. See
 [where credentials live](connect-clients.md#where-credentials-live).
 
 ## Add your servers

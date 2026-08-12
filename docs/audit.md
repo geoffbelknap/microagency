@@ -4,7 +4,7 @@ description: The signed, hash-chained log every call lands in, and how to verify
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-31_
+_Last updated: 2026-08-12_
 
 Every run and proxied call is written to an append-only audit log. Each line
 is hash-chained to its predecessor and **signed** (ES256) over that hash
@@ -31,11 +31,14 @@ Every 64 appends or so, microagency records the log's height and head hash,
 signed, in the **secret store**. Height is the chained line count.
 Verification then flags a log shorter than its anchor as truncated.
 
-This is real protection when the secret store is OpenBao or Vault, where a
-log-file attacker cannot reach the anchor. With the file-fallback store the
-anchor sits on the same disk, which is weaker. It is still signed, so it
-cannot be *lowered* to hide a truncation without the audit key. The residual
-window is the 64 most-recent lines since the last anchor.
+This is strongest when the secret store is OpenBao or Vault, where a log-file
+attacker cannot reach the anchor. The encrypted file fallback prevents an
+attacker who has only `~/.microagency` from reading or forging the anchor, because
+its key is held separately. It cannot prevent replay of a previously copied,
+valid ciphertext. The degraded plaintext fallback keeps the anchor readable on
+the same disk. The signature detects edits, but not replay of an older valid
+anchor. The residual window under the normal posture is the 64 most-recent lines
+since the last anchor.
 
 When the log and the key would otherwise share one disk, the remaining
 hardening path is to keep the signing key in a KMS or the secret store.

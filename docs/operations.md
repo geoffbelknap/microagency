@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-31_
+_Last updated: 2026-08-12_
 
 ## The CLI
 
@@ -34,11 +34,16 @@ Everything lives under `~/.microagency`:
 | `mcp-bearer` | the distinct MCP bearer a tunnel mints (never the operator token) |
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
+| `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
 | `refs/` | parked reference payloads (encrypted; 24h TTL with `--persist-refs`) |
 | `refs.key` | the refs encryption key |
 | `openbao/` | the managed OpenBao's unseal key and root token, when managed |
 | `microagency.log` | the backgrounded server's log, including the secret-store posture line |
 | `microagency.pid` | the running server's pid file |
+
+An encrypted fallback key configured through
+`MICROAGENCY_SECRET_KEY_FILE` must live outside this directory. It is not
+deleted by `purge --full`.
 
 ## What purge deletes
 

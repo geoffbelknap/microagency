@@ -4,13 +4,14 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-08-12_
 
 The guarantees, and where each one is enforced:
 
 - **Credential custody.** Upstream tokens and OAuth refresh tokens live in
   the gateway's secret store — OpenBao/Vault when available, else an
-  encrypted file store (see
+  operator-key encrypted file or an explicitly degraded mode-0600 plaintext
+  fallback (see
   [where credentials live](connect-clients.md#where-credentials-live)).
   Nothing in the agent's config, context, or tool results can reveal them.
 - **Least privilege.** A connection can be read-only, narrowed to specific

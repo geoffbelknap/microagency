@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"microagency/internal/baomanager"
 	"microagency/internal/mcp"
 	"microagency/internal/sandbox"
+	"microagency/internal/secretstore"
 )
 
 // runDoctor reports the health of the things `up` depends on — the wasm engines
@@ -204,14 +207,50 @@ func reportBypasses(out *os.File) int {
 // reportSecretPosture tells the operator where upstream credentials are held —
 // the posture `up` selects — so "where are my secrets" has an answer up front.
 func reportSecretPosture(out io.Writer) {
+	reportSecretPostureWith(out, os.Getenv, baomanager.Available, microagencyDir())
+}
+
+func reportSecretPostureWith(out io.Writer, getenv func(string) string, baoAvailable func() bool, stateDir string) {
+	addr, token := getenv("VAULT_ADDR"), getenv("VAULT_TOKEN")
 	switch {
-	case os.Getenv("VAULT_ADDR") != "":
-		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", os.Getenv("VAULT_ADDR"))
-	case baomanager.Available():
+	case addr != "" && token == "":
+		fmt.Fprintln(out, "  secret store      ✗ VAULT_ADDR is set but VAULT_TOKEN is missing")
+		fmt.Fprintln(out, "                    (startup will fail closed; provide the token or unset VAULT_ADDR)")
+	case addr == "" && token != "":
+		fmt.Fprintln(out, "  secret store      ✗ VAULT_TOKEN is set but VAULT_ADDR is missing")
+		fmt.Fprintln(out, "                    (startup will fail closed; provide the address or unset VAULT_TOKEN)")
+	case addr != "":
+		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", addr)
+	case baoAvailable():
 		fmt.Fprintln(out, "  secret store      ✓ managed OpenBao (loopback 127.0.0.1:8200)")
+	case strings.TrimSpace(getenv(secretstore.FileKeyEnv)) != "":
+		keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv))
+		key, err := secretstore.LoadFileKey(stateDir, keyPath)
+		if err == nil {
+			_, err = secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), key)
+		}
+		if err != nil {
+			fmt.Fprintf(out, "  secret store      ✗ encrypted file store is misconfigured: %v\n", err)
+			fmt.Fprintln(out, "                    (startup will fail closed; fix or unset MICROAGENCY_SECRET_KEY_FILE)")
+			return
+		}
+		fmt.Fprintln(out, "  secret store      ✓ AES-256-GCM file store with a separately supplied key")
+		fmt.Fprintf(out, "                    (key: %s; credentials: %s)\n", keyPath, filepath.Join(stateDir, "upstream-tokens.json"))
 	default:
-		fmt.Fprintln(out, "  secret store      ⚠ encrypted file store under ~/.microagency")
-		fmt.Fprintln(out, "                    (no OpenBao/Vault found — fine for single-user; install openbao or set VAULT_ADDR for hosted/multi-user)")
+		kind, err := secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), nil)
+		if errors.Is(err, secretstore.ErrKeyRequired) || kind == "encrypted-file" {
+			fmt.Fprintln(out, "  secret store      ✗ encrypted file store exists but MICROAGENCY_SECRET_KEY_FILE is not configured")
+			fmt.Fprintln(out, "                    (startup will fail closed; restore the separately held key setting)")
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(out, "  secret store      ✗ local credential store cannot be read: %v\n", err)
+			fmt.Fprintln(out, "                    (startup will fail closed; repair or restore the credential store)")
+			return
+		}
+		fmt.Fprintln(out, "  secret store      ⚠ degraded mode-0600 plaintext file under ~/.microagency")
+		fmt.Fprintln(out, "                    (credentials stay out of the agent, but are not encrypted at rest;")
+		fmt.Fprintln(out, "                     install OpenBao or configure MICROAGENCY_SECRET_KEY_FILE)")
 	}
 }
 

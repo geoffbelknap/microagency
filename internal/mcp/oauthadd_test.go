@@ -15,7 +15,6 @@ import (
 
 	"microagency/internal/auth"
 	"microagency/internal/gateway"
-	"microagency/internal/secretstore"
 )
 
 // TestConsoleOAuthAddUpstream drives the whole console OAuth-add flow: POST the
@@ -63,7 +62,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 
 	// microagency's admin API, with a plain client so it can reach the loopback mocks.
 	dir := t.TempDir()
-	tokenStore := secretstore.Open(dir, func(string) string { return "" }, nil) // file store
+	tokenStore := openTestSecretStore(t, dir) // file store
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(tokenStore), WithStateDir(dir))
 	const opTok = "op"
 	admin := httptest.NewServer(srv.AdminHandler(opTok))
@@ -143,7 +142,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	// a "restart": a fresh server with the same store + state dir reloads the
 	// upstream from its registration + stored refresh token — no re-login.
 	srv2 := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	srv2.ReloadUpstreams(context.Background())
 	reloaded := false
 	for _, u := range srv2.UpstreamList() {
@@ -208,7 +207,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
@@ -325,7 +324,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	if err := srv.AddUpstream(context.Background(), "lc", &gateway.Upstream{Name: "lc", URL: upTS.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("pre-register: %v", err)
 	}
@@ -392,7 +391,7 @@ func noDCRUpstream(t *testing.T) string {
 func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
 	upURL := noDCRUpstream(t)
 	dir := t.TempDir()
-	store := secretstore.Open(dir, func(string) string { return "" }, nil)
+	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
@@ -437,7 +436,7 @@ func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
 func TestConsoleOAuthSuppliedClientOverridesStored(t *testing.T) {
 	upURL := noDCRUpstream(t)
 	dir := t.TempDir()
-	store := secretstore.Open(dir, func(string) string { return "" }, nil)
+	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
@@ -478,7 +477,7 @@ func TestConsoleOAuthAddNoDCRNoClientErrors(t *testing.T) {
 	upURL := noDCRUpstream(t)
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
