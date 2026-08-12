@@ -34,9 +34,8 @@ const (
 // findTools is the discover half of the off-context tool surface: the aggregated
 // upstream tools are kept OUT of tools/list, so an agent searches this index and
 // pulls only the relevant few — with their schemas — then invokes them via
-// call_tool. It ranks the indexed tools by keyword overlap over name and
-// description. Keyword match keeps it dependency-free; an embedding ranker can
-// replace the scorer later behind this same tool, without changing the surface.
+// call_tool. It ranks the caller-scoped index locally with deterministic exact-name
+// lookup followed by BM25 over names, descriptions, and schema property names.
 func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string]any {
 	start := time.Now()
 	var in struct {
@@ -63,34 +62,9 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 	if limit > 50 {
 		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
-	terms := tokenize(in.Query)
-
-	type scored struct {
-		tool  map[string]any
-		score int
-		usage int
-	}
-	var hits []scored
 	// The index is scoped to the caller: shared connections + the caller's own.
 	indexed := s.indexedTools(principalOf(ctx).Subject)
-	for _, t := range indexed {
-		name, _ := t["name"].(string)
-		desc, _ := t["description"].(string)
-		score := matchScore(terms, name, desc)
-		if score > 0 {
-			usage, _ := t["usage"].(int)
-			hits = append(hits, scored{tool: t, score: score, usage: usage})
-		}
-	}
-	// Keyword relevance is primary; usage (how often a tool has actually been
-	// invoked) breaks ties, so popular, proven tools surface first. This is the
-	// free-signal precursor to a heavier embedding ranker.
-	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		return hits[i].usage > hits[j].usage
-	})
+	hits := rankIndexedTools(in.Query, indexed)
 
 	if limit > len(hits) {
 		limit = len(hits)
@@ -240,7 +214,8 @@ func tokenize(q string) []string {
 	})
 }
 
-// matchScore counts term hits in name (weighted) and description.
+// matchScore is the previous substring scorer retained only for the checked-in
+// ranking baseline. Production discovery uses rankIndexedTools.
 func matchScore(terms []string, name, desc string) int {
 	n, d := strings.ToLower(name), strings.ToLower(desc)
 	score := 0

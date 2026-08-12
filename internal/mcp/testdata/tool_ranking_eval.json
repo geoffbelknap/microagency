@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "billing__create_invoice",
+      "description": "Create an invoice for a customer from line items.",
+      "input_schema": {"type":"object","required":["customer_id","line_items"],"properties":{"customer_id":{"type":"string"},"line_items":{"type":"array"}}},
+      "examples": ["Create an invoice with customer_id and line_items."]
+    },
+    {
+      "name": "billing__list_invoices",
+      "description": "List invoices by status and creation date.",
+      "input_schema": {"type":"object","properties":{"status":{"type":"string"},"created_after":{"type":"string"}}}
+    },
+    {
+      "name": "crm__delete_account",
+      "description": "Permanently delete an inactive customer account.",
+      "input_schema": {"type":"object","required":["account_id"],"properties":{"account_id":{"type":"string"}}},
+      "examples": ["Remove one inactive customer account by account_id."]
+    },
+    {
+      "name": "crm__inactive_contacts_report",
+      "description": "Build an analytics report about inactive contacts.",
+      "input_schema": {"type":"object","properties":{"team_id":{"type":"string"}}}
+    },
+    {
+      "name": "calendar__create_event",
+      "description": "Create an event with a start and end time.",
+      "input_schema": {"type":"object","required":["title","starts_at"],"properties":{"title":{"type":"string"},"starts_at":{"type":"string"}}}
+    },
+    {
+      "name": "calendar__update_event",
+      "description": "Update the start and end time for an event.",
+      "input_schema": {"type":"object","required":["event_id","starts_at"],"properties":{"event_id":{"type":"string"},"starts_at":{"type":"string"}}},
+      "examples": ["Reschedule a meeting by event_id and starts_at."]
+    },
+    {
+      "name": "calendar__delete_event",
+      "description": "Delete an event by identifier.",
+      "input_schema": {"type":"object","required":["event_id"],"properties":{"event_id":{"type":"string"}}}
+    },
+    {
+      "name": "calendar__list_events",
+      "description": "List events within a time range.",
+      "input_schema": {"type":"object","properties":{"starts_after":{"type":"string"}}}
+    },
+    {
+      "name": "github__add_collaborator",
+      "description": "Add a collaborator to a source repository.",
+      "input_schema": {"type":"object","required":["repository","username"],"properties":{"repository":{"type":"string"},"username":{"type":"string"}}}
+    },
+    {
+      "name": "github__list_issues",
+      "description": "List issue records for a source repository.",
+      "input_schema": {"type":"object","required":["repository"],"properties":{"repository":{"type":"string"},"state":{"type":"string"}}},
+      "examples": ["List tickets for a repository."]
+    },
+    {
+      "name": "github__list_pull_requests",
+      "description": "List review requests for a source repository.",
+      "input_schema": {"type":"object","required":["repository"],"properties":{"repository":{"type":"string"},"state":{"type":"string"}}}
+    },
+    {
+      "name": "linear__list_issues",
+      "description": "List issue work items for a project tracker.",
+      "input_schema": {"type":"object","required":["team"],"properties":{"team":{"type":"string"},"state":{"type":"string"}}}
+    },
+    {
+      "name": "reports__search_reports",
+      "description": "Search stored reports with structured filters.",
+      "input_schema": {"type":"object","required":["external_id"],"properties":{"external_id":{"type":"string"},"status":{"type":"string"}}}
+    },
+    {
+      "name": "reports__list_reports",
+      "description": "List recent reports by status.",
+      "input_schema": {"type":"object","properties":{"status":{"type":"string"}}}
+    },
+    {
+      "name": "warehouse__inspect_lineage",
+      "description": "Inspect dataset lineage and upstream dependencies.",
+      "input_schema": {"type":"object","required":["dataset"],"properties":{"dataset":{"type":"string"}}}
+    },
+    {
+      "name": "shared__inspect_access_key",
+      "description": "Inspect access key metadata without returning secret material.",
+      "input_schema": {"type":"object","required":["key_id"],"properties":{"key_id":{"type":"string"}}}
+    },
+    {
+      "name": "private__rotate_access_key",
+      "description": "Rotate an access key for an owned connection.",
+      "owner": "alice",
+      "input_schema": {"type":"object","required":["key_id"],"properties":{"key_id":{"type":"string"}}}
+    }
+  ],
+  "generated_tools": [
+    {
+      "prefix": "catalog__read_object_",
+      "count": 128,
+      "description": "Read one generic catalog object by identifier.",
+      "input_schema": {"type":"object","required":["object_id"],"properties":{"object_id":{"type":"string"}}}
+    }
+  ],
+  "queries": [
+    {"id":"exact", "query":"billing__create_invoice", "subject":"local", "relevant":["billing__create_invoice"], "expected_required":["customer_id","line_items"]},
+    {"id":"synonym_remove", "query":"remove dormant contact", "subject":"local", "relevant":["crm__delete_account"], "expected_required":["account_id"]},
+    {"id":"similar_family", "query":"reschedule team meeting", "subject":"local", "relevant":["calendar__update_event"], "expected_required":["event_id","starts_at"]},
+    {"id":"ambiguous_provider", "query":"github tickets", "subject":"local", "relevant":["github__list_issues"], "expected_required":["repository"]},
+    {"id":"schema_property", "query":"look up report by external_id", "subject":"local", "relevant":["reports__search_reports"], "expected_required":["external_id"]},
+    {"id":"large_catalog", "query":"dataset lineage", "subject":"local", "relevant":["warehouse__inspect_lineage"], "expected_required":["dataset"]},
+    {"id":"owner_alice", "query":"rotate access key", "subject":"alice", "relevant":["private__rotate_access_key"], "expected_required":["key_id"]},
+    {"id":"owner_bob", "query":"rotate access key", "subject":"bob", "relevant":["shared__inspect_access_key"], "absent":["private__rotate_access_key"], "expected_required":["key_id"]},
+    {"id":"malformed", "query":"?! -- ..", "subject":"local", "expect_empty":true}
+  ]
+}
