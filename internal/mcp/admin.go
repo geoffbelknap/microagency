@@ -21,35 +21,41 @@ import (
 // RunInfo is an operator-facing view of one recorded run, including its egress
 // audit — the observability surface (what the agent reached, and what was denied).
 type RunInfo struct {
-	RunID               string `json:"run_id"`
-	Kind                string `json:"kind,omitempty"`
-	TaskID              string `json:"task_id,omitempty"`
-	SourceID            string `json:"source_id,omitempty"`
-	Upstream            string `json:"upstream,omitempty"`
-	Tool                string `json:"tool,omitempty"`
-	Args                string `json:"args,omitempty"`
-	User                string `json:"user,omitempty"`
-	Session             string `json:"session,omitempty"`
-	Substrate           string `json:"substrate,omitempty"`
-	Engine              string `json:"engine,omitempty"`
-	LatencyMs           int64  `json:"latency_ms"`
-	InputBytes          int    `json:"input_bytes"`
-	OutputBytes         int    `json:"output_bytes"`
-	RawBytes            int    `json:"raw_bytes,omitempty"`
-	ParkedBytes         int    `json:"parked_bytes,omitempty"`
-	MinimizedBytes      int    `json:"minimized_bytes,omitempty"`
-	ContextMeasured     bool   `json:"context_measured,omitempty"`
-	FullSchemaEntries   int    `json:"full_schema_entries,omitempty"`
-	SchemaDigestEntries int    `json:"schema_digest_entries,omitempty"`
-	SummarizedEntries   int    `json:"summarized_entries,omitempty"`
-	OmittedEntries      int    `json:"omitted_entries,omitempty"`
-	ExactSchemaLookup   bool   `json:"exact_schema_lookup,omitempty"`
-	FusedInvocation     bool   `json:"fused_invocation,omitempty"`
-	Reffed              bool   `json:"reffed"`
-	Ref                 string `json:"ref,omitempty"`
-	Bytes               int    `json:"bytes"`
-	Protected           int    `json:"protected,omitempty"` // sensitive field values minimized on this call
-	ExitCode            int    `json:"exit_code"`
+	RunID                string `json:"run_id"`
+	Kind                 string `json:"kind,omitempty"`
+	TaskID               string `json:"task_id,omitempty"`
+	SourceID             string `json:"source_id,omitempty"`
+	Upstream             string `json:"upstream,omitempty"`
+	Tool                 string `json:"tool,omitempty"`
+	Args                 string `json:"args,omitempty"`
+	User                 string `json:"user,omitempty"`
+	Session              string `json:"session,omitempty"`
+	Substrate            string `json:"substrate,omitempty"`
+	Engine               string `json:"engine,omitempty"`
+	LatencyMs            int64  `json:"latency_ms"`
+	InputBytes           int    `json:"input_bytes"`
+	OutputBytes          int    `json:"output_bytes"`
+	RawBytes             int    `json:"raw_bytes,omitempty"`
+	ParkedBytes          int    `json:"parked_bytes,omitempty"`
+	MinimizedBytes       int    `json:"minimized_bytes,omitempty"`
+	ContextMeasured      bool   `json:"context_measured,omitempty"`
+	FullSchemaEntries    int    `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries  int    `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries    int    `json:"summarized_entries,omitempty"`
+	OmittedEntries       int    `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup    bool   `json:"exact_schema_lookup,omitempty"`
+	FusedInvocation      bool   `json:"fused_invocation,omitempty"`
+	TransformEngine      string `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int    `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int    `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64  `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string `json:"transform_status,omitempty"`
+	Reffed               bool   `json:"reffed"`
+	Ref                  string `json:"ref,omitempty"`
+	Bytes                int    `json:"bytes"`
+	Protected            int    `json:"protected,omitempty"` // sensitive field values minimized on this call
+	ExitCode             int    `json:"exit_code"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -80,6 +86,9 @@ func (s *Server) RunLog() []RunInfo {
 			FullSchemaEntries: rec.FullSchemaEntries, SchemaDigestEntries: rec.SchemaDigestEntries,
 			SummarizedEntries: rec.SummarizedEntries, OmittedEntries: rec.OmittedEntries,
 			ExactSchemaLookup: rec.ExactSchemaLookup, FusedInvocation: rec.FusedInvocation,
+			TransformEngine: rec.TransformEngine, TransformQuerySHA256: rec.TransformQuerySHA256,
+			TransformInputBytes: rec.TransformInputBytes, TransformOutputBytes: rec.TransformOutputBytes,
+			TransformLatencyMs: rec.TransformLatencyMs, TransformStatus: rec.TransformStatus,
 			Reffed: rec.Reffed, Ref: rec.Ref,
 			Bytes: rec.Bytes, Protected: rec.Protected, ExitCode: rec.ExitCode, Stderr: rec.Stderr, Audit: rec.Audit, AuditErr: rec.AuditErr,
 			Timestamp: ts,

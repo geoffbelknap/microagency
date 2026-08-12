@@ -672,7 +672,7 @@ function runRow(r){
   var chip=el("span",{class:"run-chip "+(isProxy?"proxy":"reduce")});chip.innerHTML=ic(isProxy?ICN.proxy:ICN.reduce,{s:14});
   var main=el("div",{class:"run-main"});
   var tgt=isProxy?(r.upstream+"__"+r.tool):(r.source_id||"—");
-  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.protected?" · "+r.protected+" protected":"")+(r.exit_code!==0?" · refused":"")):
+  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.fused_invocation?" · "+(r.transform_engine||"declarative")+" transform":"")+(r.protected?" · "+r.protected+" protected":"")+(r.exit_code!==0?" · refused":"")):
     ((r.substrate||"?")+"/"+(r.engine||"?")+" · "+(r.reffed?(fmtB(r.bytes)+" → parked off-context"):(fmtB(r.bytes)+" in · "+fmtB(r.output_bytes||0)+" returned")));
   main.innerHTML='<div class="run-target"><span class="t"></span><span class="ktag '+(isProxy?"":"reduce")+'">'+(isProxy?"proxy":"reduce")+'</span><span class="run-id"></span></div><div class="run-meta"></div>';
   main.querySelector(".t").textContent=tgt;main.querySelector(".run-meta").textContent=meta;
@@ -706,6 +706,10 @@ function runDetail(r,isProxy){
   if(isProxy){kvRow(dl,"upstream",r.upstream);kvRow(dl,"tool",r.tool);}
   else{kvRow(dl,"source",r.source_id);kvRow(dl,"engine",(r.substrate||"?")+(r.engine?"/"+r.engine:""));}
   kvRow(dl,"data",fmtB(r.input_bytes||0)+" in → "+fmtB(r.output_bytes||0)+" returned"+(r.reffed?" · parked off-context":""));
+  if(r.transform_status){
+    kvRow(dl,"transform",(r.transform_engine||"?")+" · "+r.transform_status+" · "+fmtB(r.transform_input_bytes||0)+" in → "+fmtB(r.transform_output_bytes||0)+" out · "+(r.transform_latency_ms||0)+" ms");
+    kvRow(dl,"query digest",r.transform_query_sha256);
+  }
   if(r.protected)kvRow(dl,"minimized",r.protected+" sensitive field"+(r.protected===1?"":"s")+" redacted/tokenized");
   kvRow(dl,"latency",r.latency_ms!=null?r.latency_ms+" ms":null);
   if(r.exit_code!==0&&r.exit_code!=null)kvRow(dl,"exit",r.exit_code+" · refused","bad");

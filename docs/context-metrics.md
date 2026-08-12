@@ -52,6 +52,13 @@ The gateway reports discovery calls and exact-schema escalations per task. It
 also distinguishes a separate `call_tool` then `reduce` trip from an integrated
 invoke-and-reduce trip.
 
+An integrated trip is a `call_tool` request with a declarative `transform`.
+Its single run record includes the engine, query digest, input/output bytes,
+transform latency, and status. The `by_substrate.wasm` totals use those
+transform bytes and latency, while invocation latency continues to measure the
+complete upstream-and-transform call. This makes fused and separate paths
+comparable without retaining the query or source result.
+
 Do not put prompts, names, email addresses, or other user data in `task_id`.
 microagency accepts only a 64-byte opaque identifier, stores a one-way digest
 for correlation, and never exports task IDs as Prometheus labels. Metric
