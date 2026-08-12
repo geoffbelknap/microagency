@@ -67,8 +67,9 @@ Each part of the system has its own page:
 
 - [Connecting clients and credentials](docs/connect-clients.md) — the built-in
   OAuth server, static bearer, external issuer, stdio mode, and where every
-  secret lives (OpenBao/Vault, the managed OpenBao, an operator-key encrypted
-  file, or the explicitly degraded mode-0600 plaintext fallback).
+  secret lives (external Vault/OpenBao, managed OpenBao with protected or
+  same-disk bootstrap custody, an operator-key encrypted file, or the
+  explicitly degraded mode-0600 plaintext fallback).
 - [The tool index](docs/tool-index.md) — why upstream tools live in an index
   instead of `tools/list`, the enabled/discovered split that gates
   invocation, and index refresh.

@@ -249,6 +249,8 @@ func reportSecretPosture(out io.Writer) {
 
 func reportSecretPostureWith(out io.Writer, getenv func(string) string, baoAvailable func() bool, stateDir string) {
 	addr, token := getenv("VAULT_ADDR"), getenv("VAULT_TOKEN")
+	baoDir := filepath.Join(stateDir, "openbao")
+	baoOK := baoAvailable()
 	switch {
 	case addr != "" && token == "":
 		fmt.Fprintln(out, "  secret store      ✗ VAULT_ADDR is set but VAULT_TOKEN is missing")
@@ -258,8 +260,26 @@ func reportSecretPostureWith(out io.Writer, getenv func(string) string, baoAvail
 		fmt.Fprintln(out, "                    (startup will fail closed; provide the address or unset VAULT_TOKEN)")
 	case addr != "":
 		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", addr)
-	case baoAvailable():
-		fmt.Fprintln(out, "  secret store      ✓ managed OpenBao (loopback 127.0.0.1:8200)")
+	case baoOK || baomanager.ManagedConfigured(baoDir, getenv):
+		posture := baomanager.InspectCustody(context.Background(), baoDir, getenv)
+		switch {
+		case !baoOK && posture.Protected:
+			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s; OpenBao binary unavailable)\n", posture.Label)
+			fmt.Fprintln(out, "                    (startup will fail closed; reinstall OpenBao and keep the protector configured)")
+		case !baoOK:
+			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao state exists, but the OpenBao binary is unavailable")
+			fmt.Fprintln(out, "                    (startup will evaluate the configured local credential-store fallback)")
+		case !posture.Available:
+			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s unavailable)\n", posture.Label)
+			fmt.Fprintf(out, "                    (%s; startup will fail closed)\n", posture.Detail)
+		case posture.Protected:
+			fmt.Fprintf(out, "  secret store      ✓ managed protected OpenBao (%s)\n", posture.Label)
+			fmt.Fprintf(out, "                    (%s; loopback 127.0.0.1:8200)\n", posture.Detail)
+		default:
+			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao with same-disk degraded bootstrap custody")
+			fmt.Fprintln(out, "                    (OpenBao data, unseal material, and bootstrap login share ~/.microagency;")
+			fmt.Fprintln(out, "                     set MICROAGENCY_OPENBAO_PROTECTOR and migrate to protected custody)")
+		}
 	case strings.TrimSpace(getenv(secretstore.FileKeyEnv)) != "":
 		keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv))
 		key, err := secretstore.LoadFileKey(stateDir, keyPath)

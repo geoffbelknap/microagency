@@ -31,8 +31,10 @@ plaintext registration index. On startup `up` picks one:
 - If `VAULT_ADDR` and `VAULT_TOKEN` are set, it uses that Vault/OpenBao. Both
   are required; a partial configuration fails startup.
 - Otherwise, if an `openbao`/`bao` binary is on your PATH, `up` starts a
-  dedicated OpenBao on `127.0.0.1:8200`, stores its unseal key and root
-  token under `~/.microagency/openbao/` (0600), and uses its KV-v2 engine.
+  dedicated OpenBao on `127.0.0.1:8200` and uses its KV-v2 engine. Protected
+  custody can keep its bootstrap in macOS Keychain, Linux Secret Service, or
+  an operator KMS helper. Without one, the bootstrap stays beside the data
+  under `~/.microagency/openbao/` and is reported as same-disk degraded.
   `restart` keeps this OpenBao up; `down` stops it.
 - If neither is available, it falls back to a mode-0600 **plaintext file** at
   `~/.microagency/upstream-tokens.json`. This is permission isolation, not
@@ -57,9 +59,11 @@ temporary ciphertext file and an atomic rename. It refuses a key inside
 restart without the configured key. Back up the key separately: losing it makes
 the encrypted credentials unrecoverable.
 
-The managed OpenBao runs with `tls_disable` on the loopback bind (it never
-leaves localhost). Auto-unseal via a system keychain/KMS is a hardening
-follow-up.
+The managed OpenBao runs with `tls_disable` on the loopback bind; it never
+leaves localhost. On its first protected start, microagency uses the initial
+root token only to configure KV v2 and a narrow AppRole, then revokes it. See
+[protecting managed OpenBao](openbao-custody.md) for setup, migration,
+fail-closed recovery, rotation, and backup procedures.
 
 In a multi-user self-service deployment, each upstream token and dynamic
 client record uses a principal-specific secret-store path. The path contains a

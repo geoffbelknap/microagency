@@ -13,6 +13,10 @@ The guarantees, and where each one is enforced:
   operator-key encrypted file or an explicitly degraded mode-0600 plaintext
   fallback (see
   [where credentials live](connect-clients.md#where-credentials-live)).
+  Managed OpenBao can keep its unseal and AppRole bootstrap in macOS Keychain,
+  Linux Secret Service, or an operator KMS helper. The initial root token is
+  revoked after narrow AppRole provisioning; protected-provider failure stops
+  startup instead of selecting another credential store.
   Nothing in the agent's config, context, or tool results can reveal them.
 - **Least privilege.** A connection can be read-only, narrowed to specific
   OAuth scopes, restricted to one user (`owner`), or held in the index as

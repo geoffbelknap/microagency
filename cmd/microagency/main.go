@@ -90,6 +90,8 @@ func main() {
 		runPurge(args[1:])
 	case "doctor":
 		runDoctor(args[1:])
+	case "openbao":
+		runOpenBao(args[1:])
 	case "hook":
 		runHook(args[1:])
 	default:
@@ -109,7 +111,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "hook"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -177,6 +179,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
 	fmt.Fprintln(w, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
 	fmt.Fprintln(w, "  microagency doctor        check runtime + engine health")
+	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(w, "")
 	upFlags(w)
@@ -366,6 +369,9 @@ func run(args []string) {
 	// or an explicitly degraded mode-0600 plaintext fallback.
 	if !stdio {
 		if addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv); err != nil {
+			if baomanager.FailClosed(err) {
+				fatal("managed OpenBao protected custody is unavailable; refusing a credential-store downgrade", "err", err)
+			}
 			slog.Warn("OpenBao unavailable; evaluating the configured local credential-store fallback", "err", err)
 		} else {
 			_ = os.Setenv("VAULT_ADDR", addr)
@@ -644,6 +650,11 @@ func runPurge(args []string) {
 	}
 	if full {
 		baomanager.Stop(filepath.Join(dir, "openbao")) // release the storage dir before removing it
+		if err := baomanager.DeleteCustody(context.Background(), filepath.Join(dir, "openbao"), os.Getenv); err != nil {
+			fmt.Fprintf(os.Stderr, "microagency: purge: protected OpenBao bootstrap was not deleted: %v\n", err)
+			fmt.Fprintln(os.Stderr, "The state directory was kept so the protector record can still be located; restore protector access and retry.")
+			os.Exit(1)
+		}
 	}
 	if err := doPurge(dir, full); err != nil {
 		fmt.Fprintf(os.Stderr, "microagency: purge: %v\n", err)

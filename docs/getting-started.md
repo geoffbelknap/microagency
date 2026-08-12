@@ -26,10 +26,11 @@ state (add `--full` to wipe everything; both confirm first).
 [Operating the gateway](operations.md) covers the full CLI surface.
 
 Your upstream credentials stay in the gateway's secret store and never enter
-the agent's configuration or context. OpenBao/Vault is preferred. If it is
-unavailable, the local fallback is encrypted only when you supply a separate
-key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded. See
-[where credentials live](connect-clients.md#where-credentials-live).
+the agent's configuration or context. OpenBao/Vault is preferred, and managed
+OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
+is unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded.
+See [where credentials live](connect-clients.md#where-credentials-live).
 
 ## Add your servers
 
