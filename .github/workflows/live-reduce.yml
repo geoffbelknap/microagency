@@ -92,12 +92,13 @@ jobs:
             /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/egress-audit.jsonl
             /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/events.jsonl
 
-  apple-vf:
-    name: live-reduce-apple-vf
-    runs-on: [self-hosted, macOS, ARM64, applevf]
+  apple-vf-contract:
+    # GitHub-hosted macOS runs in a VM and cannot nest Virtualization.framework.
+    # Keep the Apple integration buildable and contract-aligned here; run the
+    # live probe directly on an Apple Silicon host with scripts/dev/live-reduce.sh.
+    name: apple-vf-contract-macos-arm64
+    runs-on: macos-15
     timeout-minutes: 30
-    env:
-      MICROAGENT_E2E_BACKEND: apple-vf
     steps:
       - name: Checkout microagency
         uses: actions/checkout@v7
@@ -128,51 +129,17 @@ jobs:
           scripts/dev/applevf-supervisor-build.sh
           cp supervisors/applevf/.build/release/microagent-applevf-supervisor "$runtime/bin/"
           echo "$runtime/bin" >> "$GITHUB_PATH"
-          echo "MICROAGENT_APPLEVF_SUPERVISOR=$runtime/bin/microagent-applevf-supervisor" >> "$GITHUB_ENV"
 
-      - name: Verify Apple VF prerequisites
+      - name: Verify Apple VF contract
         run: |
           test "$(uname -m)" = arm64
-          command -v mke2fs >/dev/null || test -x /opt/homebrew/opt/e2fsprogs/sbin/mke2fs
-          microagent kernel install --backend apple-vf --arch arm64
+          test -x "$RUNNER_TEMP/microagent-live/bin/microagent-applevf-supervisor"
+          microagent --json contract > "$RUNNER_TEMP/microagent-contract.json"
+          jq -e '
+            (.backends | index("apple-vf")) != null and
+            (.mediation.fields | index("required")) != null and
+            (.mediation.fields | index("failClosed")) != null
+          ' "$RUNNER_TEMP/microagent-contract.json"
 
-      - name: Run live reduce(code)
-        env:
-          MICROAGENCY_LIVE_STATE_DIR: /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}
-          MICROAGENCY_LIVE_ARTIFACT_DIR: ${{ runner.temp }}/microagency-live-artifacts/apple-vf
-        run: scripts/dev/live-reduce.sh
-
-      - name: Upload live result and bounded failure evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: live-reduce-apple-vf-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: ignore
-          retention-days: 14
-          path: |
-            ${{ runner.temp }}/microagency-live-artifacts/apple-vf
-            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/serial.log
-            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/result.json
-            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/egress-audit.jsonl
-            /tmp/ma-${{ github.run_id }}-${{ github.run_attempt }}/**/events.jsonl
-
-  apple-vf-queue-watchdog:
-    name: report unavailable Apple VF runner
-    if: github.event_name != 'workflow_call'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: write
-    steps:
-      - name: Cancel a recurring run that cannot reach an Apple VF host
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          sleep 300
-          status="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" --jq '.jobs[] | select(.name == "live-reduce-apple-vf") | .status')"
-          if [ "$status" = queued ]; then
-            echo "No Apple VF runner accepted the live job; recording this workflow as unavailable."
-            gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}"
-          else
-            echo "Apple VF job status: ${status:-not found}"
-          fi
+      - name: Test microagency Apple integration
+        run: go test -short ./internal/sandbox ./internal/mcp
