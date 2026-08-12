@@ -116,6 +116,19 @@ if [ "$backend" = apple-vf ] && [ -z "${MICROAGENT_APPLEVF_SUPERVISOR:-}" ]; the
   exit 2
 fi
 
+# The microagent library falls back to os.Executable when it launches the
+# Apple VF host-fd egress datapath. Under go test that is this package's test
+# binary, which has no --egress-datapath mode. Pin the datapath to the same
+# task-owned microagent CLI selected above so mediated boots use one release.
+if [ "$backend" = apple-vf ]; then
+  if [ -z "$host_microagent" ] || [ ! -x "$host_microagent" ]; then
+    echo "live-reduce: Apple VF requires the pinned microagent CLI on PATH" >&2
+    exit 2
+  fi
+  MICROAGENT_EGRESS_DATAPATH_BIN="$host_microagent"
+  export MICROAGENT_EGRESS_DATAPATH_BIN
+fi
+
 microagent_runtime="$(microagent version 2>/dev/null || printf unavailable)"
 
 MICROAGENCY_LIVE_REDUCE=1 \
