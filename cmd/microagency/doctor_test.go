@@ -2,18 +2,109 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"microagency/internal/secretstore"
 )
 
 // doctor reports the secret-store posture so "where are my credentials" has an
 // answer. An external Vault/OpenBao (VAULT_ADDR) is named explicitly.
 func TestReportSecretPostureExternalVault(t *testing.T) {
-	t.Setenv("VAULT_ADDR", "https://vault.example:8200")
+	env := map[string]string{"VAULT_ADDR": "https://vault.example:8200", "VAULT_TOKEN": "token"}
 	var buf bytes.Buffer
-	reportSecretPosture(&buf)
+	reportSecretPostureWith(&buf, func(name string) string { return env[name] }, func() bool { return false }, t.TempDir())
 	if !strings.Contains(buf.String(), "external Vault/OpenBao") || !strings.Contains(buf.String(), "vault.example") {
 		t.Fatalf("posture should name the external Vault: %q", buf.String())
+	}
+}
+
+func TestReportSecretPostureNamesPlaintextFallback(t *testing.T) {
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return false }, t.TempDir())
+	if !strings.Contains(buf.String(), "degraded") || !strings.Contains(buf.String(), "plaintext") || strings.Contains(buf.String(), "fine for single-user") {
+		t.Fatalf("fallback posture is not explicit: %q", buf.String())
+	}
+}
+
+func TestReportSecretPostureValidatesEncryptedFallback(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	keyPath := filepath.Join(root, "key")
+	if err := os.WriteFile(keyPath, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := func(name string) string {
+		if name == secretstore.FileKeyEnv {
+			return keyPath
+		}
+		return ""
+	}
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, env, func() bool { return false }, stateDir)
+	if !strings.Contains(buf.String(), "AES-256-GCM") || !strings.Contains(buf.String(), "separately supplied") {
+		t.Fatalf("encrypted posture is not explicit: %q", buf.String())
+	}
+
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, env, func() bool { return false }, stateDir)
+	if !strings.Contains(buf.String(), "misconfigured") || !strings.Contains(buf.String(), "fail closed") {
+		t.Fatalf("invalid key posture is not explicit: %q", buf.String())
+	}
+}
+
+func TestReportSecretPostureRejectsMissingOrWrongExistingFileKey(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	store, err := secretstore.NewEncryptedFile(filepath.Join(stateDir, "upstream-tokens.json"), bytes.Repeat([]byte{0x11}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), "up/example", []byte("sentinel")); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return false }, stateDir)
+	if !strings.Contains(buf.String(), "exists") || !strings.Contains(buf.String(), "not configured") || !strings.Contains(buf.String(), "fail closed") {
+		t.Fatalf("missing existing-file key posture is not explicit: %q", buf.String())
+	}
+
+	wrongKeyPath := filepath.Join(root, "wrong-key")
+	if err := os.WriteFile(wrongKeyPath, bytes.Repeat([]byte{0x22}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, func(name string) string {
+		if name == secretstore.FileKeyEnv {
+			return wrongKeyPath
+		}
+		return ""
+	}, func() bool { return false }, stateDir)
+	if !strings.Contains(buf.String(), "wrong key") || !strings.Contains(buf.String(), "misconfigured") {
+		t.Fatalf("wrong existing-file key posture is not explicit: %q", buf.String())
+	}
+}
+
+func TestReportSecretPostureRejectsPartialVaultConfig(t *testing.T) {
+	for _, tc := range []struct {
+		env  map[string]string
+		want string
+	}{
+		{map[string]string{"VAULT_ADDR": "https://vault.example:8200"}, "VAULT_TOKEN is missing"},
+		{map[string]string{"VAULT_TOKEN": "token"}, "VAULT_ADDR is missing"},
+	} {
+		var buf bytes.Buffer
+		reportSecretPostureWith(&buf, func(name string) string { return tc.env[name] }, func() bool { return false }, t.TempDir())
+		if !strings.Contains(buf.String(), tc.want) || !strings.Contains(buf.String(), "fail closed") {
+			t.Fatalf("partial Vault config is not explicit: %q", buf.String())
+		}
 	}
 }
 

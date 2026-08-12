@@ -50,9 +50,10 @@ To stop, `microagency down`. To disconnect a client,
 (keeping its secret store up), and `microagency purge` deletes your local state
 (add `--full` to wipe everything; both confirm first).
 
-Your upstream credentials are held in a secret store, not in the clear:
-OpenBao/Vault when available (or a managed OpenBao if the binary is on your
-PATH), otherwise an encrypted file store under `~/.microagency`. See
+Your upstream credentials stay in the gateway's secret store and never enter
+the agent's configuration or context. OpenBao/Vault is preferred. If it is
+unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded. See
 [where credentials live](docs/connect-clients.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency

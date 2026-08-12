@@ -82,8 +82,19 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	}
 
 	// Acquired secrets (upstream OAuth refresh tokens) persist in OpenBao/Vault when
-	// VAULT_ADDR + VAULT_TOKEN are set, else a 0600 file under StateDir.
-	secStore := secretstore.Open(cfg.StateDir, os.Getenv, http.DefaultClient)
+	// VAULT_ADDR + VAULT_TOKEN are set. The emergency file fallback is encrypted
+	// only with a separately supplied operator key; otherwise it is explicitly
+	// degraded mode-0600 plaintext.
+	secStore, err := secretstore.Open(cfg.StateDir, os.Getenv, http.DefaultClient)
+	if err != nil {
+		return nil, fmt.Errorf("open credential store: %w", err)
+	}
+	switch secStore.Kind() {
+	case "encrypted-file":
+		slog.Info("credential store selected", "backend", "encrypted file", "dir", cfg.StateDir)
+	case "file":
+		slog.Warn("OpenBao unavailable; credentials use the degraded mode-0600 plaintext fallback", "dir", cfg.StateDir, "encrypt_with", secretstore.FileKeyEnv)
+	}
 	opts := []mcp.Option{
 		mcp.WithSecretStore(secStore),
 		mcp.WithStateDir(cfg.StateDir),

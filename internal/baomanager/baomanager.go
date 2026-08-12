@@ -45,7 +45,14 @@ type bootstrap struct {
 // + root token.
 func Ensure(ctx context.Context, dir string, getenv func(string) string) (addr, token string, err error) {
 	if a := getenv("VAULT_ADDR"); a != "" {
-		return a, getenv("VAULT_TOKEN"), nil
+		token := getenv("VAULT_TOKEN")
+		if token == "" {
+			return "", "", fmt.Errorf("VAULT_ADDR is set but VAULT_TOKEN is missing")
+		}
+		return a, token, nil
+	}
+	if getenv("VAULT_TOKEN") != "" {
+		return "", "", fmt.Errorf("VAULT_TOKEN is set but VAULT_ADDR is missing")
 	}
 	bin, err := resolveBinary()
 	if err != nil {

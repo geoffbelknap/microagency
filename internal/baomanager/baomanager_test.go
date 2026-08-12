@@ -13,6 +13,18 @@ import (
 	"microagency/internal/secretstore"
 )
 
+func TestEnsureRejectsPartialExternalVaultConfig(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"VAULT_ADDR": "https://vault.example:8200"},
+		{"VAULT_TOKEN": "token"},
+	} {
+		_, _, err := Ensure(context.Background(), t.TempDir(), func(name string) string { return env[name] })
+		if err == nil {
+			t.Fatalf("partial external Vault config was accepted: %#v", env)
+		}
+	}
+}
+
 // TestRealLifecycle drives a real OpenBao on PATH end to end: start → init →
 // unseal → KV v2 → Save/Load a secret → Stop. Gated so it stays out of normal CI.
 func TestRealLifecycle(t *testing.T) {

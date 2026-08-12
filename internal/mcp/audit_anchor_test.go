@@ -9,13 +9,12 @@ import (
 	"testing"
 
 	"microagency/internal/auth"
-	"microagency/internal/secretstore"
 )
 
 func anchoredServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	secrets := secretstore.Open(dir, func(string) string { return "" }, nil) // file secret store
+	secrets := openTestSecretStore(t, dir) // file secret store
 	signer, err := auth.LoadOrCreateSigner(filepath.Join(t.TempDir(), "audit-key"))
 	if err != nil {
 		t.Fatalf("signer: %v", err)
