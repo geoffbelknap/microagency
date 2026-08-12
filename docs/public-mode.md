@@ -57,9 +57,11 @@ Built-in public OAuth serves these routes on the tunneled listener:
 - `/oauth/token`
 - `/oauth/revoke`
 - `/oauth/jwks`
+- `/connections` and `/connections/*`
 - `/mcp`
 
-The tunnel exposes only `/mcp` and the OAuth endpoints. The operator
+The tunnel exposes `/mcp`, the OAuth endpoints, and the principal-authenticated
+self-service connection API. The operator
 surface (`/admin` and the console) moves to its own loopback listener,
 `127.0.0.1:8766` by default or wherever `--admin-addr` points, so it
 isn't network-reachable from the public bind. The operator token gates that
@@ -82,5 +84,92 @@ console. Other users can't see or call an owned connection or the credential
 it holds; the index and the invocation gate both enforce it. Off-context
 results are scoped the same way: each `<ref_>` is bound to the subject
 that created it, so one user can't reduce over another's parked data even
-with the handle. Self-service connections, where each user runs their own
-OAuth flow, aren't implemented yet.
+with the handle.
+
+### Allow self-service connections
+
+An operator can permit a provider without permitting arbitrary upstream URLs.
+Create a connection template through the loopback admin API:
+
+```sh
+IFS= read -r MICROAGENCY_OPERATOR_TOKEN < ~/.microagency/token
+curl -fsS http://127.0.0.1:8766/admin/connection-templates \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "id": "supabase",
+    "display_name": "Supabase",
+    "url": "https://mcp.supabase.com/mcp",
+    "allowed_scopes": ["mcp"],
+    "default_scopes": ["mcp"],
+    "allowed_params": ["project_ref", "read_only"],
+    "read_only": true,
+    "max_per_user": 2
+  }'
+unset MICROAGENCY_OPERATOR_TOKEN
+```
+
+The template fixes the upstream URL and caps each principal's connection
+count. A user may request only the listed OAuth scopes and curated provider
+parameters. Unknown parameters are rejected instead of being appended to the
+URL. Set `disabled: true` on the template to stop new and pending
+authorizations; existing connections stay in their current posture until the
+operator disables, revokes, or deletes them.
+
+Providers without dynamic client registration need an operator-configured
+`client_id` and optional `client_secret` on the template. microagency writes
+those values only to the secret store. The template file and every API response
+contain only `client_configured: true`.
+
+The authenticated account portal or integration uses the same principal token
+as `/mcp`:
+
+```sh
+curl -fsS https://gateway.example/connections/templates \
+  -H "Authorization: Bearer $MCP_ACCESS_TOKEN"
+
+curl -fsS https://gateway.example/connections \
+  -H "Authorization: Bearer $MCP_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "template": "supabase",
+    "params": {"project_ref": "my-project", "read_only": "true"}
+  }'
+```
+
+Open the returned `authorize_url` in that user's browser. The provider returns
+to `/connections/oauth/callback`; the callback state is random, single-use,
+expires after ten minutes, and is bound to the initiating principal and
+template. The resulting connection name is server-generated.
+
+Use these principal-authenticated routes to manage only the caller's own
+connections:
+
+- `GET /connections`
+- `POST /connections/{name}/refresh` to reload its tool index
+- `POST /connections/{name}/reauthorize` to replace a revoked or changed grant
+- `DELETE /connections/{name}` to remove the connection and credential
+
+The operator retains gateway-wide controls at
+`POST /admin/upstreams/{name}/disable`,
+`POST /admin/upstreams/{name}/revoke`, and
+`DELETE /admin/upstreams/{name}`. Disable keeps the credential but makes calls
+non-invocable. Revoke deletes the credential, hides the tools, and leaves an
+operator-visible tombstone that cannot be enabled without the owner completing
+a new OAuth flow. Delete removes the registration; deleting the last connection
+for a principal and template also removes that principal's stored client
+registration.
+
+Each self-service token, dynamic client registration, pending OAuth request,
+connection record, tool view, and reference is keyed or checked against the
+token subject. Secret-store paths use a one-way subject digest rather than the
+raw identity. A connection name or `<ref_>` handle is not authority. If an
+identity changes or disappears, its old resources remain inaccessible; ownership
+cannot be transferred because the OAuth grant belongs to the original identity.
+The operator must revoke or delete those resources, and the new identity creates
+new connections.
+
+Per-template, per-principal, pending-flow, global-catalog, and hourly start
+limits bound self-service growth. The agent-facing `tools/list` response remains
+exactly `find_tools`, `call_tool`, and `reduce`; connection management is an HTTP
+account surface, not another agent tool.

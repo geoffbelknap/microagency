@@ -137,6 +137,8 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	// it is protected by the unguessable state + PKCE, not the admin bearer.
 	mux.HandleFunc("GET /admin/oauth/callback", s.adminOAuthCallback)
 	mux.HandleFunc("POST /admin/upstreams/{name}/enable", g(s.adminEnableUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/disable", g(s.adminDisableUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/revoke", g(s.adminRevokeUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
@@ -146,6 +148,9 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("GET /admin/provider-params", g(s.adminProviderParams))
 	mux.HandleFunc("GET /admin/registry", g(s.adminRegistrySearch))
 	mux.HandleFunc("POST /admin/registry/import", g(s.adminRegistryImport))
+	mux.HandleFunc("GET /admin/connection-templates", g(s.adminListConnectionTemplates))
+	mux.HandleFunc("POST /admin/connection-templates", g(s.adminPutConnectionTemplate))
+	mux.HandleFunc("DELETE /admin/connection-templates/{id}", g(s.adminDeleteConnectionTemplate))
 	mux.HandleFunc("DELETE /admin/upstreams/{name}", g(s.adminDeleteUpstream))
 	return mux
 }
@@ -286,7 +291,11 @@ func (s *Server) adminSetOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.SetUpstreamOwner(name, in.Owner); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusNotFound
+		if strings.Contains(err.Error(), "ownership is immutable") {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	s.persistOwner(name, in.Owner)
@@ -496,14 +505,19 @@ func (s *Server) adminReauthUpstream(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in)
 
 	var url, state string
+	var selfService bool
 	for _, up := range s.UpstreamList() {
 		if up.Name == name {
-			url, state = up.URL, up.State
+			url, state, selfService = up.URL, up.State, up.SelfService
 			break
 		}
 	}
 	if url == "" {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
+		return
+	}
+	if selfService {
+		http.Error(w, "self-service connections must be reauthorized by their owning principal", http.StatusConflict)
 		return
 	}
 	u := &gateway.Upstream{Name: name, URL: url, Client: s.upstreamClient}
@@ -523,11 +537,24 @@ func (s *Server) adminReauthUpstream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDeleteUpstream(w http.ResponseWriter, r *http.Request) {
-	if !s.RemoveUpstream(r.PathValue("name")) {
+	name := r.PathValue("name")
+	record, _ := s.snapshotUpstream(name)
+	if record.conn == nil {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
 		return
 	}
-	s.removeRegistration(r.Context(), r.PathValue("name")) // stay gone across restarts
+	s.cancelOAuthFlows(func(flow *oauthFlow) bool { return flow.name == name })
+	if record.selfService {
+		_ = s.RevokeUpstream(name)
+		if err := s.removeSelfServiceRegistration(r.Context(), name, record); err != nil {
+			http.Error(w, "connection disabled, but durable deletion failed: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		s.deleteSelfServiceClientIfUnused(r.Context(), record.owner, record.template, record.conn.Endpoint())
+	} else {
+		s.removeRegistration(r.Context(), name) // stay gone across restarts
+	}
+	_ = s.RemoveUpstream(name)
 	w.WriteHeader(http.StatusNoContent)
 }
 

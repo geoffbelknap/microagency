@@ -34,6 +34,8 @@ Everything lives under `~/.microagency`:
 | `oauth-clients.json` | dynamic client registrations, bound to their issuer |
 | `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
 | `auth-posture.json` | the active public auth mode, issuer, and resource |
+| `upstreams.json` | non-secret connection registrations, ownership, template identity, and revoked state |
+| `connection-templates.json` | operator-approved self-service provider, scope, parameter, and quota bounds; never OAuth client secrets |
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
@@ -52,7 +54,8 @@ deleted by `purge --full`.
 `purge` has two tiers, and both confirm before acting:
 
 - **Default**: deletes parked data (refs) and run/audit history. Connections,
-  credentials, and the operator token are kept — no re-auth.
+  connection templates, credentials, and the operator token are kept — no
+  re-auth.
 - **`--full`**: deletes everything under `~/.microagency` — parked data,
   history, stored upstream credentials (you will re-authenticate every
   connection), the operator token, and the local OAuth keys (Claude Code

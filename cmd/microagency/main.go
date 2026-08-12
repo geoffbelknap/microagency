@@ -828,6 +828,8 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 
 	mcpMux = http.NewServeMux()
 	var builtInAS *auth.AuthServer
+	var connectionAuth mcp.Authenticator
+	var connectionBase, connectionMetadata string
 	switch {
 	case cfg.issuer != "":
 		// External OAuth resource server — issuance is hosted elsewhere.
@@ -843,10 +845,14 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			}
 			resource := publicIssuer + "/mcp"
 			metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-			mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(mcp.OAuthAuthenticator(rs, cfg.requireScope), metadataURL))
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionBase, connectionMetadata = publicIssuer, metadataURL
+			mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 			mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(resource, cfg.issuer))
 		} else {
-			mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(mcp.OAuthAuthenticator(rs, cfg.requireScope)))
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionBase, connectionMetadata = "http://"+cfg.addr, "/.well-known/oauth-protected-resource"
+			mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 			mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, cfg.issuer))
 		}
 		mode = "oauth-external"
@@ -885,7 +891,9 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			Revocations: revocations, RequireTokenID: true,
 		}
 		metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(mcp.OAuthAuthenticator(rs, "mcp"), metadataURL))
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		connectionBase, connectionMetadata = publicIssuer, metadataURL
+		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 		mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(publicResource, publicIssuer))
 		mode = "oauth-tunnel"
 	default:
@@ -913,9 +921,19 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 		}
 		// The built-in AS always grants "mcp", so requiring it costs nothing and
 		// makes scope enforcement real instead of decorative.
-		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(mcp.OAuthAuthenticator(rs, "mcp")))
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		connectionBase, connectionMetadata = issuer, "/.well-known/oauth-protected-resource"
+		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, issuer))
 		mode = "oauth-local"
+	}
+	if connectionAuth != nil {
+		connections, err := srv.UserConnectionsHandler(connectionAuth, connectionBase, connectionMetadata)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		mcpMux.Handle("/connections", connections)
+		mcpMux.Handle("/connections/", connections)
 	}
 
 	// The operator surface binds a SEPARATE listener whenever effectiveAdminAddr

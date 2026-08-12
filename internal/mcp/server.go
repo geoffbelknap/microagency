@@ -110,9 +110,10 @@ type Server struct {
 	// alike. Splitting them cuts the blast radius (a change to run tracking can't
 	// affect the registry) and the contention (recording a run no longer blocks a
 	// find_tools index read). No critical section spans two of them.
-	reg   registry       // aggregated upstreams + tool usage + per-upstream minimize policy
-	rs    runStore       // the bounded recent-run window + all-time counters + run-id seq
-	flows oauthFlowStore // pending console OAuth-add flows
+	reg   registry         // aggregated upstreams + tool usage + per-upstream minimize policy
+	rs    runStore         // the bounded recent-run window + all-time counters + run-id seq
+	flows oauthFlowStore   // pending console OAuth-add flows
+	self  selfServiceStore // operator-approved templates + bounded per-principal start rates
 }
 
 // registry holds the aggregated-MCP index and its per-upstream configuration.
@@ -228,6 +229,7 @@ func NewServer(r Runner, opts ...Option) *Server {
 		reg:      registry{conns: map[string]*upstream{}, usage: map[string]int{}, policies: map[string][]byte{}},
 		rs:       runStore{byID: map[string]runRecord{}, maxKept: defaultMaxRuns},
 		flows:    oauthFlowStore{byState: map[string]*oauthFlow{}},
+		self:     newSelfServiceStore(),
 		inflight: newInflight(),
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
@@ -237,6 +239,7 @@ func NewServer(r Runner, opts ...Option) *Server {
 	for _, o := range opts {
 		o(s)
 	}
+	s.loadConnectionTemplates()
 	s.loadAudit() // replay the persisted audit log so the operator's history survives restarts
 	return s
 }

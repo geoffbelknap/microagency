@@ -135,6 +135,20 @@ func WriteConnected(w http.ResponseWriter, name string) {
 		`<meta http-equiv="refresh" content="2;url=/console">`, body)))
 }
 
+// WriteUserConnected renders a public self-service completion page without a
+// console redirect. The operator console is deliberately absent from the public
+// listener, so linking or auto-returning there would create a misleading route.
+func WriteUserConnected(w http.ResponseWriter, name string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	body := `
+<div class="card"><div class="body center" style="padding:34px 26px">
+ <div class="seal ok"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--teal-dark)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 7"/></svg></div>
+ <div class="title" style="font-size:25px">Connected ` + html.EscapeString(name) + `</div>
+ <p class="lead" style="margin-top:10px">The credential is held by microagency — your agent never sees it. You can close this tab.</p>
+</div></div>`
+	_, _ = w.Write([]byte(shell("microagency", "", body)))
+}
+
 // --- 3. Generic notice ------------------------------------------------------
 
 // WriteMessage renders a short notice (expired request, denial, exchange error).
@@ -149,6 +163,22 @@ func WriteMessage(w http.ResponseWriter, msg string) {
   <p class="lead" style="margin-top:0;font-size:14px;color:var(--ink)">` + html.EscapeString(msg) + `</p>
   <a class="link" href="/console">Open the console
    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
+ </div>
+</div>`
+	_, _ = w.Write([]byte(shell("microagency", "", body)))
+}
+
+// WriteUserMessage renders a public authorization notice without linking to the
+// loopback-only operator console.
+func WriteUserMessage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	body := `
+<div class="card">
+ <div class="head">` + markSVG + `<div><div class="word">microagency</div><div class="sub">authorization</div></div></div>
+ <div class="body">
+  <div class="seal warn" style="margin:0 0 16px"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></div>
+  <p class="lead" style="margin-top:0;font-size:14px;color:var(--ink)">` + html.EscapeString(msg) + `</p>
+  <p class="note">Return to your account to start again.</p>
  </div>
 </div>`
 	_, _ = w.Write([]byte(shell("microagency", "", body)))

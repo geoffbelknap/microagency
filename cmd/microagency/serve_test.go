@@ -132,6 +132,27 @@ func TestTunnelBuiltInOAuthUsesDiscoveredOriginAndKeepsConsentLocal(t *testing.T
 	if mcpRec.Code == http.StatusUnauthorized {
 		t.Fatal("built-in public OAuth access token did not authenticate /mcp")
 	}
+	connectionsRec := httptest.NewRecorder()
+	connectionsReq := httptest.NewRequest(http.MethodGet, "/connections/templates", nil)
+	connectionsReq.Header.Set("Authorization", "Bearer "+access)
+	mcpMux.ServeHTTP(connectionsRec, connectionsReq)
+	if connectionsRec.Code != http.StatusOK {
+		t.Fatalf("MCP principal could not reach self-service templates: status=%d", connectionsRec.Code)
+	}
+	operatorConnectionsRec := httptest.NewRecorder()
+	operatorConnectionsReq := httptest.NewRequest(http.MethodGet, "/connections/templates", nil)
+	operatorConnectionsReq.Header.Set("Authorization", "Bearer op-tok")
+	mcpMux.ServeHTTP(operatorConnectionsRec, operatorConnectionsReq)
+	if operatorConnectionsRec.Code != http.StatusUnauthorized {
+		t.Fatalf("operator token authenticated self-service API: status=%d", operatorConnectionsRec.Code)
+	}
+	adminConnectionsRec := httptest.NewRecorder()
+	adminConnectionsReq := httptest.NewRequest(http.MethodGet, "/connections/templates", nil)
+	adminConnectionsReq.Header.Set("Authorization", "Bearer "+access)
+	adminMux.ServeHTTP(adminConnectionsRec, adminConnectionsReq)
+	if adminConnectionsRec.Code != http.StatusNotFound {
+		t.Fatalf("self-service API leaked onto operator listener: status=%d", adminConnectionsRec.Code)
+	}
 	opRec := httptest.NewRecorder()
 	opReq := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	opReq.Header.Set("Authorization", "Bearer op-tok")
@@ -195,6 +216,11 @@ func TestTunnelExternalIssuerRemainsDistinctFromBuiltInOAuth(t *testing.T) {
 	mcpMux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil))
 	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"), "https://gateway.example/.well-known/oauth-protected-resource/mcp") {
 		t.Fatalf("external /mcp challenge = %d %q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+	connectionsRec := httptest.NewRecorder()
+	mcpMux.ServeHTTP(connectionsRec, httptest.NewRequest(http.MethodGet, "/connections/templates", nil))
+	if connectionsRec.Code != http.StatusUnauthorized || !strings.Contains(connectionsRec.Header().Get("WWW-Authenticate"), "https://gateway.example/.well-known/oauth-protected-resource/mcp") {
+		t.Fatalf("external self-service challenge = %d %q", connectionsRec.Code, connectionsRec.Header().Get("WWW-Authenticate"))
 	}
 }
 
