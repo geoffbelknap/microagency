@@ -65,6 +65,18 @@ type upstream struct {
 	// invocation gate. This is what keeps one user's OAuth grant from being
 	// exercised by another user of a shared (--issuer) deployment.
 	owner string
+	// selfService marks a principal-created connection. Its ownership is immutable:
+	// an operator may disable, revoke, or delete it, but cannot transfer an OAuth
+	// grant to a different identity. template records which approved template
+	// admitted it. revoked keeps the record visible to the operator while making it
+	// absent from every agent index and impossible to invoke.
+	selfService bool
+	template    string
+	revoked     bool
+	// authGeneration changes on operator revocation. Self-service refresh writers
+	// and reauthorization callbacks may commit only against the generation they
+	// started from, so an in-flight operation cannot resurrect a revoked grant.
+	authGeneration uint64
 	// minimizeSuggested is the minimization policy auto-detected from this upstream's
 	// tool schemas, computed ONCE when tools are (re)loaded and cached here. Computing
 	// it lazily in UpstreamList would rescan attacker-controlled tool metadata on every
@@ -117,6 +129,15 @@ type UpstreamOption func(*upstream)
 
 // WithOwner scopes the connection to the principal with the given subject.
 func WithOwner(subject string) UpstreamOption { return func(u *upstream) { u.owner = subject } }
+
+// WithSelfService marks a connection as created by its owning principal from an
+// operator-approved template.
+func WithSelfService(template string) UpstreamOption {
+	return func(u *upstream) { u.selfService, u.template = true, template }
+}
+
+// WithRevoked restores a persisted revoked record without restoring a credential.
+func WithRevoked() UpstreamOption { return func(u *upstream) { u.revoked = true } }
 
 // registerUpstream atomically registers rec under name, failing if the name is
 // already taken. The existence check and the write happen under ONE lock
@@ -220,6 +241,9 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
+	if rec.revoked {
+		return fmt.Errorf("gateway: upstream %q is revoked; reauthorize it before enabling", name)
+	}
 	if rec.enabled {
 		return nil
 	}
@@ -252,6 +276,10 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 // provenance. Errors if the upstream is unknown or the new connection is
 // unreachable (leaving the old connection in place).
 func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamConn) error {
+	return s.rebindUpstream(ctx, name, conn, nil)
+}
+
+func (s *Server) rebindUpstream(ctx context.Context, name string, conn upstreamConn, expectedGeneration *uint64) error {
 	if !s.hasUpstream(name) { // fast-fail before the network round-trip
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
@@ -269,9 +297,16 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamC
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while rebinding", name)
 	}
+	if expectedGeneration != nil && rec.authGeneration != *expectedGeneration {
+		return fmt.Errorf("gateway: upstream %q authorization changed while rebinding; start again", name)
+	}
 	rec.conn = conn
 	rec.tools = tools
 	rec.minimizeSuggested = sug
+	if rec.revoked {
+		rec.enabled = true
+	}
+	rec.revoked = false
 	return nil
 }
 
@@ -287,6 +322,9 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 	rec, ok := s.snapshotUpstream(name)
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	if rec.revoked {
+		return fmt.Errorf("gateway: upstream %q is revoked; reauthorize it before refreshing", name)
 	}
 	_ = rec.conn.Initialize(ctx)
 	tools, err := rec.conn.ListTools(ctx)
@@ -312,13 +350,16 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 
 // UpstreamInfo is an operator-facing view of one registered upstream (no token).
 type UpstreamInfo struct {
-	Name       string `json:"name"`
-	URL        string `json:"url"`
-	State      string `json:"state"`           // "enabled" | "discovered"
-	Provenance string `json:"provenance"`      // preloaded | catalog | discovered
-	ReadOnly   bool   `json:"read_only"`       // writes refused (least-privilege)
-	Owner      string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
-	Tools      int    `json:"tools"`           // count of advertised tools (shown per connection in the console)
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	State       string `json:"state"`           // "enabled" | "discovered"
+	Provenance  string `json:"provenance"`      // preloaded | catalog | discovered
+	ReadOnly    bool   `json:"read_only"`       // writes refused (least-privilege)
+	Owner       string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
+	SelfService bool   `json:"self_service,omitempty"`
+	Template    string `json:"template,omitempty"`
+	Revoked     bool   `json:"revoked,omitempty"`
+	Tools       int    `json:"tools"` // count of advertised tools (shown per connection in the console)
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
@@ -346,7 +387,38 @@ func (s *Server) SetUpstreamOwner(name, owner string) error {
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
+	if rec.selfService && owner != rec.owner {
+		return fmt.Errorf("gateway: self-service upstream %q ownership is immutable; revoke or delete it instead", name)
+	}
 	rec.owner = owner
+	return nil
+}
+
+// DisableUpstream makes a connection non-invocable while retaining its indexed
+// metadata and credential. Revoked connections remain revoked.
+func (s *Server) DisableUpstream(name string) error {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.enabled = false
+	return nil
+}
+
+// RevokeUpstream makes a connection invisible and non-invocable immediately. The
+// caller separately deletes its durable credential before reporting success.
+func (s *Server) RevokeUpstream(name string) error {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.enabled = false
+	rec.revoked = true
+	rec.authGeneration++
 	return nil
 }
 
@@ -373,12 +445,15 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if rec.enabled {
 			state = "enabled"
 		}
+		if rec.revoked {
+			state = "revoked"
+		}
 		explicit, hasExplicit := s.reg.policies[name]
 		effective := explicit
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
@@ -424,6 +499,9 @@ func (s *Server) indexedTools(subject string) []map[string]any {
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
 	for name, rec := range s.reg.conns {
+		if rec.revoked {
+			continue
+		}
 		if rec.owner != "" && rec.owner != subject {
 			continue
 		}
@@ -477,6 +555,9 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// other — same error as an unregistered tool, so a probing caller can't even
 	// learn the connection exists, let alone exercise its credential.
 	if rec.owner != "" && rec.owner != principalOf(ctx).Subject {
+		return toolError("unknown tool %q; discover tools with find_tools", name), true
+	}
+	if rec.revoked {
 		return toolError("unknown tool %q; discover tools with find_tools", name), true
 	}
 	if !rec.enabled {

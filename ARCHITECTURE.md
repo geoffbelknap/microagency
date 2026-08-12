@@ -83,7 +83,7 @@ Each part of the system has its own page:
   byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
   for web apps, built-in or external OAuth, the admin/tunnel split, and
-  per-user connection ownership.
+  operator-approved self-service connections with principal-bound credentials.
 - [The security model](docs/security-model.md) — each guarantee and where it
   is enforced, plus the egress-guard hook.
 - [Operating the gateway](docs/operations.md) — the CLI, state files,

@@ -17,6 +17,11 @@ The guarantees, and where each one is enforced:
 - **Least privilege.** A connection can be read-only, narrowed to specific
   OAuth scopes, restricted to one user (`owner`), or held in the index as
   discovered — findable but not invocable until an operator enables it.
+  Self-service users can instantiate only operator-approved templates; the
+  provider URL, scopes, curated provider parameters, and per-user quota are
+  bounded before an OAuth flow starts. Their token, client registration,
+  connection, and callback state are principal-bound, and self-service
+  ownership cannot be transferred.
   Reffed data is likewise bound to the principal that created it: another
   user holding the `<ref_>` handle can't reduce over it.
 - **Field minimization.** Sensitive field values in inline results are
@@ -46,6 +51,9 @@ The guarantees, and where each one is enforced:
   Public consent and all operator routes stay on a loopback listener that
   the tunnel never exposes. An MCP token cannot authenticate the operator
   API, and the operator token cannot authenticate `/mcp`.
+  The public `/connections` account API accepts the MCP principal token but
+  cannot route to `/admin`; its unauthenticated provider callback is protected
+  by expiring, single-use OAuth state and PKCE.
 
 ## The egress guard
 

@@ -61,6 +61,13 @@ The managed OpenBao runs with `tls_disable` on the loopback bind (it never
 leaves localhost). Auto-unseal via a system keychain/KMS is a hardening
 follow-up.
 
+In a multi-user self-service deployment, each upstream token and dynamic
+client record uses a principal-specific secret-store path. The path contains a
+one-way digest of the token subject, not the raw identity. The non-secret
+connection index records ownership so the gateway can rebuild the same boundary
+after a restart. See [public mode](public-mode.md#allow-self-service-connections)
+for the operator template and user authorization flow.
+
 ## Static bearer / external OAuth
 
 For a client that can't do OAuth, `up --token <tok>` serves a static bearer
