@@ -62,6 +62,7 @@ func TestLiveReduceCode(t *testing.T) {
 		"code": `print("LIVE_SINGLE|" + open("/app/input").read())`,
 	})
 	assertLiveReduceResult(t, single, "LIVE_SINGLE|SINGLE_INPUT_SENTINEL")
+	t.Log("single-input sentinel passed")
 
 	firstRef, _ := store.Put("ALPHA", "local")
 	secondRef, _ := store.Put("BETA", "local")
@@ -77,6 +78,7 @@ except Exception:
 print("LIVE_MULTI|" + open("/app/input_1").read() + "|" + open("/app/input_2").read())`,
 	})
 	assertLiveReduceResult(t, multi, "LIVE_MULTI|ALPHA|BETA")
+	t.Log("ordered multi-input result passed")
 
 	// A governed program receives only a run-scoped broker endpoint. The broker
 	// performs both paginated calls host-side with the gateway-held credential,
@@ -163,6 +165,7 @@ print("LIVE_PROGRAM|" + ",".join(row["id"] for row in rows))`,
 		},
 	})
 	assertLiveReduceResult(t, program, "LIVE_PROGRAM|ALPHA,BETA")
+	t.Log("governed paginated program result passed")
 	if atomic.LoadInt32(&upstreamCalls) != 2 || atomic.LoadInt32(&authFailures) != 0 {
 		t.Fatalf("governed pagination calls=%d auth_failures=%d", atomic.LoadInt32(&upstreamCalls), atomic.LoadInt32(&authFailures))
 	}
@@ -212,6 +215,7 @@ print("LIVE_PROGRAM|" + ",".join(row["id"] for row in rows))`,
 	if !hasProgramDeny {
 		t.Fatalf("%s governed program did not record the denied destination: %+v", backend, programRun)
 	}
+	t.Log("deny-all egress exercised and audited; host-only credential and private rows absent from output and audit")
 	t.Logf("live reduce(code) passed on %s; state=%s", backend, stateDir)
 }
 
