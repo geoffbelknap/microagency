@@ -14,6 +14,7 @@ microagency down           # stop the background server
 microagency restart        # restart with new flags; keeps OpenBao up
 microagency purge [--full] # delete your data (both tiers confirm first)
 microagency doctor         # check runtime + engine health
+microagency openbao        # inspect or migrate managed OpenBao custody
 microagency hook install   # print the Claude Code egress-guard hook setup
 ```
 
@@ -41,7 +42,9 @@ Everything lives under `~/.microagency`:
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
 | `refs/` | parked reference payloads (encrypted; 24h TTL with `--persist-refs`) |
 | `refs.key` | the refs encryption key |
-| `openbao/` | the managed OpenBao's unseal key and root token, when managed |
+| `openbao/data/` | encrypted storage for the managed OpenBao |
+| `openbao/bootstrap.json` | same-disk degraded bootstrap only; absent with protected custody |
+| `openbao/custody.json` | non-secret protected-provider kind, record ID, and helper path |
 | `microagency.log` | the backgrounded server's log, including the secret-store posture line |
 | `microagency.pid` | the running server's pid file |
 
@@ -59,9 +62,13 @@ deleted by `purge --full`.
 - **`--full`**: deletes everything under `~/.microagency` — parked data,
   history, stored upstream credentials (you will re-authenticate every
   connection), the operator token, and the local OAuth keys (Claude Code
-  will re-consent).
+  will re-consent). With protected OpenBao custody, it deletes the external
+  bootstrap record first and keeps the state directory if that deletion fails.
 
 `--yes`/`-y` skips the confirmation for scripted use.
+
+See [protecting managed OpenBao](openbao-custody.md) for protector setup,
+copy-then-switch migration, restart requirements, backup, and recovery.
 
 ## Doctor
 

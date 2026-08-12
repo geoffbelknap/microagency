@@ -51,10 +51,11 @@ To stop, `microagency down`. To disconnect a client,
 (add `--full` to wipe everything; both confirm first).
 
 Your upstream credentials stay in the gateway's secret store and never enter
-the agent's configuration or context. OpenBao/Vault is preferred. If it is
-unavailable, the local fallback is encrypted only when you supply a separate
-key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded. See
-[where credentials live](docs/connect-clients.md#where-credentials-live).
+the agent's configuration or context. OpenBao/Vault is preferred, and managed
+OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
+is unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded.
+See [where credentials live](docs/connect-clients.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency
 up`. Go is the only build dependency for the gateway itself (the wasm query

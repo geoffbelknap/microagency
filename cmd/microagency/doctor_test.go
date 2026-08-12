@@ -48,6 +48,39 @@ func TestReportSecretPostureExternalVault(t *testing.T) {
 	}
 }
 
+func TestReportSecretPostureDistinguishesManagedCustody(t *testing.T) {
+	stateDir := t.TempDir()
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return true }, stateDir)
+	if !strings.Contains(buf.String(), "same-disk degraded bootstrap custody") || !strings.Contains(buf.String(), "MICROAGENCY_OPENBAO_PROTECTOR") {
+		t.Fatalf("managed degraded posture is not explicit: %q", buf.String())
+	}
+
+	baoDir := filepath.Join(stateDir, "openbao")
+	if err := os.MkdirAll(baoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(t.TempDir(), "protector")
+	script := "#!/bin/sh\nif [ \"$1\" = get ]; then printf '%s' '{\"unseal_key\":\"u\",\"role_id\":\"r\",\"secret_id\":\"s\"}'; exit 0; fi\nexit 0\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"format":"microagency-openbao-custody-v1","kind":"command","id":"test","command":"` + helper + `"}`
+	if err := os.WriteFile(filepath.Join(baoDir, "custody.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return true }, stateDir)
+	if !strings.Contains(buf.String(), "managed protected OpenBao") || !strings.Contains(buf.String(), "external protector helper") || !strings.Contains(buf.String(), "root retired") {
+		t.Fatalf("managed protected posture is not explicit: %q", buf.String())
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return false }, stateDir)
+	if !strings.Contains(buf.String(), "OpenBao binary unavailable") || !strings.Contains(buf.String(), "startup will fail closed") {
+		t.Fatalf("protected posture disappeared when the binary was unavailable: %q", buf.String())
+	}
+}
+
 func TestReportSecretPostureNamesPlaintextFallback(t *testing.T) {
 	var buf bytes.Buffer
 	reportSecretPostureWith(&buf, func(string) string { return "" }, func() bool { return false }, t.TempDir())
