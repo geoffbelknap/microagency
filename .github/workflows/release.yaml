@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   live-reduce:
-    name: supported-backend-live-validation
+    name: linux-live-validation
     uses: ./.github/workflows/live-reduce.yml
 
   validate:

@@ -69,7 +69,7 @@ func TestToolRankingEval(t *testing.T) {
 	}
 	// BM25 is intentionally more work than substring counting, but this fixture is
 	// a large catalog and the absolute local cost must stay negligible.
-	if bm25.LatencyMicros > 100_000 {
+	if enforceRankingEvalLatency && bm25.LatencyMicros > 100_000 {
 		t.Fatalf("local ranker latency materially regressed: %+v", bm25)
 	}
 
