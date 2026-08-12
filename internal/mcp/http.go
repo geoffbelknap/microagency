@@ -82,8 +82,9 @@ func PrincipalFrom(ctx context.Context) (*auth.Principal, bool) {
 // configured Authenticator; we push no server-initiated messages, so there is no
 // GET/SSE stream.
 type httpHandler struct {
-	srv  *Server
-	auth Authenticator
+	srv              *Server
+	auth             Authenticator
+	resourceMetadata string
 }
 
 // HTTPHandler serves the MCP tool surface behind a static bearer token (loopback
@@ -95,7 +96,13 @@ func (s *Server) HTTPHandler(token string) http.Handler {
 // HTTPHandlerAuth serves the MCP tool surface behind the given authenticator
 // (e.g. OAuthAuthenticator for public deployments).
 func (s *Server) HTTPHandlerAuth(a Authenticator) http.Handler {
-	return &httpHandler{srv: s, auth: a}
+	return &httpHandler{srv: s, auth: a, resourceMetadata: "/.well-known/oauth-protected-resource"}
+}
+
+// HTTPHandlerAuthMetadata serves authenticated MCP and advertises the exact
+// protected-resource metadata URL on 401 responses.
+func (s *Server) HTTPHandlerAuthMetadata(a Authenticator, resourceMetadata string) http.Handler {
+	return &httpHandler{srv: s, auth: a, resourceMetadata: resourceMetadata}
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +115,11 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Point unauthenticated clients at the protected-resource metadata
 		// (RFC 9728) so they can discover the authorization server.
-		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="/.well-known/oauth-protected-resource"`)
+		metadata := h.resourceMetadata
+		if metadata == "" {
+			metadata = "/.well-known/oauth-protected-resource"
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+metadata+`"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

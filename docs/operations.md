@@ -31,7 +31,9 @@ Everything lives under `~/.microagency`:
 |---|---|
 | `token` | the operator token gating `/admin` and the console (0600) |
 | `oauth-key` | the built-in OAuth server's signing key |
-| `mcp-bearer` | the distinct MCP bearer a tunnel mints (never the operator token) |
+| `oauth-clients.json` | dynamic client registrations, bound to their issuer |
+| `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
+| `auth-posture.json` | the active public auth mode, issuer, and resource |
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
@@ -64,6 +66,7 @@ deleted by `purge --full`.
 
 - Whether the server is running.
 - The secret-store posture, meaning where your credentials are.
+- The active OAuth mode, issuer, resource, and public consent location.
 - The loaded query engines.
 - Whether the microVM runtime can boot a real workload.
 - Enforcement hygiene: any upstream the gateway proxies that a client is

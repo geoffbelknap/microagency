@@ -257,7 +257,7 @@ func TestRefreshTokenSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	const issuer, aud = "http://127.0.0.1:8765", "microagency"
-	rt, err := signer.Mint(issuer, aud+refreshAudienceSuffix, "operator", []string{"mcp"}, refreshTTL)
+	rt, err := signer.mint(issuer, aud+refreshAudienceSuffix, "operator", []string{"mcp"}, refreshTTL, map[string]any{"client_id": "client-1"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,10 +1,7 @@
-// Package auth is microagency's OAuth 2.1 / OIDC resource server. It validates
-// access tokens for the MCP resource and extracts the caller's identity — it
-// mints nothing. Issuance (and the human login behind it) is the authorization
-// server's job, which is always external/hosted (the operator's IdP, or a
-// hosted AS we federate to Google/GitHub). Keeping issuance out of this process
-// is deliberate: microagency holds the real crown jewels (the broker's creds),
-// so it must never also be an identity provider.
+// Package auth contains microagency's OAuth 2.1 authorization- and resource-
+// server components. The built-in single-user server issues audience-bound
+// tokens only after local operator consent; shared deployments can instead
+// validate tokens from an external issuer.
 //
 // The validator does the security-critical, bounded job — verify a JWT's
 // signature against the issuer's keys, and its issuer, audience, and expiry —
@@ -71,6 +68,13 @@ type ResourceServer struct {
 	Keys KeySet
 	// Leeway tolerates small clock skew on exp/nbf/iat. Default 30s.
 	Leeway time.Duration
+	// Revocations is consulted after signature, issuer, audience, and expiry
+	// validation. Built-in OAuth supplies the same list used by its token and
+	// revocation endpoints; external issuers normally leave it nil.
+	Revocations *RevocationList
+	// RequireTokenID rejects a token without jti. Built-in OAuth enables this so
+	// every access token can be revoked; external issuers may omit jti.
+	RequireTokenID bool
 }
 
 // ErrUnauthenticated is returned (wrapped) for any token that fails validation,
@@ -114,6 +118,13 @@ func (rs *ResourceServer) Validate(ctx context.Context, raw string) (*Principal,
 	sub, _ := claims["sub"].(string)
 	if strings.TrimSpace(sub) == "" {
 		return nil, fmt.Errorf("%w: token missing sub", ErrUnauthenticated)
+	}
+	jti, _ := claims["jti"].(string)
+	if rs.RequireTokenID && strings.TrimSpace(jti) == "" {
+		return nil, fmt.Errorf("%w: token missing jti", ErrUnauthenticated)
+	}
+	if rs.Revocations != nil && rs.Revocations.IsRevoked(jti) {
+		return nil, fmt.Errorf("%w: token revoked", ErrUnauthenticated)
 	}
 
 	p := &Principal{Subject: sub, Issuer: rs.Issuer, Scopes: parseScopes(claims)}
