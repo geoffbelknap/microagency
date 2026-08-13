@@ -32,6 +32,11 @@ type RunInfo struct {
 	Tool                 string   `json:"tool,omitempty"`
 	Args                 string   `json:"args,omitempty"`
 	User                 string   `json:"user,omitempty"`
+	Campaign             string   `json:"campaign,omitempty"`
+	GrantID              string   `json:"grant_id,omitempty"`
+	GrantDigest          string   `json:"grant_digest,omitempty"`
+	Effect               string   `json:"effect,omitempty"`
+	ResourceIDs          []string `json:"resource_ids,omitempty"`
 	Session              string   `json:"session,omitempty"`
 	Substrate            string   `json:"substrate,omitempty"`
 	Engine               string   `json:"engine,omitempty"`
@@ -86,7 +91,8 @@ func (s *Server) RunLog() []RunInfo {
 			RunID: id, Kind: rec.Kind, TaskID: rec.TaskID, ParentRunID: rec.ParentRunID,
 			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
-			User: rec.User, Session: rec.Session,
+			User: rec.User, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
+			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
 			RawBytes: rec.RawBytes, ParkedBytes: rec.ParkedBytes, MinimizedBytes: rec.MinimizedBytes,
@@ -122,6 +128,14 @@ func (s *Server) AdminHandler(token string) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
+	}))
+	mux.HandleFunc("GET /admin/decisions/verify", g(func(w http.ResponseWriter, r *http.Request) {
+		v := s.VerifyDecisionLedger(r.Context())
+		status := http.StatusOK
+		if !v.Intact || v.Error != "" {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, v)
 	}))
 	mux.HandleFunc("GET /admin/refs/{ref}", g(s.adminMaterializeRef))
 	mux.HandleFunc("GET /admin/metrics", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Metrics()) }))
@@ -160,6 +174,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
+	mux.HandleFunc("POST /admin/upstreams/{name}/grants", g(s.adminSetGrants))
 	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
 	mux.HandleFunc("POST /admin/upstreams/{name}/owner", g(s.adminSetOwner))
 	mux.HandleFunc("GET /admin/oauth-scopes", g(s.adminOAuthScopes))
@@ -336,6 +351,35 @@ func (s *Server) adminSetReadOnly(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistReadOnly(name, in.ReadOnly)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "read_only": in.ReadOnly})
+}
+
+func (s *Server) adminSetGrants(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		Grants []OperationGrant `json:"grants"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&in); err != nil {
+		http.Error(w, "invalid grant body", http.StatusBadRequest)
+		return
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		http.Error(w, "invalid grant body", http.StatusBadRequest)
+		return
+	}
+	if err := s.SetUpstreamGrants(name, in.Grants); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.persistGrantsStrict(name, in.Grants); err != nil {
+		_ = s.DisableUpstream(name)
+		http.Error(w, "grants applied fail-closed but durable persistence failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name": name, "grant_count": len(in.Grants), "grant_digests": sortedGrantDigests(in.Grants),
+	})
 }
 
 // adminSetMinimize sets an upstream's field-minimization policy — opaque

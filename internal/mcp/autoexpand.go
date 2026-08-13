@@ -77,6 +77,30 @@ func isWriteTool(t gateway.Tool) bool {
 	return true // unclassifiable → guard it
 }
 
+// isHighAssuranceWriteTool treats MCP annotations as hints, not authority. A
+// mutation verb or destructive/write annotation always wins; only a recognized
+// read verb with no conflicting signal is a read. This prevents an upstream from
+// relabeling create/delete-style behavior as read-only to fit a read grant.
+func isHighAssuranceWriteTool(t gateway.Tool) bool {
+	if t.Annotations != nil {
+		if t.Annotations.DestructiveHint != nil && *t.Annotations.DestructiveHint {
+			return true
+		}
+		if t.Annotations.ReadOnlyHint != nil && !*t.Annotations.ReadOnlyHint {
+			return true
+		}
+	}
+	hasWrite, hasRead := false, false
+	for _, tok := range tokenize(t.Name) {
+		hasWrite = hasWrite || writeVerbs[tok]
+		hasRead = hasRead || readVerbs[tok]
+	}
+	if hasWrite {
+		return true
+	}
+	return !hasRead
+}
+
 // schemaGaps reports the structural reasons args fails schema, conservatively: it
 // flags only unambiguous, agent-fixable violations — a missing required field, or a
 // value whose JSON kind can't be what the schema declares (object/array vs scalar).

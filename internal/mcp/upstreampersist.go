@@ -26,16 +26,17 @@ const (
 // (an OAuth refresh token or a static bearer) lives in the secret store, never
 // here; Auth records which kind so reload knows how to restore it.
 type upstreamReg struct {
-	Name        string `json:"name"`
-	URL         string `json:"url"`
-	Discover    bool   `json:"discover"`
-	Auth        string `json:"auth,omitempty"`         // authOAuth|authStatic|authNone; "" = oauth (legacy)
-	ReadOnly    bool   `json:"read_only,omitempty"`    // writes refused (least-privilege)
-	Owner       string `json:"owner,omitempty"`        // principal subject this connection is scoped to; "" = shared
-	Minimize    string `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
-	SelfService bool   `json:"self_service,omitempty"` // admitted from an operator-approved template
-	Template    string `json:"template,omitempty"`     // template id for self-service connections
-	Revoked     bool   `json:"revoked,omitempty"`      // credential deleted; never reload as callable
+	Name        string           `json:"name"`
+	URL         string           `json:"url"`
+	Discover    bool             `json:"discover"`
+	Auth        string           `json:"auth,omitempty"`         // authOAuth|authStatic|authNone; "" = oauth (legacy)
+	ReadOnly    bool             `json:"read_only,omitempty"`    // writes refused (least-privilege)
+	Owner       string           `json:"owner,omitempty"`        // principal subject this connection is scoped to; "" = shared
+	Minimize    string           `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
+	SelfService bool             `json:"self_service,omitempty"` // admitted from an operator-approved template
+	Template    string           `json:"template,omitempty"`     // template id for self-service connections
+	Revoked     bool             `json:"revoked,omitempty"`      // credential deleted; never reload as callable
+	Grants      []OperationGrant `json:"grants,omitempty"`       // non-secret operator authority
 }
 
 // authKind returns the registration's auth kind, treating a legacy empty value as
@@ -176,6 +177,9 @@ func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 			if regs[i].Name == reg.Name {
 				reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
 				reg.Minimize = regs[i].Minimize
+				if len(reg.Grants) == 0 {
+					reg.Grants = regs[i].Grants
+				}
 				if reg.Owner == "" {
 					reg.Owner = regs[i].Owner // preserve owner scoping across re-registration (e.g. reauth)
 				}
@@ -230,6 +234,27 @@ func (s *Server) persistReadOnly(name string, ro bool) {
 		}
 		return regs, false
 	})
+}
+
+func (s *Server) persistGrantsStrict(name string, grants []OperationGrant) error {
+	found := false
+	err := s.updateRegistrationsStrict(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				found = true
+				regs[i].Grants = append([]OperationGrant(nil), grants...)
+				return regs, true
+			}
+		}
+		return regs, false
+	})
+	if err != nil {
+		return err
+	}
+	if s.stateDir != "" && !found {
+		return fmt.Errorf("persist grants: unknown upstream %q", name)
+	}
+	return nil
 }
 
 // persistMinimize updates just the field-minimization policy of a persisted
@@ -430,6 +455,13 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		}
 		if reg.ReadOnly {
 			_ = s.SetUpstreamReadOnly(reg.Name, true)
+		}
+		if len(reg.Grants) > 0 {
+			if err := s.SetUpstreamGrants(reg.Name, reg.Grants); err != nil {
+				_ = s.DisableUpstream(reg.Name)
+				slog.Warn("reload upstream grants failed; connection disabled", "upstream", reg.Name, "err", err)
+				continue
+			}
 		}
 		if reg.Minimize != "" {
 			s.SetMinimizePolicy(reg.Name, []byte(reg.Minimize))

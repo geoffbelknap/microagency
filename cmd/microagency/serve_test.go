@@ -35,7 +35,7 @@ func TestEffectiveAdminAddr(t *testing.T) {
 }
 
 func TestTunnelBuiltInOAuthUsesDiscoveredOriginAndKeepsConsentLocal(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8766")
+	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "cloudflare",
 		publicURL: "https://gateway.example", authDir: t.TempDir(),
@@ -181,7 +181,7 @@ func TestTunnelExternalIssuerRemainsDistinctFromBuiltInOAuth(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": "https://issuer.example/jwks"})
 	}))
 	defer issuer.Close()
-	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8766")
+	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "ngrok", publicURL: "https://gateway.example",
 		issuer: issuer.URL, audience: "gateway-audience",
@@ -229,7 +229,7 @@ func TestTunnelExternalIssuerRemainsDistinctFromBuiltInOAuth(t *testing.T) {
 // serve the operator surface — /admin/* and /console 404 — while the separate
 // loopback admin listener serves both.
 func TestTunnelIsolatesOperatorSurface(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
+	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "agent-tok", publicURL: "https://gateway.example"}
 
 	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
@@ -302,7 +302,7 @@ func TestTunnelIsolatesOperatorSurface(t *testing.T) {
 // An explicit public bearer remains available for compatibility and is never the
 // operator token. The default tunnel mode is built-in OAuth instead.
 func TestExplicitTunnelBearerIsDistinctFromOperatorToken(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
+	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "mcp-bearer-tok", publicURL: "https://gateway.example"}
 
 	mcpMux, _, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
@@ -341,7 +341,7 @@ func TestExplicitTunnelBearerIsDistinctFromOperatorToken(t *testing.T) {
 // Without a tunnel or --admin-addr everything shares the single loopback
 // listener — the local default is unchanged.
 func TestOperatorSurfaceSharesListenerByDefault(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, "127.0.0.1:8765")
+	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", token: "agent-tok"} // bearer mode: no signer/issuer I/O
 
 	mcpMux, adminMux, _, _, err := buildMuxes(srv, cfg, "op-tok")

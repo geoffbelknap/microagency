@@ -86,6 +86,9 @@ Each part of the system has its own page:
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
   for web apps, built-in or external OAuth, the admin/tunnel split, and
   operator-approved self-service connections with principal-bound credentials.
+- [Operation and resource grants](docs/operation-grants.md) — exact
+  principal/campaign operation authority, argument and destination bounds,
+  finite budgets, and the fail-closed decision ledger.
 - [Direct-upstream mediation](docs/mediation.md) — the explicit advisory
   local-host posture and the enforced gateway-only workspace contract.
 - [The security model](docs/security-model.md) — each guarantee and where it

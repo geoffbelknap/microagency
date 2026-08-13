@@ -70,7 +70,7 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
 	// The index is scoped to the caller: shared connections + the caller's own.
-	allIndexed := s.indexedTools(principalOf(ctx).Subject)
+	allIndexed := s.indexedToolsFor(principalOf(ctx).Subject, campaignOf(ctx))
 	indexed := allIndexed
 	if allowed != nil {
 		indexed = make([]map[string]any, 0, len(allowed))

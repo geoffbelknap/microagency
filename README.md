@@ -78,6 +78,11 @@ the Registry panel and import servers from there.
 At add time you can narrow a connection: read-only, specific OAuth scopes,
 provider parameters, or a single owner.
 
+Shared deployments can opt into exact, expiring
+[operation and resource grants](docs/operation-grants.md) bound to the signed
+principal and campaign, with argument, destination, resource, request, byte,
+and rate limits enforced before upstream egress.
+
 ## How the agent uses it
 
 The agent sees three tools, and everything you add is reached through them:
