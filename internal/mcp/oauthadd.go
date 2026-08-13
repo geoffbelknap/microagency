@@ -39,6 +39,33 @@ type oauthFlow struct {
 	pkce         auth.PKCE
 	redirectURI  string
 	expiry       time.Time
+	// Self-service flows bind every durable artifact to the initiating principal.
+	// The callback needs no user bearer because the unguessable, single-use state
+	// selects this record; ownership is applied before the connection is registered.
+	selfService     bool
+	template        string
+	templateVersion uint64
+	credentialKey   string
+	clientStoreKey  string
+	reservation     string
+	authGeneration  uint64
+}
+
+type oauthFlowOption func(*oauthFlow)
+
+func withSelfServiceOAuth(template string, templateVersion uint64, credentialKey, clientStoreKey string, authGeneration uint64) oauthFlowOption {
+	return func(f *oauthFlow) {
+		f.selfService = true
+		f.template = template
+		f.templateVersion = templateVersion
+		f.credentialKey = credentialKey
+		f.clientStoreKey = clientStoreKey
+		f.authGeneration = authGeneration
+	}
+}
+
+func withConnectionReservation(id string) oauthFlowOption {
+	return func(f *oauthFlow) { f.reservation = id }
 }
 
 func (s *Server) httpClient() *http.Client {
@@ -100,7 +127,13 @@ func sameOrigin(a, b string) bool {
 // client registration (RFC 7591). An AS with no registration endpoint and no supplied
 // client fails with an actionable error telling the operator to supply credentials.
 func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata, callbackURL, suppliedID, suppliedSecret string) (string, string, error) {
-	key := clientKey(meta.Issuer)
+	return s.loadOrRegisterClientAtKey(ctx, meta, callbackURL, clientKey(meta.Issuer), suppliedID, suppliedSecret)
+}
+
+func (s *Server) loadOrRegisterClientAtKey(ctx context.Context, meta *auth.ASMetadata, callbackURL, key, suppliedID, suppliedSecret string) (string, string, error) {
+	if key == "" {
+		key = clientKey(meta.Issuer)
+	}
 	// Operator-supplied client wins — including OVER a previously stored one. An
 	// explicit client_id/secret means "use these", so it must be able to REPLACE the
 	// stored client (e.g. switching a Google app from a personal-account client to an
@@ -143,22 +176,52 @@ func (s *Server) loadOrRegisterClient(ctx context.Context, meta *auth.ASMetadata
 	return id, secret, nil
 }
 
-// saveUpstreamToken persists an upstream's refresh-token record (best-effort —
-// if the store is down, the token stays in memory and a restart re-prompts).
-func (s *Server) saveUpstreamToken(name string, tok *auth.UpstreamToken) {
+// saveUpstreamTokenAtKey persists an upstream's refresh-token record (best-effort
+// — if the store is down, the token stays in memory and a restart re-prompts).
+func (s *Server) saveUpstreamTokenAtKey(name, key string, tok *auth.UpstreamToken, authGeneration uint64, principalScoped bool) {
 	if s.secrets == nil {
 		return
 	}
+	if principalScoped {
+		s.reg.mu.Lock()
+		record, ok := s.reg.conns[name]
+		if ok {
+			if record.revoked || record.authGeneration != authGeneration {
+				s.reg.mu.Unlock()
+				return
+			}
+			// Keep the registry lock through Save. Revoke takes this same lock before
+			// deleting the credential, so either this write happens first and revoke
+			// deletes it, or revoke changes the generation and this write is refused.
+			defer s.reg.mu.Unlock()
+		} else {
+			s.reg.mu.Unlock()
+			// Reload may refresh while it is listing tools, before the persisted
+			// connection has entered the in-memory registry. Permit that one startup
+			// case only when the durable record is still live and names this exact key.
+			persisted := false
+			for _, registration := range s.loadRegistrations() {
+				if registration.Name == name && registration.SelfService && !registration.Revoked && credentialKeyForRegistration(registration) == key {
+					persisted = true
+					break
+				}
+			}
+			if !persisted {
+				return
+			}
+		}
+	}
 	rec, _ := json.Marshal(tok.Record())
-	if err := s.secrets.Save(context.Background(), tokenKey(name), rec); err != nil {
+	if err := s.secrets.Save(context.Background(), key, rec); err != nil {
 		slog.Error("persist upstream token failed", "upstream", name, "err", err)
 	}
 }
 
-// refreshingBearer builds the upstream's bearer, re-persisting the rotated token.
-func (s *Server) refreshingBearer(name string, tok *auth.UpstreamToken) func(context.Context) (string, error) {
+// refreshingBearerAtKey builds the upstream's bearer, re-persisting a rotated
+// token at the connection's operator- or principal-scoped secret key.
+func (s *Server) refreshingBearerAtKey(name, key string, tok *auth.UpstreamToken, authGeneration uint64, principalScoped bool) func(context.Context) (string, error) {
 	return auth.RefreshingBearer(tok, s.httpClient(), func(t *auth.UpstreamToken) {
-		s.saveUpstreamToken(name, t)
+		s.saveUpstreamTokenAtKey(name, key, t, authGeneration, principalScoped)
 	})
 }
 
@@ -177,21 +240,40 @@ func (s *Server) putOAuthFlow(state string, f *oauthFlow) {
 	s.flows.byState[state] = f
 }
 
-// takeOAuthFlow removes and returns the flow for state, or nil if absent/expired.
-func (s *Server) takeOAuthFlow(state string) *oauthFlow {
+// takeOAuthFlowFor removes and returns the flow for state and callback plane, or
+// nil if absent, expired, or addressed through the wrong callback route.
+func (s *Server) takeOAuthFlowFor(state string, selfService bool) *oauthFlow {
 	s.flows.mu.Lock()
 	defer s.flows.mu.Unlock()
 	f := s.flows.byState[state]
-	delete(s.flows.byState, state)
-	if f == nil || time.Now().After(f.expiry) {
+	if f == nil || f.selfService != selfService || time.Now().After(f.expiry) {
+		if f != nil && time.Now().After(f.expiry) {
+			delete(s.flows.byState, state)
+		}
 		return nil
 	}
+	delete(s.flows.byState, state)
 	return f
+}
+
+func (s *Server) cancelOAuthFlows(match func(*oauthFlow) bool) {
+	s.flows.mu.Lock()
+	reservations := make([]string, 0)
+	for state, flow := range s.flows.byState {
+		if match(flow) {
+			delete(s.flows.byState, state)
+			reservations = append(reservations, flow.reservation)
+		}
+	}
+	s.flows.mu.Unlock()
+	for _, reservation := range reservations {
+		s.releaseConnectionStart(reservation)
+	}
 }
 
 // startUpstreamOAuth registers microagency with the upstream's AS (DCR, redirect_uri
 // = the admin callback) and stashes a pending flow. Returns the authorize URL.
-func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, discover, reauth, readOnly bool, owner, scope, resourceMetadataURL, callbackURL, suppliedClientID, suppliedClientSecret string) (string, error) {
+func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, discover, reauth, readOnly bool, owner, scope, resourceMetadataURL, callbackURL, suppliedClientID, suppliedClientSecret string, options ...oauthFlowOption) (string, error) {
 	meta, err := auth.DiscoverAS(ctx, s.httpClient(), resourceMetadataURL)
 	if err != nil {
 		return "", err
@@ -206,16 +288,18 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	} else if !resourceAllowedForUpstream(meta.Resource, url) {
 		return "", fmt.Errorf("authorization server advertised resource indicator %q that is not an absolute URL on the upstream origin %q; refusing to bind a token to an unrelated resource", meta.Resource, url)
 	}
-	clientID, clientSecret, err := s.loadOrRegisterClient(ctx, meta, callbackURL, suppliedClientID, suppliedClientSecret)
+	flow := &oauthFlow{name: name, url: url, discover: discover, reauth: reauth, readOnly: readOnly, owner: owner, meta: meta, redirectURI: callbackURL, expiry: time.Now().Add(10 * time.Minute)}
+	for _, option := range options {
+		option(flow)
+	}
+	clientID, clientSecret, err := s.loadOrRegisterClientAtKey(ctx, meta, callbackURL, flow.clientStoreKey, suppliedClientID, suppliedClientSecret)
 	if err != nil {
 		return "", err
 	}
 	pkce := auth.NewPKCE()
 	state := randState()
-	s.putOAuthFlow(state, &oauthFlow{
-		name: name, url: url, discover: discover, reauth: reauth, readOnly: readOnly, owner: owner, meta: meta, clientID: clientID, clientSecret: clientSecret,
-		pkce: pkce, redirectURI: callbackURL, expiry: time.Now().Add(10 * time.Minute),
-	})
+	flow.clientID, flow.clientSecret, flow.pkce = clientID, clientSecret, pkce
+	s.putOAuthFlow(state, flow)
 	return auth.AuthorizeURL(meta, clientID, callbackURL, pkce, scope, state), nil
 }
 
@@ -223,31 +307,63 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 // the operator token — it's protected by the unguessable state + PKCE). It
 // exchanges the code and registers the upstream cred-blind.
 func (s *Server) adminOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	s.completeUpstreamOAuth(w, r, false)
+}
+
+func (s *Server) completeUpstreamOAuth(w http.ResponseWriter, r *http.Request, selfService bool) {
+	writeMessage := authui.WriteMessage
+	if selfService {
+		writeMessage = authui.WriteUserMessage
+	}
 	q := r.URL.Query()
-	flow := s.takeOAuthFlow(q.Get("state"))
+	flow := s.takeOAuthFlowFor(q.Get("state"), selfService)
 	if flow == nil {
-		authui.WriteMessage(w, "This authorization request is unknown or expired. Start again from the console.")
+		if selfService {
+			writeMessage(w, "This authorization request is unknown or expired.")
+		} else {
+			writeMessage(w, "This authorization request is unknown or expired. Start again from the console.")
+		}
 		return
 	}
+	defer s.releaseConnectionStart(flow.reservation)
+	if flow.selfService {
+		_, version, ok := s.connectionTemplateWithVersion(flow.template, false)
+		if !ok || version != flow.templateVersion {
+			writeMessage(w, "This connection template changed before authorization completed. Start again with the current policy.")
+			return
+		}
+	}
 	if e := q.Get("error"); e != "" {
-		authui.WriteMessage(w, "Authorization was denied ("+e+"). You can close this tab.")
+		writeMessage(w, "Authorization was denied ("+e+"). You can close this tab.")
 		return
 	}
 	tok, err := auth.ExchangeCode(r.Context(), s.httpClient(), flow.meta, flow.clientID, flow.clientSecret, flow.redirectURI, q.Get("code"), flow.pkce)
 	if err != nil {
-		authui.WriteMessage(w, "Token exchange failed: "+err.Error())
+		if selfService {
+			writeMessage(w, "Token exchange failed. Return to your account and try again.")
+		} else {
+			writeMessage(w, "Token exchange failed: "+err.Error())
+		}
 		return
 	}
-	s.saveUpstreamToken(flow.name, tok) // persist the refresh token (Bao/file)
+	key := flow.credentialKey
+	if key == "" {
+		key = tokenKey(flow.name)
+	}
 	u := &gateway.Upstream{
 		Name: flow.name, URL: flow.url,
-		Bearer: s.refreshingBearer(flow.name, tok), Client: s.upstreamClient,
+		Bearer: s.refreshingBearerAtKey(flow.name, key, tok, flow.authGeneration, flow.selfService), Client: s.upstreamClient,
 	}
 	var opts []UpstreamOption
 	if flow.owner != "" {
 		opts = append(opts, WithOwner(flow.owner))
 	}
+	if flow.selfService {
+		opts = append(opts, WithSelfService(flow.template))
+	}
 	switch {
+	case flow.selfService:
+		err = s.commitSelfServiceOAuth(r.Context(), flow, u)
 	case flow.reauth:
 		err = s.RebindUpstream(r.Context(), flow.name, u) // new token/scope onto the existing upstream
 	case flow.discover:
@@ -256,15 +372,25 @@ func (s *Server) adminOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		err = s.AddUpstream(r.Context(), flow.name, u, opts...)
 	}
 	if err != nil {
-		authui.WriteMessage(w, "Authorized, but registering the upstream failed: "+err.Error())
+		if selfService {
+			writeMessage(w, "Authorization succeeded, but the connection could not be registered. Return to your account and try again.")
+		} else {
+			writeMessage(w, "Authorized, but registering the upstream failed: "+err.Error())
+		}
 		return
 	}
-	s.persistRegistration(flow.name, flow.url, flow.discover, authOAuth, flow.owner) // reload across restarts
+	s.saveUpstreamTokenAtKey(flow.name, key, tok, flow.authGeneration, flow.selfService)                                                                                                                                   // persist only after the generation-bound registration commits
+	s.persistRegistrationRecord(upstreamReg{Name: flow.name, URL: flow.url, Discover: flow.discover, Auth: authOAuth, ReadOnly: flow.readOnly, Owner: flow.owner, SelfService: flow.selfService, Template: flow.template}) // reload across restarts
 	// Apply the operator's read-only choice from onboarding (reauth preserves the
 	// existing setting, so it's only applied on a fresh add/discover).
-	if !flow.reauth && flow.readOnly {
+	if !flow.selfService && !flow.reauth && flow.readOnly {
 		_ = s.SetUpstreamReadOnly(flow.name, true)
 		s.persistReadOnly(flow.name, true)
+	}
+	if flow.selfService {
+		s.recordConnectionEvent(flow.owner, flow.name, "authorized")
+		authui.WriteUserConnected(w, flow.name)
+		return
 	}
 	authui.WriteConnected(w, flow.name)
 }

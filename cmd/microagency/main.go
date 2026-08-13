@@ -11,10 +11,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -87,8 +90,12 @@ func main() {
 		runPurge(args[1:])
 	case "doctor":
 		runDoctor(args[1:])
+	case "openbao":
+		runOpenBao(args[1:])
 	case "hook":
 		runHook(args[1:])
+	case "mediation":
+		runMediation(args[1:])
 	default:
 		// The usage dump never named the input, so "doctr" got 20 lines with
 		// zero occurrences of "doctr" and no suggestion — while an unknown
@@ -106,7 +113,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "hook"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -174,7 +181,9 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
 	fmt.Fprintln(w, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
 	fmt.Fprintln(w, "  microagency doctor        check runtime + engine health")
+	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
+	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
 	fmt.Fprintln(w, "")
 	upFlags(w)
 }
@@ -193,11 +202,11 @@ func upHelp(w io.Writer) {
 func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "  up flags:")
 	fmt.Fprintln(w, "    --http <addr>         bind address (default 127.0.0.1:8765)")
-	fmt.Fprintln(w, "    --public              expose a public URL via a tunnel (web apps)")
+	fmt.Fprintln(w, "    --public              expose built-in OAuth + /mcp via Cloudflare")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
-	fmt.Fprintln(w, "    --token <tok>         use a static bearer instead of OAuth")
+	fmt.Fprintln(w, "    --token <tok>         use a static bearer instead of OAuth (compatibility)")
 	fmt.Fprintln(w, "    --issuer/--audience   external OAuth resource-server mode")
 	fmt.Fprintln(w, "    --require-scope <s>   with --issuer: refuse tokens not granted this OAuth scope")
 	fmt.Fprintln(w, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
@@ -326,10 +335,17 @@ func run(args []string) {
 	if public && tunnelProvider == "" {
 		tunnelProvider = "cloudflare"
 	}
+	if token == "" {
+		token = os.Getenv("MICROAGENCY_TOKEN")
+	}
 	cfg := httpConfig{
-		addr: httpAddr, adminAddr: adminAddr,
+		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, noRegister: noRegister,
+	}
+	if err := validateHTTPConfig(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
 	}
 
 	// Background by default: the parent spawns a detached child (MICROAGENCY_DAEMON=1)
@@ -351,11 +367,15 @@ func run(args []string) {
 
 	// OpenBao is a managed dependency: bring up microagency's own instance (or use
 	// an external one via VAULT_ADDR) and point the secret store at it. stdio
-	// doesn't aggregate upstreams, so it skips this. If Bao can't come up, fall back
-	// to the local file store rather than failing the whole server.
+	// doesn't aggregate upstreams, so it skips this. If Bao can't come up, the
+	// server builder selects the configured local posture: operator-key encrypted,
+	// or an explicitly degraded mode-0600 plaintext fallback.
 	if !stdio {
 		if addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv); err != nil {
-			slog.Warn("OpenBao unavailable; using the local file store", "err", err)
+			if baomanager.FailClosed(err) {
+				fatal("managed OpenBao protected custody is unavailable; refusing a credential-store downgrade", "err", err)
+			}
+			slog.Warn("OpenBao unavailable; evaluating the configured local credential-store fallback", "err", err)
 		} else {
 			_ = os.Setenv("VAULT_ADDR", addr)
 			_ = os.Setenv("VAULT_TOKEN", vaultTok)
@@ -376,10 +396,6 @@ func run(args []string) {
 	// store), so they survive a restart with no re-login.
 	srv.ReloadUpstreams(context.Background())
 
-	if token == "" {
-		token = os.Getenv("MICROAGENCY_TOKEN")
-	}
-	cfg.token = token
 	serveHTTP(srv, cfg)
 }
 
@@ -446,6 +462,14 @@ func daemonize(cfg httpConfig) {
 	fmt.Fprintf(os.Stderr, "    Console        http://%s/console\n", consoleAddr(cfg))
 	if cfg.tunnel != "" {
 		fmt.Fprintf(os.Stderr, "    Tunnel         public URL appears in the logs — it exposes /mcp only; the console stays loopback\n")
+		switch {
+		case cfg.issuer != "":
+			fmt.Fprintf(os.Stderr, "    Public auth    external OAuth (%s)\n", cfg.issuer)
+		case cfg.token != "":
+			fmt.Fprintln(os.Stderr, "    Public auth    explicit static bearer")
+		default:
+			fmt.Fprintln(os.Stderr, "    Public auth    built-in OAuth; consent stays on the loopback operator listener")
+		}
 	}
 	fmt.Fprintf(os.Stderr, "    Logs           %s\n", logPath)
 	fmt.Fprintf(os.Stderr, "    Stop           microagency down\n\n")
@@ -629,6 +653,11 @@ func runPurge(args []string) {
 	}
 	if full {
 		baomanager.Stop(filepath.Join(dir, "openbao")) // release the storage dir before removing it
+		if err := baomanager.DeleteCustody(context.Background(), filepath.Join(dir, "openbao"), os.Getenv); err != nil {
+			fmt.Fprintf(os.Stderr, "microagency: purge: protected OpenBao bootstrap was not deleted: %v\n", err)
+			fmt.Fprintln(os.Stderr, "The state directory was kept so the protector record can still be located; restore protector access and retry.")
+			os.Exit(1)
+		}
 	}
 	if err := doPurge(dir, full); err != nil {
 		fmt.Fprintf(os.Stderr, "microagency: purge: %v\n", err)
@@ -709,6 +738,8 @@ func verifyFullPurgeTarget(dir string) error {
 
 type httpConfig struct {
 	addr, adminAddr, token, issuer, audience, tunnel string
+	publicURL                                        string // discovered from the tunnel process, never from request headers
+	authDir                                          string // test-only override; production uses ~/.microagency
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
 	noRegister                                       bool
 }
@@ -735,6 +766,55 @@ func effectiveAdminAddr(cfg httpConfig) string {
 	return ""
 }
 
+func validateHTTPConfig(cfg httpConfig) error {
+	if cfg.tunnel == "" {
+		return nil
+	}
+	agentHost, _, err := net.SplitHostPort(cfg.addr)
+	if err != nil || !loopbackHost(agentHost) {
+		return fmt.Errorf("a public tunnel requires --http to use a loopback address")
+	}
+	adminAddr := effectiveAdminAddr(cfg)
+	adminHost, _, err := net.SplitHostPort(adminAddr)
+	if err != nil || !loopbackHost(adminHost) {
+		return fmt.Errorf("a public tunnel requires the operator listener to use a loopback --admin-addr")
+	}
+	if canonicalListenAddr(adminAddr) == canonicalListenAddr(cfg.addr) {
+		return fmt.Errorf("a public tunnel requires a separate operator listener; --admin-addr cannot equal --http")
+	}
+	return nil
+}
+
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func canonicalListenAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func validatePublicTunnelURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("tunnel returned an invalid public HTTPS origin")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("tunnel returned a public URL with an unexpected path")
+	}
+	return strings.TrimSuffix(u.String(), "/"), nil
+}
+
 // consoleAddr is the address the operator opens the console on.
 func consoleAddr(cfg httpConfig) string {
 	if a := effectiveAdminAddr(cfg); a != "" {
@@ -750,59 +830,124 @@ func consoleAddr(cfg httpConfig) string {
 // two muxes are distinct and the agent plane cannot route to the operator
 // surface at all; otherwise both share one mux. mode and bearer feed the
 // connect banner.
-func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string) (mcpMux, adminMux *http.ServeMux, mode, bearer string) {
+func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
 	audience := cfg.audience
 	if audience == "" {
-		audience = "microagency"
+		if cfg.tunnel != "" && cfg.issuer == "" && cfg.token == "" {
+			audience = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		} else {
+			audience = "microagency"
+		}
 	}
 
 	mcpMux = http.NewServeMux()
+	var builtInAS *auth.AuthServer
+	var connectionAuth mcp.Authenticator
+	var connectionBase, connectionMetadata string
 	switch {
 	case cfg.issuer != "":
 		// External OAuth resource server — issuance is hosted elsewhere.
 		ks, err := auth.NewJWKSFromIssuer(context.Background(), cfg.issuer, nil)
 		if err != nil {
-			fatal("discover issuer", "issuer", cfg.issuer, "err", err)
+			return nil, nil, "", "", fmt.Errorf("discover issuer %q: %w", cfg.issuer, err)
 		}
 		rs := &auth.ResourceServer{Issuer: cfg.issuer, Audience: audience, Keys: ks}
-		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(mcp.OAuthAuthenticator(rs, cfg.requireScope)))
-		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, cfg.issuer))
-		mode = "oauth-external"
-	case cfg.token != "" || cfg.tunnel != "":
-		// Static bearer: explicit --token, or a tunnel (a web connector UI needs a
-		// pasteable token; OAuth-over-tunnel needs a public issuer — a follow-up).
-		// A tunnel with no --token uses a DISTINCT persisted MCP bearer, never the
-		// operator token: the connector token is pasted into a public web app, and
-		// reusing the operator token would put the /admin + /console credential on the
-		// public tunnel. The loopback admin bind is then defense in depth, not the only
-		// thing separating the planes.
-		bearer = cfg.token
-		if bearer == "" {
-			bearer = mcpBearer
+		if cfg.tunnel != "" {
+			publicIssuer, err := validatePublicTunnelURL(cfg.publicURL)
+			if err != nil {
+				return nil, nil, "", "", err
+			}
+			resource := publicIssuer + "/mcp"
+			metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionBase, connectionMetadata = publicIssuer, metadataURL
+			mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
+			mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(resource, cfg.issuer))
+		} else {
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionBase, connectionMetadata = "http://"+cfg.addr, "/.well-known/oauth-protected-resource"
+			mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
+			mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, cfg.issuer))
 		}
+		mode = "oauth-external"
+	case cfg.token != "":
+		// Explicit compatibility mode for clients that cannot complete OAuth.
+		bearer = cfg.token
 		mcpMux.Handle("/mcp", srv.HTTPHandler(bearer))
 		mode = "bearer"
+	case cfg.tunnel != "":
+		publicIssuer, err := validatePublicTunnelURL(cfg.publicURL)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		publicResource := publicIssuer + "/mcp"
+		if cfg.audience == "" {
+			audience = publicResource
+		}
+		signer, err := auth.LoadOrCreateSigner(oauthKeyPathFor(cfg.authDir))
+		if err != nil {
+			return nil, nil, "", "", fmt.Errorf("load OAuth key: %w", err)
+		}
+		revocations, err := auth.NewRevocationList(oauthRevocationsPathFor(cfg.authDir))
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		builtInAS = auth.NewAuthServer(signer, publicIssuer, audience, 2*time.Hour)
+		builtInAS.Subject = localSubject()
+		approvalBase := "http://" + effectiveAdminAddr(cfg)
+		if err := builtInAS.ConfigurePublicFlow(publicResource, approvalBase, revocations); err != nil {
+			return nil, nil, "", "", err
+		}
+		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir))
+		builtInAS.Register(mcpMux)
+		rs := &auth.ResourceServer{
+			Issuer: publicIssuer, Audience: audience, Keys: signer.KeySet(),
+			Revocations: revocations, RequireTokenID: true,
+		}
+		metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		connectionBase, connectionMetadata = publicIssuer, metadataURL
+		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
+		mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(publicResource, publicIssuer))
+		mode = "oauth-tunnel"
 	default:
 		// DEFAULT: the built-in single-user OAuth 2.1 server. microagency is its own
 		// authorization server AND resource server, pointing at itself.
-		signer, err := auth.LoadOrCreateSigner(oauthKeyPath())
+		signer, err := auth.LoadOrCreateSigner(oauthKeyPathFor(cfg.authDir))
 		if err != nil {
-			fatal("load oauth key", "err", err)
+			return nil, nil, "", "", fmt.Errorf("load OAuth key: %w", err)
 		}
 		issuer := "http://" + cfg.addr
+		revocations, err := auth.NewRevocationList(oauthRevocationsPathFor(cfg.authDir))
+		if err != nil {
+			return nil, nil, "", "", err
+		}
 		// 2h access tokens: long enough that a working session never re-auths
 		// interactively (refresh is silent), short enough that a leaked bearer has a
 		// bounded life. (Was 12h — a long-lived bearer with no revocation path.)
-		as := auth.NewAuthServer(signer, issuer, audience, 2*time.Hour)
-		as.Subject = localSubject()        // attribute runs to the real OS user, not a generic "operator"
-		as.LoadClients(oauthClientsPath()) // remember DCR client_ids across restarts (no re-auth)
-		as.Register(mcpMux)
-		rs := &auth.ResourceServer{Issuer: issuer, Audience: audience, Keys: signer.KeySet()}
+		builtInAS = auth.NewAuthServer(signer, issuer, audience, 2*time.Hour)
+		builtInAS.Subject = localSubject()                      // attribute runs to the real OS user, not a generic "operator"
+		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir)) // remember DCR client_ids across restarts (no re-auth)
+		builtInAS.Register(mcpMux)
+		rs := &auth.ResourceServer{
+			Issuer: issuer, Audience: audience, Keys: signer.KeySet(),
+			Revocations: revocations,
+		}
 		// The built-in AS always grants "mcp", so requiring it costs nothing and
 		// makes scope enforcement real instead of decorative.
-		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(mcp.OAuthAuthenticator(rs, "mcp")))
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		connectionBase, connectionMetadata = issuer, "/.well-known/oauth-protected-resource"
+		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, issuer))
 		mode = "oauth-local"
+	}
+	if connectionAuth != nil {
+		connections, err := srv.UserConnectionsHandler(connectionAuth, connectionBase, connectionMetadata)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		mcpMux.Handle("/connections", connections)
+		mcpMux.Handle("/connections/", connections)
 	}
 
 	// The operator surface binds a SEPARATE listener whenever effectiveAdminAddr
@@ -812,9 +957,12 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken, mcpBearer string
 	if a := effectiveAdminAddr(cfg); a != "" && a != cfg.addr {
 		adminMux = http.NewServeMux()
 	}
+	if builtInAS != nil && mode == "oauth-tunnel" {
+		builtInAS.RegisterOperator(adminMux)
+	}
 	adminMux.Handle("/admin/", srv.AdminHandler(operatorToken))
 	adminMux.Handle("/console", console.Handler(operatorToken))
-	return mcpMux, adminMux, mode, bearer
+	return mcpMux, adminMux, mode, bearer, nil
 }
 
 // serveHTTP runs the agent surface (/mcp) and operator surface (/admin +
@@ -844,39 +992,83 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
-	// A tunnel with no --token needs a pasteable /mcp bearer that is NOT the operator
-	// token. Mint/read a distinct one; its file is what the connect banner points at.
-	mcpBearer, mcpBearerFile := "", ""
-	if cfg.tunnel != "" && cfg.token == "" {
-		mcpBearer, mcpBearerFile = persistentMCPBearer()
+	mcpListener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		fatal("bind MCP listener", "addr", cfg.addr, "err", err)
+	}
+	var adminListener net.Listener
+	adminAddr := effectiveAdminAddr(cfg)
+	if adminAddr != "" && adminAddr != cfg.addr {
+		adminListener, err = net.Listen("tcp", adminAddr)
+		if err != nil {
+			_ = mcpListener.Close()
+			fatal("bind operator listener", "addr", adminAddr, "err", err)
+		}
+	}
+	closeListeners := func() {
+		_ = mcpListener.Close()
+		if adminListener != nil {
+			_ = adminListener.Close()
+		}
 	}
 
-	mcpMux, adminMux, mode, bearer := buildMuxes(srv, cfg, operatorToken, mcpBearer)
+	// Discover the provider-assigned public origin before building OAuth metadata.
+	// That exact HTTPS origin, not Host/Forwarded headers, becomes the issuer and
+	// default resource identifier for the lifetime of this process.
+	var tun *tunnel.Tunnel
+	if cfg.tunnel != "" {
+		t, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
+		if err != nil {
+			closeListeners()
+			fatal("start tunnel", "err", err)
+		}
+		publicURL, err := validatePublicTunnelURL(t.PublicURL)
+		if err != nil {
+			_ = t.Close()
+			closeListeners()
+			fatal("validate tunnel URL", "err", err)
+		}
+		tun = t
+		cfg.publicURL = publicURL
+	}
+	if tun != nil {
+		defer func() { _ = tun.Close() }()
+	}
+
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, operatorToken)
+	if err != nil {
+		if tun != nil {
+			_ = tun.Close()
+		}
+		closeListeners()
+		fatal("configure HTTP authentication", "err", err)
+	}
+	changedOrigin, err := recordAuthPosture(cfg, mode)
+	if err != nil {
+		if tun != nil {
+			_ = tun.Close()
+		}
+		closeListeners()
+		fatal("record authentication posture", "err", err)
+	}
 
 	mcpSrv := newHTTPServer(cfg.addr, mcpMux)
 	var adminSrv *http.Server
 	if adminMux != mcpMux {
-		adminSrv = newHTTPServer(effectiveAdminAddr(cfg), adminMux)
+		adminSrv = newHTTPServer(adminAddr, adminMux)
 		go func() {
-			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := adminSrv.Serve(adminListener); err != nil && err != http.ErrServerClosed {
 				slog.Error("admin listener failed", "addr", adminSrv.Addr, "err", err)
 			}
 		}()
 	}
 
-	announce(srv, cfg, mode, bearer, mcpBearerFile, opTokenFile)
-
-	// A tunnel exposes the loopback bind publicly so a web app can reach it. We run
-	// the user's installed provider; we never operate a tunnel ourselves.
-	var tun *tunnel.Tunnel
-	if cfg.tunnel != "" {
-		t, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
-		if err != nil {
-			fatal("start tunnel", "err", err)
-		}
-		tun = t
-		fmt.Fprintf(os.Stderr, "  Public URL     %s/mcp  (paste into a web app's connector)\n\n", tun.PublicURL)
+	if cfg.publicURL != "" {
+		resource := strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		audience := firstNonEmpty(cfg.audience, resource)
+		slog.Info("public MCP endpoint ready", "url", resource, "auth", mode, "resource", resource, "audience", audience, "operator_addr", consoleAddr(cfg), "issuer_changed", changedOrigin)
 	}
+	announce(srv, cfg, mode, bearer, opTokenFile, changedOrigin)
 
 	// Graceful shutdown: on SIGINT/SIGTERM (what `microagency down` sends) stop
 	// accepting, drain in-flight calls and their audit appends within a bounded
@@ -897,7 +1089,13 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		_ = mcpSrv.Shutdown(ctx) // unblocks ListenAndServe below → clean return
 	}()
 
-	if err := mcpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := mcpSrv.Serve(mcpListener); err != nil && err != http.ErrServerClosed {
+		if tun != nil {
+			_ = tun.Close()
+		}
+		if adminListener != nil {
+			_ = adminListener.Close()
+		}
 		fmt.Fprintf(os.Stderr, "microagency: %v\n", err)
 		os.Exit(1)
 	}
@@ -928,8 +1126,11 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 // login flow, so we hand over no token — we auto-register just the URL with Claude
 // Code (no token in argv either) and the client opens the one-click approve page.
 // For bearer the token reaches Claude Code via the subprocess, never the shell.
-func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, bearerFile, opTokenFile string) {
-	url := "http://" + cfg.addr + "/mcp"
+func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string, changedOrigin bool) {
+	endpoint := "http://" + cfg.addr + "/mcp"
+	if cfg.publicURL != "" {
+		endpoint = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+	}
 
 	// Auto-register with Claude Code — a side effect that runs regardless of whether
 	// we print the banner (OAuth registers the URL only; bearer includes the token).
@@ -937,7 +1138,7 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, bearerFile, opToken
 	if mode == "bearer" {
 		regToken = bearer
 	}
-	registered := !cfg.noRegister && claudeAvailable() && registerClaude(url, regToken)
+	registered := !cfg.noRegister && claudeAvailable() && registerClaude(endpoint, regToken)
 
 	// The detached daemon child writes only structured, timestamped log lines — the
 	// parent already printed the connect banner to the terminal. Don't dump the
@@ -946,30 +1147,30 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, bearerFile, opToken
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "\n  microagency is up — %s\n\n", url)
+	fmt.Fprintf(os.Stderr, "\n  microagency is up — %s\n\n", endpoint)
 	switch mode {
-	case "oauth-local", "oauth-external":
+	case "oauth-local", "oauth-external", "oauth-tunnel":
 		if registered {
 			fmt.Fprintf(os.Stderr, "  Connect        Added to Claude Code (this project). In Claude Code, run /mcp → Authenticate.\n")
-			fmt.Fprintf(os.Stderr, "                 Any other client: paste %s and approve once.\n", url)
+			fmt.Fprintf(os.Stderr, "                 Any other client: paste %s and approve once.\n", endpoint)
 		} else {
-			fmt.Fprintf(os.Stderr, "  Connect        Paste %s into any MCP client; it will prompt you to approve once.\n", url)
+			fmt.Fprintf(os.Stderr, "  Connect        Paste %s into any MCP client; it will prompt you to approve once.\n", endpoint)
 		}
-		if mode == "oauth-external" {
+		switch mode {
+		case "oauth-external":
 			fmt.Fprintf(os.Stderr, "  Auth           OAuth (issuer %s)\n", cfg.issuer)
+		case "oauth-tunnel":
+			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
+			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
+			if changedOrigin {
+				fmt.Fprintln(os.Stderr, "  URL changed    prior tunnel tokens are invalid; reconnect clients at this URL")
+			}
 		}
 	case "bearer":
-		// The pasteable /mcp bearer lives in bearerFile (the distinct MCP bearer for a
-		// tunnel with no --token); "" for an explicit --token the user already knows.
-		// Never point the connector at the operator token file.
-		manualFile := bearerFile
 		if registered {
 			fmt.Fprintf(os.Stderr, "  Connected      Claude Code (project scope). Remove with: claude mcp remove microagency\n")
 		} else {
-			printManualConnect(url, manualFile)
-		}
-		if cfg.tunnel != "" && manualFile != "" {
-			fmt.Fprintf(os.Stderr, "  Public note    a web connector UI needs the bearer: cat %s\n", manualFile)
+			printManualConnect(endpoint)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "  Console        http://%s/console   (operator token: cat %s)\n", consoleAddr(cfg), opTokenFile)
@@ -984,15 +1185,9 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, bearerFile, opToken
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
-// printManualConnect prints a connect command that reads the token from its 0600
-// file via $(cat …), so the secret never lands in shell history.
-func printManualConnect(url, tokenFile string) {
-	if tokenFile != "" {
-		fmt.Fprintf(os.Stderr, "  Connect        claude mcp add --transport http microagency %s \\\n", url)
-		fmt.Fprintf(os.Stderr, "                   --header \"Authorization: Bearer $(cat %s)\"\n", tokenFile)
-		fmt.Fprintf(os.Stderr, "  Any client     point it at %s with that bearer header\n", url)
-		return
-	}
+// printManualConnect gives clients without auto-registration the endpoint shape
+// without printing the bearer value.
+func printManualConnect(url string) {
 	fmt.Fprintf(os.Stderr, "  Connect        point your client at %s with header Authorization: Bearer <token>\n", url)
 }
 
@@ -1055,6 +1250,13 @@ func oauthKeyPath() string {
 	return filepath.Join(home, ".microagency", "oauth-key")
 }
 
+func oauthKeyPathFor(dir string) string {
+	if dir != "" {
+		return filepath.Join(dir, "oauth-key")
+	}
+	return oauthKeyPath()
+}
+
 // oauthClientsPath is where dynamic client registrations persist (0600), so a
 // client's cached client_id stays known across restarts (no spurious re-auth).
 func oauthClientsPath() string {
@@ -1065,18 +1267,114 @@ func oauthClientsPath() string {
 	return filepath.Join(home, ".microagency", "oauth-clients.json")
 }
 
+func oauthClientsPathFor(dir string) string {
+	if dir != "" {
+		return filepath.Join(dir, "oauth-clients.json")
+	}
+	return oauthClientsPath()
+}
+
+// oauthRevocationsPath persists revoked self-issued access token IDs and
+// consumed rotating refresh token IDs until their natural expiry.
+func oauthRevocationsPath() string {
+	return filepath.Join(microagencyDir(), "oauth-revocations.json")
+}
+
+func oauthRevocationsPathFor(dir string) string {
+	if dir != "" {
+		return filepath.Join(dir, "oauth-revocations.json")
+	}
+	return oauthRevocationsPath()
+}
+
+type authPosture struct {
+	Mode      string `json:"mode"`
+	Issuer    string `json:"issuer,omitempty"`
+	Resource  string `json:"resource,omitempty"`
+	Audience  string `json:"audience,omitempty"`
+	Tunnel    string `json:"tunnel,omitempty"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
+
+func readAuthPosture(path string) (authPosture, error) {
+	var posture authPosture
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return posture, err
+	}
+	if err := json.Unmarshal(b, &posture); err != nil {
+		return posture, err
+	}
+	return posture, nil
+}
+
+// recordAuthPosture stores only public identifiers. It reports whether a
+// built-in tunnel issuer changed since the prior run so startup can make the
+// resulting client reauthorization explicit.
+func recordAuthPosture(cfg httpConfig, mode string) (bool, error) {
+	return recordAuthPostureAt(cfg, mode, authPosturePath())
+}
+
+func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
+	issuer := cfg.issuer
+	resource, audience := "", cfg.audience
+	if mode == "oauth-tunnel" {
+		issuer = cfg.publicURL
+		resource = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		if audience == "" {
+			audience = resource
+		}
+	} else if mode == "oauth-local" {
+		issuer = "http://" + cfg.addr
+		resource = "http://" + cfg.addr + "/mcp"
+		if audience == "" {
+			audience = "microagency"
+		}
+	} else if mode == "oauth-external" && cfg.publicURL != "" {
+		resource = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		if audience == "" {
+			audience = "microagency"
+		}
+	}
+	var previous authPosture
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &previous)
+	}
+	posture := authPosture{
+		Mode: mode, Issuer: issuer, Resource: resource, Audience: audience, Tunnel: cfg.tunnel,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	b, err := json.Marshal(posture)
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return false, err
+	}
+	changed := mode == "oauth-tunnel" && previous.Mode == "oauth-tunnel" && previous.Issuer != "" && previous.Issuer != issuer
+	return changed, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // persistentToken reads-or-mints a stable bearer token at ~/.microagency/token
 // (0600), so the client config and any auto-registration survive restarts. file is
 // "" only when there is no home directory.
-// persistentToken is the OPERATOR token: it gates /admin + /console. It must
-// never double as the agent-facing /mcp bearer (see persistentMCPBearer).
+// persistentToken is the OPERATOR token: it gates /admin + /console. It never
+// authenticates the agent-facing /mcp surface.
 func persistentToken() (token, file string) { return persistentTokenAt("token") }
-
-// persistentMCPBearer is the agent-facing /mcp bearer for the static-bearer path
-// (a tunnel with no --token). It is DISTINCT from the operator token so a
-// connector token disclosed to a public web app can never reach the operator
-// plane — even before the loopback admin bind is the only thing between them.
-func persistentMCPBearer() (token, file string) { return persistentTokenAt("mcp-bearer") }
 
 // persistentTokenAt reads (or mints and 0600-persists) a random token in
 // ~/.microagency/<name>, so it survives restarts. A missing home dir falls back

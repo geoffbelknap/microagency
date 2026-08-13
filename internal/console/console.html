@@ -672,7 +672,7 @@ function runRow(r){
   var chip=el("span",{class:"run-chip "+(isProxy?"proxy":"reduce")});chip.innerHTML=ic(isProxy?ICN.proxy:ICN.reduce,{s:14});
   var main=el("div",{class:"run-main"});
   var tgt=isProxy?(r.upstream+"__"+r.tool):(r.source_id||"—");
-  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.protected?" · "+r.protected+" protected":"")+(r.exit_code!==0?" · refused":"")):
+  var meta=isProxy?("via "+(r.upstream||"?")+" · "+fmtB(r.output_bytes||0)+" returned"+(r.fused_invocation?" · "+(r.transform_engine||"declarative")+" transform":"")+(r.protected?" · "+r.protected+" protected":"")+(r.exit_code!==0?" · refused":"")):
     ((r.substrate||"?")+"/"+(r.engine||"?")+" · "+(r.reffed?(fmtB(r.bytes)+" → parked off-context"):(fmtB(r.bytes)+" in · "+fmtB(r.output_bytes||0)+" returned")));
   main.innerHTML='<div class="run-target"><span class="t"></span><span class="ktag '+(isProxy?"":"reduce")+'">'+(isProxy?"proxy":"reduce")+'</span><span class="run-id"></span></div><div class="run-meta"></div>';
   main.querySelector(".t").textContent=tgt;main.querySelector(".run-meta").textContent=meta;
@@ -706,6 +706,10 @@ function runDetail(r,isProxy){
   if(isProxy){kvRow(dl,"upstream",r.upstream);kvRow(dl,"tool",r.tool);}
   else{kvRow(dl,"source",r.source_id);kvRow(dl,"engine",(r.substrate||"?")+(r.engine?"/"+r.engine:""));}
   kvRow(dl,"data",fmtB(r.input_bytes||0)+" in → "+fmtB(r.output_bytes||0)+" returned"+(r.reffed?" · parked off-context":""));
+  if(r.transform_status){
+    kvRow(dl,"transform",(r.transform_engine||"?")+" · "+r.transform_status+" · "+fmtB(r.transform_input_bytes||0)+" in → "+fmtB(r.transform_output_bytes||0)+" out · "+(r.transform_latency_ms||0)+" ms");
+    kvRow(dl,"query digest",r.transform_query_sha256);
+  }
   if(r.protected)kvRow(dl,"minimized",r.protected+" sensitive field"+(r.protected===1?"":"s")+" redacted/tokenized");
   kvRow(dl,"latency",r.latency_ms!=null?r.latency_ms+" ms":null);
   if(r.exit_code!==0&&r.exit_code!=null)kvRow(dl,"exit",r.exit_code+" · refused","bad");
@@ -748,10 +752,15 @@ $("#verify-btn").onclick=async function(){
 /* impact detail */
 $("#impact-strip").onclick=openImpact;
 function openImpact(){
-  var v=metricVals(),m=state.metrics||{},subs=m.by_substrate||{};
+  var v=metricVals(),m=state.metrics||{},subs=m.by_substrate||{},ctx=m.context||{},disc=ctx.discovery||{},inv=ctx.invocation||{},red=ctx.reduction||{},tasks=ctx.tasks||{};
   var kpis=[[v.mtok,"tokens kept out of context","teal"],[v.protectedS,"sensitive fields minimized","teal"],[v.parked,"calls parked off-context","amber"],[v.withheld,"raw data withheld from the model","neutral"]];
   var kpiHtml=kpis.map(function(k){return '<div class="kpi '+k[2]+'"><b>'+k[0]+'</b><span>'+k[1]+'</span></div>'}).join("");
   var subHtml=Object.keys(subs).length?Object.keys(subs).map(function(name){var st=subs[name];return '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:6px 0;border-top:.5px solid var(--ink-hairline)"><span class="mono" style="font-size:12px;color:var(--ink)">'+name+'</span><span class="mono" style="font-size:10.5px;color:var(--ink-mid)">p50 '+st.p50_latency_ms+' ms · '+st.runs+' runs</span></div>'}).join(""):'<div class="mono" style="font-size:11px;color:var(--ink-faint);padding:6px 0">no runs yet</div>';
+  var costHtml='<div class="mono" style="font-size:11px;color:var(--ink);line-height:1.8">'+
+    'schemas '+fmtB(disc.context_bytes||0)+' · '+(disc.calls||0)+' calls · p50 '+(disc.p50_latency_ms||0)+' ms<br>'+
+    'tool responses '+fmtB(inv.context_bytes||0)+' · raw '+fmtB(inv.raw_upstream_bytes||0)+' · p50 '+(inv.p50_latency_ms||0)+' ms<br>'+
+    'reduce responses '+fmtB(red.context_bytes||0)+' · input '+fmtB(red.input_bytes||0)+' · p50 '+(red.p50_latency_ms||0)+' ms<br>'+
+    'tasks '+(tasks.correlated_tasks||0)+' · schema escalations '+(tasks.schema_escalations||0)+' · separate invoke/reduce '+(tasks.separate_invoke_reduce_trips||0)+'</div>';
   $("#impact-dialog").innerHTML=
     '<div style="padding:24px 26px 18px;border-bottom:.5px solid var(--ink-hairline);display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'+
       '<div><div style="display:inline-flex;align-items:center;gap:7px;margin-bottom:10px"><span class="dot"><span class="pulse"></span></span><span class="eyebrow" style="color:var(--teal-dark)">Impact · live</span></div>'+
@@ -764,6 +773,7 @@ function openImpact(){
         '<div class="card"><div class="eyebrow" style="font-size:9px;margin-bottom:6px">Where reduce ran</div>'+subHtml+'</div>'+
         '<div class="card" style="display:flex;flex-direction:column;justify-content:center;gap:8px"><div class="eyebrow" style="font-size:9px">Bytes</div><div class="mono" style="font-size:12px;color:var(--ink);line-height:1.7">'+v.withheld+' withheld<br>'+v.returned+' returned<br>tokens ≈ bytes / 4</div></div>'+
       '</div>'+
+      '<div class="card" style="margin-top:12px"><div class="eyebrow" style="font-size:9px;margin-bottom:6px">Context cost by stage</div>'+costHtml+'</div>'+
       '<p class="hint" style="margin-top:16px;font-size:11px;color:var(--ink-faint)">Large results are stored server-side; the agent receives only a structural preview and a <span class="mono">&lt;ref&gt;</span> handle. The raw data — and any PII it carries — never enters the model\'s context.</p>'+
     '</div>';
   $("#impact-scrim").classList.add("show");

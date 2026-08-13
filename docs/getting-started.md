@@ -4,7 +4,7 @@ description: Install microagency, connect a client, and add your first servers.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-08-12_
 
 ## Install and start
 
@@ -25,10 +25,12 @@ To stop, `microagency down`. To disconnect a client,
 state (add `--full` to wipe everything; both confirm first).
 [Operating the gateway](operations.md) covers the full CLI surface.
 
-Your upstream credentials are held in a secret store, not in the clear:
-OpenBao/Vault when available (or a managed OpenBao if the binary is on your
-PATH), otherwise an encrypted file store under `~/.microagency`. See
-[where credentials live](connect-clients.md#where-credentials-live).
+Your upstream credentials stay in the gateway's secret store and never enter
+the agent's configuration or context. OpenBao/Vault is preferred, and managed
+OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
+is unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded.
+See [where credentials live](connect-clients.md#where-credentials-live).
 
 ## Add your servers
 
@@ -66,7 +68,12 @@ bundle, so "Go only" does not apply to that target.
 
 ## Check the install
 
-`microagency doctor` checks runtime and engine health: whether the server
-is running, where your credentials actually live, which query engines are
-loaded, whether the microVM runtime can boot, and whether any client is wired
-around the gateway. Run it first when something misbehaves.
+`microagency doctor` checks runtime and engine health:
+
+- Whether the server is running.
+- Where your credentials live.
+- Which query engines are loaded.
+- Whether the microVM runtime can boot.
+- Whether any client is wired around the gateway.
+
+Run it first when something misbehaves.

@@ -50,10 +50,12 @@ To stop, `microagency down`. To disconnect a client,
 (keeping its secret store up), and `microagency purge` deletes your local state
 (add `--full` to wipe everything; both confirm first).
 
-Your upstream credentials are held in a secret store, not in the clear:
-OpenBao/Vault when available (or a managed OpenBao if the binary is on your
-PATH), otherwise an encrypted file store under `~/.microagency`. See
-[where credentials live](docs/connect-clients.md#where-credentials-live).
+Your upstream credentials stay in the gateway's secret store and never enter
+the agent's configuration or context. OpenBao/Vault is preferred, and managed
+OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
+is unavailable, the local fallback is encrypted only when you supply a separate
+key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded.
+See [where credentials live](docs/connect-clients.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency
 up`. Go is the only build dependency for the gateway itself (the wasm query
@@ -93,14 +95,23 @@ the gateway; only the answer comes back.
 
 ## Going deeper
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the conceptual overview — why
+[ARCHITECTURE.md](ARCHITECTURE.md) is the conceptual overview: why
 microagency exists and the shape of the system. The [docs](docs/index.md)
-cover each mechanism: the auth modes (built-in OAuth, static bearer,
-external issuer, stdio), where credentials live, the tool index and how
-invocation is gated, off-context data handling and the query engines and
-microVM (including how to write your own engine), field minimization, the
-audit chain, public mode for the Claude and ChatGPT web apps, multi-user
-gateways, and the security model.
+cover each mechanism:
+
+- The auth modes: built-in OAuth, static bearer, external issuer, stdio.
+- Where credentials live.
+- The tool index, and how invocation is gated.
+- Off-context data handling, the query engines, and the microVM, including
+  how to write your own engine.
+- Field minimization and the audit chain.
+- Public mode for the Claude and ChatGPT web apps.
+- Multi-user gateways, and the security model.
 
 `microagency --help` shows the CLI surface, and `microagency doctor` checks
 runtime and engine health.
+
+Local clients get advisory bypass warnings by default. For a governed
+microagent workspace, [enforced direct-upstream mediation](docs/mediation.md)
+locks workspace egress to the gateway host so upstream network paths must go
+through `call_tool`.

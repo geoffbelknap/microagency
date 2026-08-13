@@ -10,6 +10,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: write
 
 # If merges land quickly, only the newest build needs to publish.
@@ -29,6 +30,34 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Report live reduce validation posture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run="$(gh api "repos/${{ github.repository }}/actions/workflows/live-reduce.yml/runs?status=completed&per_page=1" --jq '.workflow_runs[0] // empty')"
+          if [ -z "$run" ]; then
+            echo "### Linux KVM live reduce(code) validation" >> "$GITHUB_STEP_SUMMARY"
+            echo "No completed Linux KVM live run is recorded." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::No completed Linux KVM live reduce(code) run is recorded"
+            exit 0
+          fi
+          conclusion="$(jq -r '.conclusion' <<< "$run")"
+          completed="$(jq -r '.updated_at' <<< "$run")"
+          url="$(jq -r '.html_url' <<< "$run")"
+          sha="$(jq -r '.head_sha' <<< "$run")"
+          age_hours="$(( ($(date -u +%s) - $(date -u -d "$completed" +%s)) / 3600 ))"
+          {
+            echo "### Linux KVM live reduce(code) validation"
+            echo "- Result: \`$conclusion\`"
+            echo "- Age: \`${age_hours}h\`"
+            echo "- Commit: \`$sha\`"
+            echo "- Run: $url"
+            echo "- Apple VF: no hosted live signal; validate on a direct supported host"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$conclusion" != success ] || [ "$age_hours" -gt 168 ]; then
+            echo "::warning::Linux KVM live validation is $conclusion and ${age_hours}h old"
+          fi
 
       # A GitHub App token scoped to the tap repo, so GoReleaser can push the
       # generated formula. NOTE: this repo needs the HOMEBREW_APP_CLIENT_ID and

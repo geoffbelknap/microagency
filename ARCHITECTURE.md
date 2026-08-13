@@ -67,22 +67,28 @@ Each part of the system has its own page:
 
 - [Connecting clients and credentials](docs/connect-clients.md) — the built-in
   OAuth server, static bearer, external issuer, stdio mode, and where every
-  secret lives (OpenBao/Vault, the managed OpenBao, or the encrypted file
-  store).
+  secret lives (external Vault/OpenBao, managed OpenBao with protected or
+  same-disk bootstrap custody, an operator-key encrypted file, or the
+  explicitly degraded mode-0600 plaintext fallback).
 - [The tool index](docs/tool-index.md) — why upstream tools live in an index
   instead of `tools/list`, the enabled/discovered split that gates
   invocation, and index refresh.
 - [Large results and reduce](docs/reduce.md) — reference handles and their
   structural previews, the query engines, the microVM path for real code,
-  and the contract for writing your own engine.
+  the experimental read-only program broker, and the contract for writing
+  your own engine.
 - [Field minimization](docs/field-minimization.md) — redaction and
   tokenization of sensitive fields in the small results that return inline.
 - [The audit chain](docs/audit.md) — the signed, hash-chained log, the head
   anchor that catches tail truncation, and how to verify.
+- [Measuring context cost](docs/context-metrics.md) — exact schema and response
+  byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
-  for the Claude/ChatGPT web apps, the admin/tunnel split, and per-user
-  connection ownership.
+  for web apps, built-in or external OAuth, the admin/tunnel split, and
+  operator-approved self-service connections with principal-bound credentials.
+- [Direct-upstream mediation](docs/mediation.md) — the explicit advisory
+  local-host posture and the enforced gateway-only workspace contract.
 - [The security model](docs/security-model.md) — each guarantee and where it
-  is enforced, plus the egress-guard hook.
+  is enforced.
 - [Operating the gateway](docs/operations.md) — the CLI, state files,
   doctor, and purge.

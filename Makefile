@@ -35,7 +35,7 @@ image: engines minimizers
 	microagent delete -y $(IMAGE_WORKSPACE) 2>/dev/null || true
 	microagent create -name $(IMAGE_WORKSPACE) -file image/microagency.microagent.yaml
 	for ref in $(IMAGE_REF) $(EXTRA_REFS); do \
-		microagent commit $(IMAGE_WORKSPACE) $$ref $(if $(PUSH),--push,); \
+		microagent commit --allow-registry-shadow $(if $(PUSH),--push,) $(IMAGE_WORKSPACE) $$ref; \
 	done
 	microagent delete -y $(IMAGE_WORKSPACE)
 

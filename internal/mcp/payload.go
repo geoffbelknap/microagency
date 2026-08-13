@@ -130,22 +130,28 @@ func resultPayload(result map[string]any) string {
 			return string(b)
 		}
 	}
-	if content, ok := result["content"].([]any); ok {
-		var sb strings.Builder
+	var sb strings.Builder
+	appendText := func(m map[string]any) {
+		if t, _ := m["type"].(string); t == "text" {
+			if txt, _ := m["text"].(string); txt != "" {
+				sb.WriteString(txt)
+			}
+		}
+	}
+	switch content := result["content"].(type) {
+	case []any: // results decoded from an upstream JSON-RPC response
 		for _, c := range content {
-			m, ok := c.(map[string]any)
-			if !ok {
-				continue
-			}
-			if t, _ := m["type"].(string); t == "text" {
-				if txt, _ := m["text"].(string); txt != "" {
-					sb.WriteString(txt)
-				}
+			if m, ok := c.(map[string]any); ok {
+				appendText(m)
 			}
 		}
-		if sb.Len() > 0 {
-			return unwrapData(sb.String())
+	case []map[string]any: // results produced by an in-process gateway tool
+		for _, m := range content {
+			appendText(m)
 		}
+	}
+	if sb.Len() > 0 {
+		return unwrapData(sb.String())
 	}
 	b, _ := json.Marshal(result)
 	return string(b)

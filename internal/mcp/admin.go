@@ -21,24 +21,48 @@ import (
 // RunInfo is an operator-facing view of one recorded run, including its egress
 // audit — the observability surface (what the agent reached, and what was denied).
 type RunInfo struct {
-	RunID       string `json:"run_id"`
-	Kind        string `json:"kind,omitempty"`
-	SourceID    string `json:"source_id,omitempty"`
-	Upstream    string `json:"upstream,omitempty"`
-	Tool        string `json:"tool,omitempty"`
-	Args        string `json:"args,omitempty"`
-	User        string `json:"user,omitempty"`
-	Session     string `json:"session,omitempty"`
-	Substrate   string `json:"substrate,omitempty"`
-	Engine      string `json:"engine,omitempty"`
-	LatencyMs   int64  `json:"latency_ms"`
-	InputBytes  int    `json:"input_bytes"`
-	OutputBytes int    `json:"output_bytes"`
-	Reffed      bool   `json:"reffed"`
-	Ref         string `json:"ref,omitempty"`
-	Bytes       int    `json:"bytes"`
-	Protected   int    `json:"protected,omitempty"` // sensitive field values minimized on this call
-	ExitCode    int    `json:"exit_code"`
+	RunID                string   `json:"run_id"`
+	Kind                 string   `json:"kind,omitempty"`
+	TaskID               string   `json:"task_id,omitempty"`
+	ParentRunID          string   `json:"parent_run_id,omitempty"`
+	Delivery             string   `json:"delivery,omitempty"`
+	ProgramRequestID     string   `json:"program_request_id,omitempty"`
+	SourceID             string   `json:"source_id,omitempty"`
+	Upstream             string   `json:"upstream,omitempty"`
+	Tool                 string   `json:"tool,omitempty"`
+	Args                 string   `json:"args,omitempty"`
+	User                 string   `json:"user,omitempty"`
+	Session              string   `json:"session,omitempty"`
+	Substrate            string   `json:"substrate,omitempty"`
+	Engine               string   `json:"engine,omitempty"`
+	LatencyMs            int64    `json:"latency_ms"`
+	InputBytes           int      `json:"input_bytes"`
+	OutputBytes          int      `json:"output_bytes"`
+	RawBytes             int      `json:"raw_bytes,omitempty"`
+	ParkedBytes          int      `json:"parked_bytes,omitempty"`
+	MinimizedBytes       int      `json:"minimized_bytes,omitempty"`
+	ContextMeasured      bool     `json:"context_measured,omitempty"`
+	FullSchemaEntries    int      `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries  int      `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries    int      `json:"summarized_entries,omitempty"`
+	OmittedEntries       int      `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup    bool     `json:"exact_schema_lookup,omitempty"`
+	FusedInvocation      bool     `json:"fused_invocation,omitempty"`
+	TransformEngine      string   `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string   `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int      `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int      `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64    `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string   `json:"transform_status,omitempty"`
+	ProgramTools         []string `json:"program_tools,omitempty"`
+	ProgramCalls         int      `json:"program_calls,omitempty"`
+	ProgramBytes         int      `json:"program_bytes,omitempty"`
+	ProgramStatus        string   `json:"program_status,omitempty"`
+	Reffed               bool     `json:"reffed"`
+	Ref                  string   `json:"ref,omitempty"`
+	Bytes                int      `json:"bytes"`
+	Protected            int      `json:"protected,omitempty"` // sensitive field values minimized on this call
+	ExitCode             int      `json:"exit_code"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -59,11 +83,21 @@ func (s *Server) RunLog() []RunInfo {
 			ts = rec.Timestamp.Format(time.RFC3339)
 		}
 		out = append(out, RunInfo{
-			RunID: id, Kind: rec.Kind, SourceID: rec.SourceID,
+			RunID: id, Kind: rec.Kind, TaskID: rec.TaskID, ParentRunID: rec.ParentRunID,
+			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
 			User: rec.User, Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
+			RawBytes: rec.RawBytes, ParkedBytes: rec.ParkedBytes, MinimizedBytes: rec.MinimizedBytes,
+			ContextMeasured:   rec.ContextMeasured,
+			FullSchemaEntries: rec.FullSchemaEntries, SchemaDigestEntries: rec.SchemaDigestEntries,
+			SummarizedEntries: rec.SummarizedEntries, OmittedEntries: rec.OmittedEntries,
+			ExactSchemaLookup: rec.ExactSchemaLookup, FusedInvocation: rec.FusedInvocation,
+			TransformEngine: rec.TransformEngine, TransformQuerySHA256: rec.TransformQuerySHA256,
+			TransformInputBytes: rec.TransformInputBytes, TransformOutputBytes: rec.TransformOutputBytes,
+			TransformLatencyMs: rec.TransformLatencyMs, TransformStatus: rec.TransformStatus,
+			ProgramTools: rec.ProgramTools, ProgramCalls: rec.ProgramCalls, ProgramBytes: rec.ProgramBytes, ProgramStatus: rec.ProgramStatus,
 			Reffed: rec.Reffed, Ref: rec.Ref,
 			Bytes: rec.Bytes, Protected: rec.Protected, ExitCode: rec.ExitCode, Stderr: rec.Stderr, Audit: rec.Audit, AuditErr: rec.AuditErr,
 			Timestamp: ts,
@@ -95,14 +129,34 @@ func (s *Server) AdminHandler(token string) http.Handler {
 		w.Header().Set("Content-Type", PrometheusContentType)
 		_, _ = w.Write([]byte(s.Metrics().Prometheus()))
 	}))
+	mux.HandleFunc("GET /admin/tools/rank", g(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		subject := q.Get("subject")
+		if subject == "" {
+			subject = "local"
+		}
+		writeJSON(w, http.StatusOK, s.RankTools(subject, q.Get("q"), limit))
+	}))
 	mux.HandleFunc("GET /admin/infra", g(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, s.InfraStatus(r.Context())) }))
 	mux.HandleFunc("GET /admin/upstreams", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.UpstreamList()) }))
 	mux.HandleFunc("GET /admin/egress-policy", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.EgressPolicy()) }))
+	mux.HandleFunc("GET /admin/mediation", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.MediationStatus()) }))
+	mux.HandleFunc("GET /admin/mediation/denials", g(func(w http.ResponseWriter, _ *http.Request) {
+		denials, err := s.MediationDenials()
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, denials)
+	}))
 	mux.HandleFunc("POST /admin/upstreams", g(s.adminAddUpstream))
 	// The OAuth callback is a browser redirect from the upstream — no operator token;
 	// it is protected by the unguessable state + PKCE, not the admin bearer.
 	mux.HandleFunc("GET /admin/oauth/callback", s.adminOAuthCallback)
 	mux.HandleFunc("POST /admin/upstreams/{name}/enable", g(s.adminEnableUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/disable", g(s.adminDisableUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/revoke", g(s.adminRevokeUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
@@ -112,6 +166,9 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("GET /admin/provider-params", g(s.adminProviderParams))
 	mux.HandleFunc("GET /admin/registry", g(s.adminRegistrySearch))
 	mux.HandleFunc("POST /admin/registry/import", g(s.adminRegistryImport))
+	mux.HandleFunc("GET /admin/connection-templates", g(s.adminListConnectionTemplates))
+	mux.HandleFunc("POST /admin/connection-templates", g(s.adminPutConnectionTemplate))
+	mux.HandleFunc("DELETE /admin/connection-templates/{id}", g(s.adminDeleteConnectionTemplate))
 	mux.HandleFunc("DELETE /admin/upstreams/{name}", g(s.adminDeleteUpstream))
 	return mux
 }
@@ -252,7 +309,11 @@ func (s *Server) adminSetOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.SetUpstreamOwner(name, in.Owner); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusNotFound
+		if strings.Contains(err.Error(), "ownership is immutable") {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	s.persistOwner(name, in.Owner)
@@ -462,14 +523,19 @@ func (s *Server) adminReauthUpstream(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in)
 
 	var url, state string
+	var selfService bool
 	for _, up := range s.UpstreamList() {
 		if up.Name == name {
-			url, state = up.URL, up.State
+			url, state, selfService = up.URL, up.State, up.SelfService
 			break
 		}
 	}
 	if url == "" {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
+		return
+	}
+	if selfService {
+		http.Error(w, "self-service connections must be reauthorized by their owning principal", http.StatusConflict)
 		return
 	}
 	u := &gateway.Upstream{Name: name, URL: url, Client: s.upstreamClient}
@@ -489,11 +555,24 @@ func (s *Server) adminReauthUpstream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDeleteUpstream(w http.ResponseWriter, r *http.Request) {
-	if !s.RemoveUpstream(r.PathValue("name")) {
+	name := r.PathValue("name")
+	record, _ := s.snapshotUpstream(name)
+	if record.conn == nil {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
 		return
 	}
-	s.removeRegistration(r.Context(), r.PathValue("name")) // stay gone across restarts
+	s.cancelOAuthFlows(func(flow *oauthFlow) bool { return flow.name == name })
+	if record.selfService {
+		_ = s.RevokeUpstream(name)
+		if err := s.removeSelfServiceRegistration(r.Context(), name, record); err != nil {
+			http.Error(w, "connection disabled, but durable deletion failed: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		s.deleteSelfServiceClientIfUnused(r.Context(), record.owner, record.template, record.conn.Endpoint())
+	} else {
+		s.removeRegistration(r.Context(), name) // stay gone across restarts
+	}
+	_ = s.RemoveUpstream(name)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -58,7 +58,8 @@ type Server struct {
 	upstreamClient *http.Client
 
 	// secrets persists acquired credentials (upstream OAuth refresh tokens) in
-	// OpenBao/Vault or a 0600 file. nil = not persisted (in-memory only).
+	// OpenBao/Vault, an encrypted file with a separately held key, or an explicit
+	// degraded mode-0600 plaintext fallback. nil = not persisted (in-memory only).
 	secrets secretstore.Store
 	// stateDir holds non-secret persisted state (the upstream registrations index),
 	// so OAuth upstreams survive a restart. "" = not persisted.
@@ -109,9 +110,10 @@ type Server struct {
 	// alike. Splitting them cuts the blast radius (a change to run tracking can't
 	// affect the registry) and the contention (recording a run no longer blocks a
 	// find_tools index read). No critical section spans two of them.
-	reg   registry       // aggregated upstreams + tool usage + per-upstream minimize policy
-	rs    runStore       // the bounded recent-run window + all-time counters + run-id seq
-	flows oauthFlowStore // pending console OAuth-add flows
+	reg   registry         // aggregated upstreams + tool usage + per-upstream minimize policy
+	rs    runStore         // the bounded recent-run window + all-time counters + run-id seq
+	flows oauthFlowStore   // pending console OAuth-add flows
+	self  selfServiceStore // operator-approved templates + bounded per-principal start rates
 }
 
 // registry holds the aggregated-MCP index and its per-upstream configuration.
@@ -133,6 +135,7 @@ type runStore struct {
 	maxKept int                  // window cap (0 = unbounded)
 	total   int                  // all-time run count, for Metrics.TotalRuns
 	impact  Impact               // all-time cumulative impact
+	context ContextCost          // all-time stage/context counters; rebuilt from audit
 }
 
 // oauthFlowStore holds pending console OAuth-add flows, keyed by state.
@@ -151,16 +154,23 @@ type Option func(*Server)
 
 // runRecord is the routing outcome retained for the audit log and explain-by-run.
 type runRecord struct {
-	// Kind is "reduce" (an off-context reduction over a ref) or "proxy" (an
-	// aggregated upstream MCP tool call). Proxy records carry Upstream/Tool/Args;
-	// a reduce carries the ref it reduced in SourceID.
-	Kind     string `json:"kind,omitempty"`
-	SourceID string `json:"source_id,omitempty"`
-	Upstream string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
-	Tool     string `json:"tool,omitempty"`     // proxy: the upstream tool name
-	Args     string `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
-	User     string `json:"user,omitempty"`     // the OAuth sub that ran it
-	Session  string `json:"session,omitempty"`  // per-run SPIFFE identity
+	// Kind is "discovery" (find_tools), "reduce" (an off-context reduction over
+	// a ref), or "proxy" (an aggregated upstream MCP tool call). Proxy records
+	// carry Upstream/Tool/Args; a reduce carries the ref it reduced in SourceID.
+	Kind   string `json:"kind,omitempty"`
+	TaskID string `json:"task_id,omitempty"` // bounded opaque correlation id; never a metric label
+	// ParentRunID correlates a discovery/invocation performed inside a governed
+	// reduce program to the outer microVM run. Delivery="program" means the
+	// response went to that sandbox, not directly into model context.
+	ParentRunID      string `json:"parent_run_id,omitempty"`
+	Delivery         string `json:"delivery,omitempty"`
+	ProgramRequestID string `json:"program_request_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	Upstream         string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
+	Tool             string `json:"tool,omitempty"`     // proxy: the upstream tool name
+	Args             string `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
+	User             string `json:"user,omitempty"`     // the OAuth sub that ran it
+	Session          string `json:"session,omitempty"`  // per-run SPIFFE identity
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.
@@ -169,9 +179,43 @@ type runRecord struct {
 	LatencyMs   int64  `json:"latency_ms"`
 	InputBytes  int    `json:"input_bytes"`
 	OutputBytes int    `json:"output_bytes"`
-	Reffed      bool   `json:"reffed"`
-	Ref         string `json:"ref,omitempty"`
-	Bytes       int    `json:"bytes"`
+	// RawBytes is the upstream/reducer output before parking or minimization.
+	// ParkedBytes is the payload retained behind a reference. MinimizedBytes is
+	// the non-negative serialized-byte reduction from field minimization. None
+	// stores the payload itself.
+	RawBytes       int `json:"raw_bytes,omitempty"`
+	ParkedBytes    int `json:"parked_bytes,omitempty"`
+	MinimizedBytes int `json:"minimized_bytes,omitempty"`
+	// ContextMeasured distinguishes new exact context-byte records from older
+	// audit lines whose OutputBytes meant raw tool output. It prevents an upgrade
+	// from relabeling historical raw bytes as model-context bytes.
+	ContextMeasured bool `json:"context_measured,omitempty"`
+	// Discovery detail counts describe the bounded find_tools response without
+	// retaining its query, schemas, descriptions, or result.
+	FullSchemaEntries   int  `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries int  `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries   int  `json:"summarized_entries,omitempty"`
+	OmittedEntries      int  `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup   bool `json:"exact_schema_lookup,omitempty"`
+	// A fused invocation records the declarative transform without retaining its
+	// query or source result. The digest, engine, byte counts, latency, and status
+	// are sufficient to reconstruct the governed chain.
+	FusedInvocation      bool   `json:"fused_invocation,omitempty"`
+	TransformEngine      string `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int    `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int    `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64  `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string `json:"transform_status,omitempty"`
+	// Program* summarizes the bounded broker attached to an outer reduce run.
+	// Child calls carry ParentRunID/ProgramRequestID instead.
+	ProgramTools  []string `json:"program_tools,omitempty"`
+	ProgramCalls  int      `json:"program_calls,omitempty"`
+	ProgramBytes  int      `json:"program_bytes,omitempty"`
+	ProgramStatus string   `json:"program_status,omitempty"`
+	Reffed        bool     `json:"reffed"`
+	Ref           string   `json:"ref,omitempty"`
+	Bytes         int      `json:"bytes"`
 	// Protected is the count of sensitive field values minimized (redacted or
 	// tokenized) on this proxy call — the field-level minimization impact.
 	Protected int `json:"protected,omitempty"`
@@ -197,6 +241,7 @@ func NewServer(r Runner, opts ...Option) *Server {
 		reg:      registry{conns: map[string]*upstream{}, usage: map[string]int{}, policies: map[string][]byte{}},
 		rs:       runStore{byID: map[string]runRecord{}, maxKept: defaultMaxRuns},
 		flows:    oauthFlowStore{byState: map[string]*oauthFlow{}},
+		self:     newSelfServiceStore(),
 		inflight: newInflight(),
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
@@ -206,12 +251,13 @@ func NewServer(r Runner, opts ...Option) *Server {
 	for _, o := range opts {
 		o(s)
 	}
+	s.loadConnectionTemplates()
 	s.loadAudit() // replay the persisted audit log so the operator's history survives restarts
 	return s
 }
 
 // WithSecretStore installs the store that persists acquired credentials (upstream
-// OAuth refresh tokens) — OpenBao/Vault when configured, else a 0600 file.
+// OAuth refresh tokens).
 func WithSecretStore(s2 secretstore.Store) Option { return func(s *Server) { s.secrets = s2 } }
 
 // WithStateDir sets the directory for non-secret persisted state (the upstream
@@ -457,11 +503,20 @@ func (s *Server) accumulateImpactLocked(rec runRecord) {
 	s.rs.impact.Calls++
 	if rec.Reffed {
 		s.rs.impact.Parked++
-		s.rs.impact.BytesKeptOut += int64(rec.Bytes)
-	} else {
+		parked := rec.ParkedBytes
+		if parked == 0 { // backward-compatible replay of older audit records
+			parked = rec.Bytes
+		}
+		s.rs.impact.BytesKeptOut += int64(parked)
+	}
+	// A reference handle and preview still enter context on newly measured
+	// records. Preserve the old inline-only interpretation when replaying audit
+	// lines written before ContextMeasured existed.
+	if rec.ContextMeasured || !rec.Reffed {
 		s.rs.impact.BytesToContext += int64(rec.OutputBytes)
 	}
 	s.rs.impact.FieldsProtected += rec.Protected
+	s.accumulateContextLocked(rec)
 }
 
 func (s *Server) getRun(id string) (runRecord, bool) {

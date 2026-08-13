@@ -74,14 +74,30 @@ func newSigner(priv *ecdsa.PrivateKey) (*Signer, error) {
 // valid for ttl. iss is the authorization-server identifier (our own URL); aud is
 // this resource's identifier (binding the token to us — RFC 8707).
 func (s *Signer) Mint(iss, aud, sub string, scopes []string, ttl time.Duration) (string, error) {
+	return s.mint(iss, aud, sub, scopes, ttl, nil)
+}
+
+func (s *Signer) mint(iss, aud, sub string, scopes []string, ttl time.Duration, extra map[string]any) (string, error) {
 	now := time.Now()
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		return "", fmt.Errorf("generate token id: %w", err)
+	}
 	claims := jwt.MapClaims{
 		"iss":   iss,
 		"sub":   sub,
 		"aud":   aud,
+		"jti":   base64.RawURLEncoding.EncodeToString(jtiBytes),
 		"iat":   now.Unix(),
 		"exp":   now.Add(ttl).Unix(),
 		"scope": strings.Join(scopes, " "),
+	}
+	for key, value := range extra {
+		switch key {
+		case "iss", "sub", "aud", "jti", "iat", "exp", "scope":
+			continue
+		}
+		claims[key] = value
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	tok.Header["kid"] = s.kid

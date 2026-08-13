@@ -112,3 +112,24 @@ func TestSecretsFileStoreWarns(t *testing.T) {
 		t.Fatalf("label = %q, want file", sc.Label)
 	}
 }
+
+func TestSecretsEncryptedFileStoreIsHealthy(t *testing.T) {
+	s := newTestServer(t, fakeRunner{})
+	store, err := secretstore.NewEncryptedFile(filepath.Join(t.TempDir(), "tokens.json"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.secrets = store
+	var sc InfraComponent
+	for _, c := range s.InfraStatus(context.Background()).Components {
+		if c.Key == "secrets" {
+			sc = c
+		}
+	}
+	if sc.Status != "ok" {
+		t.Fatalf("encrypted-file secrets status = %q, want ok", sc.Status)
+	}
+	if sc.Label != "encrypted-file" {
+		t.Fatalf("label = %q, want encrypted-file", sc.Label)
+	}
+}

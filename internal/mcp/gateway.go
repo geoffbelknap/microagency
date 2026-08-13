@@ -65,6 +65,18 @@ type upstream struct {
 	// invocation gate. This is what keeps one user's OAuth grant from being
 	// exercised by another user of a shared (--issuer) deployment.
 	owner string
+	// selfService marks a principal-created connection. Its ownership is immutable:
+	// an operator may disable, revoke, or delete it, but cannot transfer an OAuth
+	// grant to a different identity. template records which approved template
+	// admitted it. revoked keeps the record visible to the operator while making it
+	// absent from every agent index and impossible to invoke.
+	selfService bool
+	template    string
+	revoked     bool
+	// authGeneration changes on operator revocation. Self-service refresh writers
+	// and reauthorization callbacks may commit only against the generation they
+	// started from, so an in-flight operation cannot resurrect a revoked grant.
+	authGeneration uint64
 	// minimizeSuggested is the minimization policy auto-detected from this upstream's
 	// tool schemas, computed ONCE when tools are (re)loaded and cached here. Computing
 	// it lazily in UpstreamList would rescan attacker-controlled tool metadata on every
@@ -118,6 +130,15 @@ type UpstreamOption func(*upstream)
 // WithOwner scopes the connection to the principal with the given subject.
 func WithOwner(subject string) UpstreamOption { return func(u *upstream) { u.owner = subject } }
 
+// WithSelfService marks a connection as created by its owning principal from an
+// operator-approved template.
+func WithSelfService(template string) UpstreamOption {
+	return func(u *upstream) { u.selfService, u.template = true, template }
+}
+
+// WithRevoked restores a persisted revoked record without restoring a credential.
+func WithRevoked() UpstreamOption { return func(u *upstream) { u.revoked = true } }
+
 // registerUpstream atomically registers rec under name, failing if the name is
 // already taken. The existence check and the write happen under ONE lock
 // acquisition — two concurrent adds of the same name can't both pass a separate
@@ -133,6 +154,11 @@ func (s *Server) registerUpstream(name string, u *upstream, opts ...UpstreamOpti
 	}
 	for _, opt := range opts {
 		opt(u)
+	}
+	if u.enabled && !u.revoked {
+		if err := s.validateMediationEndpoint(u.conn.Endpoint()); err != nil {
+			return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
+		}
 	}
 	s.reg.conns[name] = u
 	return nil
@@ -220,6 +246,9 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
+	if rec.revoked {
+		return fmt.Errorf("gateway: upstream %q is revoked; reauthorize it before enabling", name)
+	}
 	if rec.enabled {
 		return nil
 	}
@@ -241,6 +270,9 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 	if cur.conn != rec.conn {
 		return fmt.Errorf("gateway: upstream %q changed while enabling; retry", name)
 	}
+	if err := s.validateMediationEndpoint(cur.conn.Endpoint()); err != nil {
+		return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
+	}
 	cur.tools = tools
 	cur.minimizeSuggested = sug
 	cur.enabled = true
@@ -252,6 +284,10 @@ func (s *Server) EnableUpstream(ctx context.Context, name string) error {
 // provenance. Errors if the upstream is unknown or the new connection is
 // unreachable (leaving the old connection in place).
 func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamConn) error {
+	return s.rebindUpstream(ctx, name, conn, nil)
+}
+
+func (s *Server) rebindUpstream(ctx context.Context, name string, conn upstreamConn, expectedGeneration *uint64) error {
 	if !s.hasUpstream(name) { // fast-fail before the network round-trip
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
@@ -269,9 +305,19 @@ func (s *Server) RebindUpstream(ctx context.Context, name string, conn upstreamC
 	if !ok {
 		return fmt.Errorf("gateway: upstream %q was removed while rebinding", name)
 	}
+	if expectedGeneration != nil && rec.authGeneration != *expectedGeneration {
+		return fmt.Errorf("gateway: upstream %q authorization changed while rebinding; start again", name)
+	}
+	if err := s.validateMediationEndpoint(conn.Endpoint()); err != nil {
+		return fmt.Errorf("gateway: enforced mediation refuses upstream %q: %w", name, err)
+	}
 	rec.conn = conn
 	rec.tools = tools
 	rec.minimizeSuggested = sug
+	if rec.revoked {
+		rec.enabled = true
+	}
+	rec.revoked = false
 	return nil
 }
 
@@ -287,6 +333,9 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 	rec, ok := s.snapshotUpstream(name)
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	if rec.revoked {
+		return fmt.Errorf("gateway: upstream %q is revoked; reauthorize it before refreshing", name)
 	}
 	_ = rec.conn.Initialize(ctx)
 	tools, err := rec.conn.ListTools(ctx)
@@ -312,13 +361,16 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 
 // UpstreamInfo is an operator-facing view of one registered upstream (no token).
 type UpstreamInfo struct {
-	Name       string `json:"name"`
-	URL        string `json:"url"`
-	State      string `json:"state"`           // "enabled" | "discovered"
-	Provenance string `json:"provenance"`      // preloaded | catalog | discovered
-	ReadOnly   bool   `json:"read_only"`       // writes refused (least-privilege)
-	Owner      string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
-	Tools      int    `json:"tools"`           // count of advertised tools (shown per connection in the console)
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	State       string `json:"state"`           // "enabled" | "discovered"
+	Provenance  string `json:"provenance"`      // preloaded | catalog | discovered
+	ReadOnly    bool   `json:"read_only"`       // writes refused (least-privilege)
+	Owner       string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
+	SelfService bool   `json:"self_service,omitempty"`
+	Template    string `json:"template,omitempty"`
+	Revoked     bool   `json:"revoked,omitempty"`
+	Tools       int    `json:"tools"` // count of advertised tools (shown per connection in the console)
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
@@ -346,7 +398,38 @@ func (s *Server) SetUpstreamOwner(name, owner string) error {
 	if !ok {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
+	if rec.selfService && owner != rec.owner {
+		return fmt.Errorf("gateway: self-service upstream %q ownership is immutable; revoke or delete it instead", name)
+	}
 	rec.owner = owner
+	return nil
+}
+
+// DisableUpstream makes a connection non-invocable while retaining its indexed
+// metadata and credential. Revoked connections remain revoked.
+func (s *Server) DisableUpstream(name string) error {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.enabled = false
+	return nil
+}
+
+// RevokeUpstream makes a connection invisible and non-invocable immediately. The
+// caller separately deletes its durable credential before reporting success.
+func (s *Server) RevokeUpstream(name string) error {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.enabled = false
+	rec.revoked = true
+	rec.authGeneration++
 	return nil
 }
 
@@ -373,12 +456,15 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if rec.enabled {
 			state = "enabled"
 		}
+		if rec.revoked {
+			state = "revoked"
+		}
 		explicit, hasExplicit := s.reg.policies[name]
 		effective := explicit
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, Tools: len(rec.tools),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
@@ -424,6 +510,9 @@ func (s *Server) indexedTools(subject string) []map[string]any {
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
 	for name, rec := range s.reg.conns {
+		if rec.revoked {
+			continue
+		}
 		if rec.owner != "" && rec.owner != subject {
 			continue
 		}
@@ -479,6 +568,9 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if rec.owner != "" && rec.owner != principalOf(ctx).Subject {
 		return toolError("unknown tool %q; discover tools with find_tools", name), true
 	}
+	if rec.revoked {
+		return toolError("unknown tool %q; discover tools with find_tools", name), true
+	}
 	if !rec.enabled {
 		return toolError("tool %q is discovered but not enabled; ask the operator to enable upstream %q", name, upName), true
 	}
@@ -494,7 +586,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, out.outBytes, start, out.err, out.outcome, out.egressHost, out.protected, out.extra...)
+	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out)
 	return out.result, true
 }
 
@@ -502,13 +594,19 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 // proxyCall returns it on every path, so the single recordProxy in invokeUpstream
 // can't be bypassed by a new early return.
 type proxyOutcome struct {
-	result     map[string]any
-	outBytes   int
-	err        error
-	outcome    budget.Outcome
-	egressHost string // "" when no egress reached the upstream (a pre-dial refusal)
-	protected  int
-	extra      []sandbox.AuditEvent
+	result               map[string]any
+	rawBytes             int
+	minimizedBytes       int
+	err                  error
+	outcome              budget.Outcome
+	egressHost           string // "" when no egress reached the upstream (a pre-dial refusal)
+	protected            int
+	extra                []sandbox.AuditEvent
+	transformRan         bool
+	transformInputBytes  int
+	transformOutputBytes int
+	transformLatencyMs   int64
+	transformStatus      string
 }
 
 // proxyCall dials the upstream (after the read-only and pre-egress write gates),
@@ -519,6 +617,26 @@ type proxyOutcome struct {
 func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, upName, tool, name string, rec upstream, args json.RawMessage) proxyOutcome {
 	upHost := hostFromURL(rec.conn.Endpoint()) // the egress target for calls that reach the upstream
 	spec, haveSpec := findTool(rec.tools, tool)
+	// A governed reduce program carries an exact, immutable per-run allowlist and
+	// is read-only even when the underlying connection permits writes. Enforce
+	// both properties inside the ordinary proxy path so the same owner/enable,
+	// schema, credential, transport, result, and audit machinery remains the
+	// single invocation path. State is reclassified on every call, closing the
+	// validation-to-invocation race if an upstream refresh changes annotations.
+	if policy := programPolicyOf(ctx); policy != nil {
+		if _, allowed := policy.allowed[name]; !allowed {
+			return proxyOutcome{
+				result: toolError("tool %q is not granted to this governed program", name),
+				err:    fmt.Errorf("governed program allowlist refused tool"),
+			}
+		}
+		if !haveSpec || isWriteTool(spec) {
+			return proxyOutcome{
+				result: toolError("governed programs are read-only; tool %q is write/destructive or unclassifiable", name),
+				err:    fmt.Errorf("governed program read-only policy refused tool"),
+			}
+		}
+	}
 	// Read-only gate: a read-only upstream refuses writes (and unclassifiable tools,
 	// which default to write). Enforced OUTSIDE the agent, at the single invocation
 	// gate — the agent can't widen it. No egress happened, so egressHost stays "".
@@ -558,13 +676,16 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	}
 	s.recordUpstreamHealth(upName, err) // last-call health, for the operator view
 	if err != nil {
-		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), outBytes: len(res), err: err, egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), rawBytes: len(res), err: err, egressHost: upHost}
 	}
 	var passthrough map[string]any
 	if uerr := json.Unmarshal(res, &passthrough); uerr != nil {
-		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), outBytes: len(res), err: uerr, egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), rawBytes: len(res), err: uerr, egressHost: upHost}
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
+	if transform := transformOf(ctx); transform != nil && !resultIsError(passthrough) {
+		return s.fusedProxyResult(ctx, runID, upName, tool, name, transform, passthrough, res, upHost)
+	}
 	// Reference-by-default: a large result is held off-context as a handle the agent
 	// reduces, not flooded into context. Errors and small results pass through inline.
 	if s.budget.Store != nil && !resultIsError(passthrough) {
@@ -583,7 +704,7 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 		// A truncated / malformed payload is a NOTICE, not data — surface it inline so
 		// the agent reads the guidance instead of parking broken bytes behind a ref.
 		if notice, ok := truncatedNotice(payload); ok {
-			return proxyOutcome{result: truncatedResult(notice), outBytes: len(notice), egressHost: upHost}
+			return proxyOutcome{result: truncatedResult(notice), rawBytes: len(res), egressHost: upHost}
 		}
 		// Gate on the LARGER of the extracted payload and the full upstream result, so
 		// a compact structuredContent beside a large content[].text can't ride inline.
@@ -593,10 +714,10 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 				stored = string(res) // extraction dropped data — ref the full result instead
 			}
 			ref, sum := s.budget.Store.Put(stored, principalOf(ctx).Subject)
-			return proxyOutcome{result: s.refHandleResult(ref, sum, name), outBytes: sum.Bytes, outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
+			return proxyOutcome{result: s.refHandleResult(ref, sum, name), rawBytes: max(len(res), len(stored)), outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
-			return proxyOutcome{result: rehydratedResult(payload), outBytes: len(payload), egressHost: upHost}
+			return proxyOutcome{result: rehydratedResult(payload), rawBytes: len(payload), egressHost: upHost}
 		}
 	}
 	// Tier 2 — on an upstream tool error, append the tool's full description +
@@ -608,11 +729,16 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	// Field-level minimization: scrub sensitive VALUES out of a small inline result
 	// before it enters model context. No-op unless a minimizer and policy are
 	// configured for this upstream. Fails closed.
+	preMinimizeBytes := marshalLen(passthrough)
 	scrubbed, alerts, protected, merr := s.scrubInbound(ctx, upName, tool, passthrough)
 	if merr != nil {
-		return proxyOutcome{result: toolError("upstream %q: field minimization failed; result withheld", upName), err: fmt.Errorf("minimize: %w", merr), egressHost: upHost}
+		return proxyOutcome{result: toolError("upstream %q: field minimization failed; result withheld", upName), rawBytes: len(res), err: fmt.Errorf("minimize: %w", merr), egressHost: upHost}
 	}
-	return proxyOutcome{result: scrubbed, outBytes: len(res), egressHost: upHost, protected: protected, extra: minimizeAlertEvents(alerts)}
+	minimizedBytes := preMinimizeBytes - marshalLen(scrubbed)
+	if minimizedBytes < 0 {
+		minimizedBytes = 0
+	}
+	return proxyOutcome{result: scrubbed, rawBytes: len(res), minimizedBytes: minimizedBytes, egressHost: upHost, protected: protected, extra: minimizeAlertEvents(alerts)}
 }
 
 // fetchOffload retrieves an upstream offload URL host-side through the SSRF-guarded
@@ -663,24 +789,56 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string) ([]byte, error
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, outBytes int, start time.Time, callErr error, out budget.Outcome, egressHost string, protected int, extra ...sandbox.AuditEvent) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome) {
 	exit, auditErr := 0, ""
-	if callErr != nil {
-		exit, auditErr = 1, callErr.Error()
+	if out.err != nil {
+		exit, auditErr = 1, out.err.Error()
 	}
 	var audit []sandbox.AuditEvent
-	if egressHost != "" {
-		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: egressHost})
+	if out.egressHost != "" {
+		audit = append(audit, sandbox.AuditEvent{Event: "egress_allow", Host: out.egressHost})
 	}
-	audit = append(audit, extra...) // e.g. minimize_alert events from field minimization
+	audit = append(audit, out.extra...) // e.g. minimize_alert events from field minimization
+	parkedBytes := 0
+	if out.outcome.Reffed {
+		parkedBytes = out.outcome.Summary.Bytes
+	}
+	transform := transformOf(ctx)
+	transformEngine, transformQuerySHA256, transformStatus := "", "", out.transformStatus
+	if transform != nil {
+		transformEngine = transform.Engine
+		transformQuerySHA256 = transformDigest(transform.Query)
+		if transformStatus == "" {
+			transformStatus = "not_run"
+		}
+	}
+	substrate, engine := "", ""
+	if out.transformRan {
+		substrate, engine = "wasm", transformEngine
+	}
+	parentRun, delivery, requestID := programAuditContext(ctx)
+	if delivery == "program" {
+		contextBytes = 0 // the raw/intermediate response went to the sandbox only
+	}
 	s.putRun(runID, runRecord{
-		Kind: "proxy", Upstream: upstream, Tool: tool, Args: string(args),
-		User:        principalOf(ctx).Subject,
-		InputBytes:  len(args), // the tool arguments are the call's input payload
-		OutputBytes: outBytes, Bytes: outBytes,
-		LatencyMs: time.Since(start).Milliseconds(),
-		Reffed:    out.Reffed, Ref: string(out.Ref),
-		Protected: protected,
+		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: string(args),
+		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
+		User:            principalOf(ctx).Subject,
+		InputBytes:      len(args), // the tool arguments are the call's input payload
+		RawBytes:        out.rawBytes,
+		ParkedBytes:     parkedBytes,
+		MinimizedBytes:  out.minimizedBytes,
+		OutputBytes:     contextBytes,
+		ContextMeasured: true,
+		Bytes:           parkedBytes,
+		LatencyMs:       time.Since(start).Milliseconds(),
+		Substrate:       substrate, Engine: engine,
+		FusedInvocation: out.transformRan,
+		TransformEngine: transformEngine, TransformQuerySHA256: transformQuerySHA256,
+		TransformInputBytes: out.transformInputBytes, TransformOutputBytes: out.transformOutputBytes,
+		TransformLatencyMs: out.transformLatencyMs, TransformStatus: transformStatus,
+		Reffed: out.outcome.Reffed, Ref: string(out.outcome.Ref),
+		Protected: out.protected,
 		ExitCode:  exit, AuditErr: auditErr, Audit: audit,
 	})
 }
@@ -744,10 +902,22 @@ func (s *Server) callTool(ctx context.Context, args json.RawMessage) map[string]
 	var in struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Transform json.RawMessage `json:"transform"`
+		TaskID    string          `json:"task_id"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil || in.Name == "" {
 		return toolError("call_tool requires a tool name; discover tools with find_tools")
 	}
+	taskID, err := validateTaskID(in.TaskID)
+	if err != nil {
+		return toolError("call_tool: %v", err)
+	}
+	transform, err := s.parseTransform(in.Transform)
+	if err != nil {
+		return toolError("call_tool: %v", err)
+	}
+	ctx = withTaskID(ctx, taskID)
+	ctx = withTransform(ctx, transform)
 	if res, ok := s.invokeUpstream(ctx, in.Name, in.Arguments); ok {
 		return res
 	}

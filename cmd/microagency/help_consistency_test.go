@@ -54,6 +54,7 @@ func TestHelpIsOneContractEverywhere(t *testing.T) {
 		{"purge", "--help"},
 		{"doctor", "--help"},
 		{"hook", "--help"},
+		{"mediation", "--help"},
 	}
 	for _, argv := range commands {
 		t.Run(strings.Join(argv, " "), func(t *testing.T) {
@@ -90,7 +91,7 @@ func TestUpHelpIsUpsOwn(t *testing.T) {
 	}
 
 	stdout, _, _ = runHelpHelper(t, "help")
-	for _, cmd := range []string{"microagency up", "microagency down", "microagency doctor", "microagency hook"} {
+	for _, cmd := range []string{"microagency up", "microagency down", "microagency doctor", "microagency hook", "microagency mediation"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Errorf("global help lost %q:\n%s", cmd, stdout)
 		}

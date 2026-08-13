@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-07-28_
+_Last updated: 2026-08-12_
 
 ## Built-in OAuth (the default)
 
@@ -28,41 +28,69 @@ The upstream secrets microagency holds — OAuth refresh tokens, static
 bearers, stored client registrations — go in a secret store, not the
 plaintext registration index. On startup `up` picks one:
 
-- If `VAULT_ADDR` (and `VAULT_TOKEN`) are set, it uses that Vault/OpenBao.
+- If `VAULT_ADDR` and `VAULT_TOKEN` are set, it uses that Vault/OpenBao. Both
+  are required; a partial configuration fails startup.
 - Otherwise, if an `openbao`/`bao` binary is on your PATH, `up` starts a
-  dedicated OpenBao on `127.0.0.1:8200`, stores its unseal key and root
-  token under `~/.microagency/openbao/` (0600), and uses its KV-v2 engine.
+  dedicated OpenBao on `127.0.0.1:8200` and uses its KV-v2 engine. Protected
+  custody can keep its bootstrap in macOS Keychain, Linux Secret Service, or
+  an operator KMS helper. Without one, the bootstrap stays beside the data
+  under `~/.microagency/openbao/` and is reported as same-disk degraded.
   `restart` keeps this OpenBao up; `down` stops it.
-- If neither is available, it falls back to an encrypted-at-rest **file
-  store** under `~/.microagency`. The startup log records which posture you
-  got (watch for it in `~/.microagency/microagency.log` when running
-  backgrounded), so you can tell where your secrets actually are.
+- If neither is available, it falls back to a mode-0600 **plaintext file** at
+  `~/.microagency/upstream-tokens.json`. This is permission isolation, not
+  encryption at rest, and both the startup log and `doctor` report it as
+  degraded.
 
-The managed OpenBao runs with `tls_disable` on the loopback bind (it never
-leaves localhost). Auto-unseal via a system keychain/KMS is a hardening
-follow-up.
+To encrypt that fallback, supply a separate 32-byte key file outside
+`~/.microagency`:
+
+```sh
+install -d -m 700 ~/.config/microagency
+openssl rand 32 > ~/.config/microagency/secret-store.key
+chmod 600 ~/.config/microagency/secret-store.key
+export MICROAGENCY_SECRET_KEY_FILE=~/.config/microagency/secret-store.key
+microagency up
+```
+
+The encrypted file uses AES-256-GCM. On first startup with the key, microagency
+migrates an existing plaintext `upstream-tokens.json` through a mode-0600
+temporary ciphertext file and an atomic rename. It refuses a key inside
+`~/.microagency`, a key accessible to group or other users, a wrong key, or a
+restart without the configured key. Back up the key separately: losing it makes
+the encrypted credentials unrecoverable.
+
+The managed OpenBao runs with `tls_disable` on the loopback bind; it never
+leaves localhost. On its first protected start, microagency uses the initial
+root token only to configure KV v2 and a narrow AppRole, then revokes it. See
+[protecting managed OpenBao](openbao-custody.md) for setup, migration,
+fail-closed recovery, rotation, and backup procedures.
+
+In a multi-user self-service deployment, each upstream token and dynamic
+client record uses a principal-specific secret-store path. The path contains a
+one-way digest of the token subject, not the raw identity. The non-secret
+connection index records ownership so the gateway can rebuild the same boundary
+after a restart. See [public mode](public-mode.md#allow-self-service-connections)
+for the operator template and user authorization flow.
 
 ## Static bearer / external OAuth
 
 For a client that can't do OAuth, `up --token <tok>` serves a static bearer
 token instead. It auto-registers with Claude Code, passing the token through
-the subprocess rather than your shell. If auto-registration isn't available,
-it prints a connect line that reads the token from its 0600 file so the token
-stays out of your history:
+the subprocess rather than your shell. You can read a token without storing it
+in shell history:
 
 ```sh
-claude mcp add --transport http microagency http://127.0.0.1:8765/mcp \
-  --header "Authorization: Bearer \$(cat ~/.microagency/token)"
+read -rsp "MCP bearer: " MICROAGENCY_TOKEN
+export MICROAGENCY_TOKEN
+microagency up
 ```
 
-For a shared or hosted deployment, `up --issuer <url>` validates tokens
-from an external authorization server; clients log in there — and this works
-over a tunnel too (`up --tunnel … --issuer …`, see
-[public mode](public-mode.md)), so external OAuth over the tunnel is
-available today. What's still planned is serving the **built-in**
-authorization server over the tunnel; until then, a tunnel without
-`--issuer` uses a static bearer (a distinct MCP bearer, minted at
-`~/.microagency/mcp-bearer`, never the operator token).
+For a shared deployment, `up --issuer <url>` validates tokens from an
+external authorization server. Clients log in through that issuer.
+
+Built-in OAuth also works over Cloudflare and ngrok tunnels. Consent stays on
+the loopback operator listener. See [public mode](public-mode.md) for the
+endpoints, restart behavior, and external issuer option.
 
 ## Client-spawned (stdio)
 

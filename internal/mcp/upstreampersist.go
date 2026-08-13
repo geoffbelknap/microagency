@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,13 +26,16 @@ const (
 // (an OAuth refresh token or a static bearer) lives in the secret store, never
 // here; Auth records which kind so reload knows how to restore it.
 type upstreamReg struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Discover bool   `json:"discover"`
-	Auth     string `json:"auth,omitempty"`      // authOAuth|authStatic|authNone; "" = oauth (legacy)
-	ReadOnly bool   `json:"read_only,omitempty"` // writes refused (least-privilege)
-	Owner    string `json:"owner,omitempty"`     // principal subject this connection is scoped to; "" = shared
-	Minimize string `json:"minimize,omitempty"`  // field-minimization policy JSON (type→action); "" = off
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Discover    bool   `json:"discover"`
+	Auth        string `json:"auth,omitempty"`         // authOAuth|authStatic|authNone; "" = oauth (legacy)
+	ReadOnly    bool   `json:"read_only,omitempty"`    // writes refused (least-privilege)
+	Owner       string `json:"owner,omitempty"`        // principal subject this connection is scoped to; "" = shared
+	Minimize    string `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
+	SelfService bool   `json:"self_service,omitempty"` // admitted from an operator-approved template
+	Template    string `json:"template,omitempty"`     // template id for self-service connections
+	Revoked     bool   `json:"revoked,omitempty"`      // credential deleted; never reload as callable
 }
 
 // authKind returns the registration's auth kind, treating a legacy empty value as
@@ -87,36 +92,41 @@ func (s *Server) loadRegistrations() []upstreamReg {
 // writeRegistrations persists regs atomically: write a sibling temp file, then
 // rename it over upstreams.json so a crash mid-write can't leave a torn or empty
 // registry. Callers hold persistMu (via updateRegistrations).
-func (s *Server) writeRegistrations(regs []upstreamReg) {
+func (s *Server) writeRegistrations(regs []upstreamReg) error {
 	if err := os.MkdirAll(s.stateDir, 0o700); err != nil {
-		slog.Error("persist upstream registration failed", "err", err)
-		return
+		return err
 	}
 	b, _ := json.Marshal(regs)
 	tmp, err := os.CreateTemp(s.stateDir, "upstreams-*.json.tmp")
 	if err != nil {
-		slog.Error("persist upstream registration failed", "err", err)
-		return
+		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		slog.Error("persist upstream registration failed", "err", err)
-		return
+		return err
 	}
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		slog.Error("persist upstream registration failed", "err", err)
-		return
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
 	}
 	if err := tmp.Close(); err != nil {
-		slog.Error("persist upstream registration failed", "err", err)
-		return
+		return err
 	}
 	if err := os.Rename(tmpName, s.registrationsPath()); err != nil {
-		slog.Error("persist upstream registration failed", "err", err)
+		return err
 	}
+	dir, err := os.Open(s.stateDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // updateRegistrations applies fn to the persisted registrations under persistMu
@@ -132,26 +142,65 @@ func (s *Server) updateRegistrations(fn func([]upstreamReg) ([]upstreamReg, bool
 	defer s.persistMu.Unlock()
 	next, changed := fn(s.loadRegistrations())
 	if changed {
-		s.writeRegistrations(next)
+		if err := s.writeRegistrations(next); err != nil {
+			slog.Error("persist upstream registration failed", "err", err)
+		}
 	}
+}
+
+func (s *Server) updateRegistrationsStrict(fn func([]upstreamReg) ([]upstreamReg, bool)) error {
+	if s.stateDir == "" {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	next, changed := fn(s.loadRegistrations())
+	if !changed {
+		return nil
+	}
+	return s.writeRegistrations(next)
 }
 
 // persistRegistration records (or updates) an upstream registration so it reloads
 // across restarts. Best-effort; a no-op without a stateDir.
 func (s *Server) persistRegistration(name, url string, discover bool, authKind, owner string) {
+	s.persistRegistrationRecord(upstreamReg{Name: name, URL: url, Discover: discover, Auth: authKind, Owner: owner})
+}
+
+// persistRegistrationRecord records the full non-secret connection identity. It
+// preserves operator policy fields across reauthorization while allowing a
+// self-service callback to atomically bind owner + template metadata.
+func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
-		reg := upstreamReg{Name: name, URL: url, Discover: discover, Auth: authKind, Owner: owner}
 		for i := range regs {
-			if regs[i].Name == name {
+			if regs[i].Name == reg.Name {
 				reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
+				reg.Minimize = regs[i].Minimize
 				if reg.Owner == "" {
 					reg.Owner = regs[i].Owner // preserve owner scoping across re-registration (e.g. reauth)
+				}
+				if !reg.SelfService && regs[i].SelfService {
+					reg.SelfService, reg.Template = true, regs[i].Template
 				}
 				regs[i] = reg
 				return regs, true
 			}
 		}
 		return append(regs, reg), true
+	})
+}
+
+// persistDisabledStrict makes a registration reload as discovered/non-invocable
+// and reports a durable-state failure to the operator.
+func (s *Server) persistDisabledStrict(name string) error {
+	return s.updateRegistrationsStrict(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].Discover = true
+				return regs, true
+			}
+		}
+		return regs, false
 	})
 }
 
@@ -204,8 +253,9 @@ func (s *Server) persistMinimize(name, policy string) {
 func (s *Server) markRegistrationEnabled(name string) {
 	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
 		for i := range regs {
-			if regs[i].Name == name && regs[i].Discover {
+			if regs[i].Name == name && (regs[i].Discover || regs[i].Revoked) {
 				regs[i].Discover = false
+				regs[i].Revoked = false
 				return regs, true
 			}
 		}
@@ -216,20 +266,90 @@ func (s *Server) markRegistrationEnabled(name string) {
 // removeRegistration deletes an upstream's persisted registration and any stored
 // credential, so a removed upstream stays gone across restarts. Best-effort.
 func (s *Server) removeRegistration(ctx context.Context, name string) {
+	live, liveOK := s.snapshotUpstream(name)
+	var removed *upstreamReg
 	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
 		kept := make([]upstreamReg, 0, len(regs))
 		for _, r := range regs {
 			if r.Name != name {
 				kept = append(kept, r)
+			} else {
+				rc := r
+				removed = &rc
 			}
 		}
 		return kept, len(kept) != len(regs)
 	})
 	if s.secrets != nil {
-		if err := s.secrets.Delete(ctx, tokenKey(name)); err != nil && err != secretstore.ErrNotFound {
+		key := tokenKey(name)
+		if removed != nil {
+			key = credentialKeyForRegistration(*removed)
+		} else if liveOK && live.selfService {
+			key = selfServiceTokenKey(live.owner, name)
+		}
+		if err := s.secrets.Delete(ctx, key); err != nil && err != secretstore.ErrNotFound {
 			slog.Error("remove upstream secret failed", "upstream", name, "err", err)
 		}
 	}
+}
+
+// revokeRegistration persists a fail-closed tombstone and deletes the durable
+// credential. Even if deletion fails, restart still cannot reload the credential.
+func (s *Server) revokeRegistration(ctx context.Context, name string) error {
+	live, liveOK := s.snapshotUpstream(name)
+	var found *upstreamReg
+	persistErr := s.updateRegistrationsStrict(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].Revoked = true
+				regs[i].Discover = true
+				rc := regs[i]
+				found = &rc
+				return regs, true
+			}
+		}
+		return regs, false
+	})
+	if found == nil && liveOK {
+		found = &upstreamReg{Name: name, URL: live.conn.Endpoint(), Owner: live.owner, SelfService: live.selfService, Template: live.template, Revoked: true}
+	}
+	if found == nil {
+		return fmt.Errorf("unknown upstream %q", name)
+	}
+	if s.secrets == nil {
+		return persistErr
+	}
+	err := s.secrets.Delete(ctx, credentialKeyForRegistration(*found))
+	if err != nil && err != secretstore.ErrNotFound {
+		return errors.Join(persistErr, err)
+	}
+	return persistErr
+}
+
+// removeSelfServiceRegistration deletes a principal-owned registration and its
+// credential with fail-closed ordering. Credential deletion is attempted even if
+// the non-secret index write fails, so a restart cannot restore a callable grant.
+func (s *Server) removeSelfServiceRegistration(ctx context.Context, name string, live upstream) error {
+	var found bool
+	persistErr := s.updateRegistrationsStrict(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		kept := make([]upstreamReg, 0, len(regs))
+		for _, reg := range regs {
+			if reg.Name == name {
+				found = true
+				continue
+			}
+			kept = append(kept, reg)
+		}
+		return kept, found
+	})
+	var secretErr error
+	if s.secrets != nil {
+		secretErr = s.secrets.Delete(ctx, selfServiceTokenKey(live.owner, name))
+		if secretErr == secretstore.ErrNotFound {
+			secretErr = nil
+		}
+	}
+	return errors.Join(persistErr, secretErr)
 }
 
 // saveStaticToken stores a static bearer for an upstream in the secret store (never
@@ -254,6 +374,17 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 	}
 	for _, reg := range s.loadRegistrations() {
 		u := &gateway.Upstream{Name: reg.Name, URL: reg.URL, Client: s.upstreamClient}
+		opts := []UpstreamOption{}
+		if reg.Owner != "" {
+			opts = append(opts, WithOwner(reg.Owner))
+		}
+		if reg.SelfService {
+			opts = append(opts, WithSelfService(reg.Template))
+		}
+		if reg.Revoked {
+			_ = s.registerUpstream(reg.Name, &upstream{conn: u, provenance: "preloaded"}, append(opts, WithRevoked())...)
+			continue
+		}
 		switch reg.authKind() {
 		case authNone:
 			// No credential — reconnect as-is (its tools/list is reachable unauthenticated).
@@ -262,7 +393,7 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
 				continue
 			}
-			raw, err := s.secrets.Load(ctx, tokenKey(reg.Name))
+			raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
 			if err != nil {
 				slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
 				continue
@@ -273,7 +404,7 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
 				continue
 			}
-			raw, err := s.secrets.Load(ctx, tokenKey(reg.Name))
+			raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
 			if err != nil {
 				if err != secretstore.ErrNotFound {
 					slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
@@ -285,12 +416,7 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 				slog.Warn("reload upstream: bad token record", "upstream", reg.Name, "err", err)
 				continue
 			}
-			u.Bearer = s.refreshingBearer(reg.Name, auth.TokenFromRecord(rec))
-		}
-
-		var opts []UpstreamOption
-		if reg.Owner != "" {
-			opts = append(opts, WithOwner(reg.Owner))
+			u.Bearer = s.refreshingBearerAtKey(reg.Name, credentialKeyForRegistration(reg), auth.TokenFromRecord(rec), 0, reg.SelfService)
 		}
 		var aerr error
 		if reg.Discover {

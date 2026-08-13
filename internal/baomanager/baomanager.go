@@ -1,14 +1,14 @@
 // Package baomanager makes OpenBao a managed dependency: microagency runs its own
 // dedicated OpenBao instance, initializes and unseals it, and reports the address +
-// token to use. The bootstrap (a single unseal key + the root token) is stored in a
-// 0600 file for now — keychain/KMS auto-unseal is the hardening follow-up; the file
-// posture is stated plainly so it isn't theater-by-omission.
+// token to use. Protected custody keeps bootstrap material in an OS keyring or an
+// operator helper; the compatibility file posture remains explicit and degraded.
 package baomanager
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,51 +24,113 @@ import (
 
 // Manager supervises one OpenBao instance under Dir.
 type Manager struct {
-	Dir    string // e.g. ~/.microagency/openbao
-	Addr   string // http://127.0.0.1:8200
-	binary string
-	client *http.Client
+	Dir     string // e.g. ~/.microagency/openbao
+	Addr    string // http://127.0.0.1:8200
+	binary  string
+	client  *http.Client
+	custody custodySelection
+	// tokenLease is populated by AppRole login. The periodic token is renewed in
+	// place, so callers can keep the returned token string for the process life.
+	tokenLease time.Duration
 	// reset resets the storage to a fresh, uninitialized state. nil = the default
 	// (stop bao, archive the orphaned data, restart fresh); tests inject a stub.
 	reset func(context.Context) error
 }
 
 type bootstrap struct {
-	UnsealKey string `json:"unseal_key"`
-	RootToken string `json:"root_token"`
+	UnsealKey      string `json:"unseal_key,omitempty"`
+	RecoveryKey    string `json:"recovery_key,omitempty"`
+	RootToken      string `json:"root_token,omitempty"` // legacy/transitional only; revoked after AppRole setup
+	RoleID         string `json:"role_id,omitempty"`
+	SecretID       string `json:"secret_id,omitempty"`
+	SecretAccessor string `json:"secret_id_accessor,omitempty"`
 }
 
 // Ensure brings OpenBao up and returns the address + token microagency should use.
 // If VAULT_ADDR is already set (an external Bao the operator runs), it returns that
 // and manages nothing. Otherwise it resolves the bao binary, starts a dedicated
-// server, initializes-or-unseals it, ensures a KV v2 mount, and returns its address
-// + root token.
+// server, initializes-or-unseals it, retires the initial root to a narrow AppRole,
+// and returns its address plus a renewable periodic token.
 func Ensure(ctx context.Context, dir string, getenv func(string) string) (addr, token string, err error) {
 	if a := getenv("VAULT_ADDR"); a != "" {
-		return a, getenv("VAULT_TOKEN"), nil
+		token := getenv("VAULT_TOKEN")
+		if token == "" {
+			return "", "", fmt.Errorf("VAULT_ADDR is set but VAULT_TOKEN is missing")
+		}
+		return a, token, nil
+	}
+	if getenv("VAULT_TOKEN") != "" {
+		return "", "", fmt.Errorf("VAULT_TOKEN is set but VAULT_ADDR is missing")
+	}
+	custody, err := selectCustody(dir, getenv)
+	if err != nil {
+		if protectedRequested(dir, getenv) {
+			return "", "", &ProtectedError{Err: err}
+		}
+		return "", "", err
+	}
+	if custody.manifest.protected() {
+		if _, statErr := os.Stat(custodyPath(dir)); os.IsNotExist(statErr) {
+			// Persist the non-secret locator before OpenBao can initialize. If the
+			// first protected write then fails, every later start still knows it
+			// must fail closed rather than reset or select a disk fallback.
+			if err := saveCustodyManifest(dir, custody.manifest); err != nil {
+				return "", "", &ProtectedError{Err: fmt.Errorf("persist protected custody metadata: %w", err)}
+			}
+		}
+	}
+	fail := func(err error) (string, string, error) {
+		if err != nil && custody.manifest.protected() {
+			err = &ProtectedError{Err: err}
+		}
+		return "", "", err
 	}
 	bin, err := resolveBinary()
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	m := &Manager{
 		Dir: dir, Addr: "http://127.0.0.1:8200", binary: bin,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: 10 * time.Second}, custody: custody,
 	}
 	if err := m.start(); err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	if err := m.waitReachable(ctx); err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	tok, err := m.initOrUnseal(ctx)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
-	if err := m.ensureKVv2(ctx, tok); err != nil {
-		return "", "", err
-	}
+	m.startTokenRenewal(ctx, tok)
 	return m.Addr, tok, nil
+}
+
+// RotateLogin replaces the persistent AppRole SecretID through the current
+// narrow operational token. The new credential is login-tested and durably
+// protected before the old accessor is destroyed.
+func RotateLogin(ctx context.Context, dir string, getenv func(string) string) error {
+	if getenv("VAULT_ADDR") != "" || getenv("VAULT_TOKEN") != "" {
+		return errors.New("openbao login rotation applies only to the managed store, not external Vault/OpenBao")
+	}
+	addr, token, err := Ensure(ctx, dir, getenv)
+	if err != nil {
+		return err
+	}
+	custody, err := selectCustody(dir, getenv)
+	if err != nil {
+		if protectedRequested(dir, getenv) {
+			return &ProtectedError{Err: err}
+		}
+		return err
+	}
+	m := &Manager{Dir: dir, Addr: addr, client: &http.Client{Timeout: 10 * time.Second}, custody: custody}
+	if err := m.rotateAppRoleCredential(ctx, token); err != nil && custody.manifest.protected() {
+		return &ProtectedError{Err: err}
+	} else {
+		return err
+	}
 }
 
 // Stop terminates the managed OpenBao recorded in the pid file (used by `down`).
@@ -109,6 +171,13 @@ api_addr = "http://127.0.0.1:8200"
 // instance is already reachable at Addr (idempotent across restarts).
 func (m *Manager) start() error {
 	if m.reachable() {
+		pid, err := managedPID(m.Dir)
+		if err != nil {
+			return fmt.Errorf("openbao is already reachable at %s but is not the instance recorded under %s: %w", m.Addr, m.Dir, err)
+		}
+		if err := syscall.Kill(pid, 0); err != nil {
+			return fmt.Errorf("openbao is already reachable at %s but managed pid %d is not live: %w", m.Addr, pid, err)
+		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Join(m.Dir, "data"), 0o700); err != nil {
@@ -130,6 +199,18 @@ func (m *Manager) start() error {
 		return fmt.Errorf("start openbao: %w", err)
 	}
 	return os.WriteFile(filepath.Join(m.Dir, "bao.pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+}
+
+func managedPID(dir string) (int, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "bao.pid"))
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, errors.New("managed pid file is invalid")
+	}
+	return pid, nil
 }
 
 func (m *Manager) reachable() bool {
@@ -167,21 +248,20 @@ func (m *Manager) sealStatus(ctx context.Context) (sealStatus, error) {
 	return st, err
 }
 
-// initOrUnseal initializes a fresh Bao (storing the bootstrap) or unseals an
-// existing one from the stored bootstrap, returning the root token.
+// initOrUnseal initializes a fresh Bao or unseals an existing one. The initial
+// root token exists only long enough to provision a narrow AppRole; it is then
+// revoked and removed from the protected record.
 func (m *Manager) initOrUnseal(ctx context.Context) (string, error) {
 	st, err := m.sealStatus(ctx)
 	if err != nil {
 		return "", err
 	}
-	// Initialized, but the bootstrap (the only copy of the unseal key + root token)
-	// is gone: the vault can never be unsealed again, so its contents are lost no
-	// matter what we do. Rather than fail every start forever — which silently drops
-	// microagency to the file store and strands the OAuth tokens there — reset the
-	// vault to a fresh, usable state. Upstream connections held in the old vault must
-	// be re-authorized afterward. This turns a permanent brick into a one-time reset.
+	var bs bootstrap
 	if st.Initialized {
-		if _, lerr := loadBootstrap(m.Dir); lerr != nil {
+		if bs, err = m.loadBootstrap(ctx); err != nil {
+			if m.custody.protector != nil && m.custody.protector.Protected() {
+				return "", fmt.Errorf("managed OpenBao is initialized but its protected bootstrap cannot be loaded: %w", err)
+			}
 			slog.Warn("OpenBao bootstrap missing; resetting vault fresh (re-authorize upstream connections afterward)")
 			if rerr := m.resetStorage(ctx); rerr != nil {
 				return "", fmt.Errorf("reset unrecoverable openbao: %w", rerr)
@@ -192,6 +272,9 @@ func (m *Manager) initOrUnseal(ctx context.Context) (string, error) {
 		}
 	}
 	if !st.Initialized {
+		if err := m.preflightProtectedCustody(ctx); err != nil {
+			return "", err
+		}
 		var out struct {
 			KeysB64   []string `json:"keys_base64"`
 			RootToken string   `json:"root_token"`
@@ -202,29 +285,324 @@ func (m *Manager) initOrUnseal(ctx context.Context) (string, error) {
 		if len(out.KeysB64) == 0 || out.RootToken == "" {
 			return "", fmt.Errorf("openbao init returned no key/token")
 		}
-		bs := bootstrap{UnsealKey: out.KeysB64[0], RootToken: out.RootToken}
-		if err := saveBootstrap(m.Dir, bs); err != nil {
+		bs = bootstrap{UnsealKey: out.KeysB64[0], RootToken: out.RootToken}
+		if err := m.saveBootstrap(ctx, bs); err != nil {
 			return "", err
 		}
 		if err := m.unseal(ctx, bs.UnsealKey); err != nil {
 			return "", err
 		}
-		return bs.RootToken, nil
-	}
-	bs, err := loadBootstrap(m.Dir)
-	if err != nil {
-		return "", fmt.Errorf("openbao is initialized but the bootstrap is missing (%s): %w", m.Dir, err)
+		return m.operationalToken(ctx, bs)
 	}
 	if st.Sealed {
+		if bs.UnsealKey == "" {
+			return "", errors.New("managed OpenBao is sealed but its protected record has no unseal key")
+		}
 		if err := m.unseal(ctx, bs.UnsealKey); err != nil {
 			return "", err
 		}
 	}
-	return bs.RootToken, nil
+	return m.operationalToken(ctx, bs)
+}
+
+func (m *Manager) preflightProtectedCustody(ctx context.Context) error {
+	selection := m.custodySelection()
+	if !selection.protector.Protected() {
+		return nil
+	}
+	if _, err := selection.protector.Load(ctx); err == nil {
+		return errors.New("protected bootstrap already exists for an uninitialized OpenBao; restore the matching data or purge the stale protected record")
+	} else if !errors.Is(err, errBootstrapNotFound) {
+		return fmt.Errorf("preflight protected bootstrap read: %w", err)
+	}
+	probe := []byte(`{"format":"microagency-openbao-protector-preflight"}`)
+	if err := selection.protector.Save(ctx, probe); err != nil {
+		return fmt.Errorf("preflight protected bootstrap write: %w", err)
+	}
+	got, err := selection.protector.Load(ctx)
+	if err != nil || !bytes.Equal(got, probe) {
+		_ = selection.protector.Delete(ctx)
+		if err != nil {
+			return fmt.Errorf("preflight protected bootstrap verification: %w", err)
+		}
+		return errors.New("preflight protected bootstrap verification: round-trip mismatch")
+	}
+	if err := selection.protector.Delete(ctx); err != nil {
+		return fmt.Errorf("preflight protected bootstrap cleanup: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) unseal(ctx context.Context, key string) error {
 	return m.do(ctx, http.MethodPut, "/v1/sys/unseal", "", map[string]string{"key": key}, nil)
+}
+
+const managedPolicy = `path "secret/data/microagency/*" {
+  capabilities = ["create", "update", "read", "delete"]
+}
+path "secret/metadata/microagency/*" {
+  capabilities = ["read", "list", "delete"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/approle/role/microagency/secret-id" {
+  capabilities = ["update"]
+}
+path "auth/approle/role/microagency/secret-id-accessor/destroy" {
+  capabilities = ["update"]
+}`
+
+// operationalToken migrates a legacy root-token bootstrap once, or logs in
+// through the already-provisioned AppRole. Root is never returned to the
+// gateway and is revoked before startup completes.
+func (m *Manager) operationalToken(ctx context.Context, bs bootstrap) (string, error) {
+	if bs.RoleID == "" || bs.SecretID == "" {
+		if bs.RootToken == "" {
+			return "", errors.New("managed OpenBao bootstrap has neither AppRole credentials nor a transitional root token")
+		}
+		if err := m.ensureKVv2(ctx, bs.RootToken); err != nil {
+			return "", fmt.Errorf("prepare managed KV mount: %w", err)
+		}
+		roleID, secretID, accessor, err := m.provisionAppRole(ctx, bs.RootToken)
+		if err != nil {
+			return "", err
+		}
+		bs.RoleID, bs.SecretID, bs.SecretAccessor = roleID, secretID, accessor
+		// Keep the root token only until the AppRole record has round-tripped
+		// through its protector. A failed revoke can then be retried safely.
+		if err := m.saveBootstrap(ctx, bs); err != nil {
+			return "", fmt.Errorf("save AppRole bootstrap before root revocation: %w", err)
+		}
+	}
+
+	login, err := m.loginAppRole(ctx, bs.RoleID, bs.SecretID)
+	if err != nil {
+		return "", fmt.Errorf("managed OpenBao AppRole login: %w", err)
+	}
+	m.tokenLease = time.Duration(login.LeaseDuration) * time.Second
+	if bs.RootToken != "" {
+		err := m.do(ctx, http.MethodPost, "/v1/auth/token/revoke-self", bs.RootToken, nil, nil)
+		// If a prior run revoked root and crashed before pruning the protected
+		// record, OpenBao reports the old credential as forbidden. AppRole login
+		// above proves the replacement path is usable, so pruning is safe.
+		if err != nil && !hasHTTPStatus(err, http.StatusForbidden) {
+			return "", fmt.Errorf("revoke initial OpenBao root token: %w", err)
+		}
+		bs.RootToken = ""
+		if err := m.saveBootstrap(ctx, bs); err != nil {
+			return "", fmt.Errorf("remove revoked root token from protected bootstrap: %w", err)
+		}
+	}
+	return login.Token, nil
+}
+
+func (m *Manager) provisionAppRole(ctx context.Context, root string) (roleID, secretID, accessor string, err error) {
+	if err := m.do(ctx, http.MethodPut, "/v1/sys/policies/acl/microagency", root, map[string]string{"policy": managedPolicy}, nil); err != nil {
+		return "", "", "", fmt.Errorf("install managed OpenBao policy: %w", err)
+	}
+	err = m.do(ctx, http.MethodPost, "/v1/sys/auth/approle", root, map[string]any{
+		"type":        "approle",
+		"description": "microagency managed credential-store login",
+	}, nil)
+	if err != nil {
+		msg := err.Error()
+		if !strings.Contains(msg, "path is already in use") && !strings.Contains(msg, "existing mount") {
+			return "", "", "", fmt.Errorf("enable managed OpenBao AppRole: %w", err)
+		}
+	}
+	if err := m.do(ctx, http.MethodPost, "/v1/auth/approle/role/microagency", root, map[string]any{
+		"bind_secret_id":          true,
+		"secret_id_num_uses":      0,
+		"secret_id_ttl":           "0",
+		"token_no_default_policy": true,
+		"token_period":            "24h",
+		"token_policies":          []string{"microagency"},
+		"token_type":              "service",
+	}, nil); err != nil {
+		return "", "", "", fmt.Errorf("configure managed OpenBao AppRole: %w", err)
+	}
+	var role struct {
+		Data struct {
+			RoleID string `json:"role_id"`
+		} `json:"data"`
+	}
+	if err := m.do(ctx, http.MethodGet, "/v1/auth/approle/role/microagency/role-id", root, nil, &role); err != nil {
+		return "", "", "", fmt.Errorf("read managed OpenBao AppRole ID: %w", err)
+	}
+	secretID, accessor, err = m.createAppRoleSecret(ctx, root)
+	if err != nil {
+		return "", "", "", err
+	}
+	if role.Data.RoleID == "" || secretID == "" {
+		return "", "", "", errors.New("managed OpenBao AppRole returned incomplete credentials")
+	}
+	return role.Data.RoleID, secretID, accessor, nil
+}
+
+func (m *Manager) createAppRoleSecret(ctx context.Context, token string) (secretID, accessor string, err error) {
+	var secret struct {
+		Data struct {
+			SecretID string `json:"secret_id"`
+			Accessor string `json:"secret_id_accessor"`
+		} `json:"data"`
+	}
+	if err := m.do(ctx, http.MethodPost, "/v1/auth/approle/role/microagency/secret-id", token, nil, &secret); err != nil {
+		return "", "", fmt.Errorf("create managed OpenBao AppRole secret: %w", err)
+	}
+	if secret.Data.SecretID == "" || secret.Data.Accessor == "" {
+		return "", "", errors.New("managed OpenBao AppRole returned an incomplete secret ID")
+	}
+	return secret.Data.SecretID, secret.Data.Accessor, nil
+}
+
+type appRoleLogin struct {
+	Token         string
+	LeaseDuration int
+}
+
+func (m *Manager) loginAppRole(ctx context.Context, roleID, secretID string) (appRoleLogin, error) {
+	var out struct {
+		Auth struct {
+			ClientToken   string `json:"client_token"`
+			LeaseDuration int    `json:"lease_duration"`
+			Renewable     bool   `json:"renewable"`
+		} `json:"auth"`
+	}
+	if err := m.do(ctx, http.MethodPost, "/v1/auth/approle/login", "", map[string]string{
+		"role_id": roleID, "secret_id": secretID,
+	}, &out); err != nil {
+		return appRoleLogin{}, err
+	}
+	if out.Auth.ClientToken == "" || !out.Auth.Renewable || out.Auth.LeaseDuration <= 0 {
+		return appRoleLogin{}, errors.New("AppRole did not return a renewable periodic token")
+	}
+	return appRoleLogin{Token: out.Auth.ClientToken, LeaseDuration: out.Auth.LeaseDuration}, nil
+}
+
+func (m *Manager) rotateAppRoleCredential(ctx context.Context, token string) error {
+	bs, err := m.loadBootstrap(ctx)
+	if err != nil {
+		return fmt.Errorf("load managed OpenBao login bootstrap: %w", err)
+	}
+	if bs.RoleID == "" || bs.SecretID == "" {
+		return errors.New("managed OpenBao AppRole is not provisioned")
+	}
+	newSecret, newAccessor, err := m.createAppRoleSecret(ctx, token)
+	if err != nil {
+		return err
+	}
+	cleanupNew := func() {
+		_ = m.do(context.Background(), http.MethodPost, "/v1/auth/approle/role/microagency/secret-id-accessor/destroy", token, map[string]string{"secret_id_accessor": newAccessor}, nil)
+	}
+	if _, err := m.loginAppRole(ctx, bs.RoleID, newSecret); err != nil {
+		cleanupNew()
+		return fmt.Errorf("verify rotated managed OpenBao login: %w", err)
+	}
+	oldAccessor := bs.SecretAccessor
+	bs.SecretID, bs.SecretAccessor = newSecret, newAccessor
+	if err := m.saveBootstrap(ctx, bs); err != nil {
+		cleanupNew()
+		return fmt.Errorf("save rotated managed OpenBao login: %w", err)
+	}
+	if oldAccessor != "" {
+		if err := m.do(ctx, http.MethodPost, "/v1/auth/approle/role/microagency/secret-id-accessor/destroy", token, map[string]string{"secret_id_accessor": oldAccessor}, nil); err != nil {
+			return fmt.Errorf("login rotation committed, but the previous SecretID accessor could not be destroyed: %w", err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) startTokenRenewal(ctx context.Context, token string) {
+	if token == "" || m.tokenLease <= 0 {
+		return
+	}
+	go func() {
+		lease := m.tokenLease
+		delay := renewalDelay(lease)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				var out struct {
+					Auth struct {
+						LeaseDuration int `json:"lease_duration"`
+					} `json:"auth"`
+				}
+				if err := m.do(context.Background(), http.MethodPost, "/v1/auth/token/renew-self", token, nil, &out); err != nil {
+					slog.Error("managed OpenBao token renewal failed; restore service before the current lease expires", "err", err)
+					delay = time.Minute
+					if lease < 3*time.Minute {
+						delay = lease / 4
+					}
+				} else {
+					if out.Auth.LeaseDuration > 0 {
+						lease = time.Duration(out.Auth.LeaseDuration) * time.Second
+					}
+					delay = renewalDelay(lease)
+				}
+				timer.Reset(delay)
+			}
+		}
+	}()
+}
+
+func renewalDelay(lease time.Duration) time.Duration {
+	delay := lease / 3
+	if delay < time.Minute {
+		delay = time.Minute
+	}
+	return delay
+}
+
+func (m *Manager) custodySelection() custodySelection {
+	if m.custody.protector != nil {
+		return m.custody
+	}
+	manifest := custodyManifest{Format: custodyFormat, Kind: "file", ID: custodyID(m.Dir)}
+	return custodySelection{dir: m.Dir, manifest: manifest, protector: &fileProtector{dir: m.Dir}}
+}
+
+func (m *Manager) saveBootstrap(ctx context.Context, bs bootstrap) error {
+	b, err := json.Marshal(bs)
+	if err != nil {
+		return err
+	}
+	return saveProtectedRecord(ctx, m.custodySelection(), b)
+}
+
+func (m *Manager) loadBootstrap(ctx context.Context) (bootstrap, error) {
+	var bs bootstrap
+	selection := m.custodySelection()
+	b, err := selection.protector.Load(ctx)
+	if errors.Is(err, errBootstrapNotFound) && selection.protector.Protected() {
+		// Explicitly selecting protected custody on a legacy installation is a
+		// one-way, verified migration. The disk copy is removed only after the
+		// protector round-trip and custody manifest both succeed.
+		legacy, legacyErr := os.ReadFile(bootstrapPath(m.Dir))
+		if legacyErr == nil {
+			if err := json.Unmarshal(legacy, &bs); err != nil {
+				return bs, fmt.Errorf("legacy OpenBao bootstrap is invalid: %w", err)
+			}
+			if err := saveProtectedRecord(ctx, selection, legacy); err != nil {
+				return bs, fmt.Errorf("migrate OpenBao bootstrap to %s: %w", protectorLabel(selection.manifest.Kind), err)
+			}
+			return bs, nil
+		}
+	}
+	if err != nil {
+		return bs, err
+	}
+	if err := json.Unmarshal(b, &bs); err != nil {
+		return bs, fmt.Errorf("decode managed OpenBao bootstrap: %w", err)
+	}
+	return bs, nil
 }
 
 // resetStorage discards an unrecoverable vault and brings OpenBao back up fresh.
@@ -268,6 +646,7 @@ func archiveBaoStorage(dir string) error {
 		return fmt.Errorf("archive orphaned openbao storage: %w", err)
 	}
 	_ = os.Remove(bootstrapPath(dir))
+	_ = os.Remove(custodyPath(dir))
 	return nil
 }
 
@@ -306,12 +685,27 @@ func (m *Manager) do(ctx context.Context, method, path, token string, body, out 
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("openbao %s %s: http %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
+		return &baoHTTPError{Method: method, Path: path, Status: resp.StatusCode, Detail: strings.TrimSpace(string(data))}
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+type baoHTTPError struct {
+	Method, Path string
+	Status       int
+	Detail       string
+}
+
+func (e *baoHTTPError) Error() string {
+	return fmt.Sprintf("openbao %s %s: http %d: %s", e.Method, e.Path, e.Status, e.Detail)
+}
+
+func hasHTTPStatus(err error, status int) bool {
+	var httpErr *baoHTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == status
 }
 
 func bootstrapPath(dir string) string { return filepath.Join(dir, "bootstrap.json") }
@@ -323,30 +717,11 @@ func bootstrapPath(dir string) string { return filepath.Join(dir, "bootstrap.jso
 // exists to heal. Atomic replace means the file is always either the old contents
 // or the complete new ones, never a torn middle.
 func saveBootstrap(dir string, bs bootstrap) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	b, _ := json.Marshal(bs)
-	tmp := bootstrapPath(dir) + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	b, err := json.Marshal(bs)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, bootstrapPath(dir))
+	return writeAtomic(bootstrapPath(dir), b, 0o600)
 }
 
 func loadBootstrap(dir string) (bootstrap, error) {

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -12,7 +14,9 @@ import (
 
 	"microagency/internal/baomanager"
 	"microagency/internal/mcp"
+	"microagency/internal/mediation"
 	"microagency/internal/sandbox"
+	"microagency/internal/secretstore"
 )
 
 // runDoctor reports the health of the things `up` depends on — the wasm engines
@@ -48,6 +52,7 @@ func runDoctor(args []string) {
 		fmt.Fprintf(out, "\n  server            ✗ not running — start it with `microagency up`\n")
 	}
 	reportSecretPosture(out)
+	reportAuthPosture(out)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
 	// query path (filter / count / extract) in-process, no VM.
@@ -83,6 +88,7 @@ func runDoctor(args []string) {
 	// Enforcement hygiene: warn about any upstream reachable BOTH through microagency
 	// AND directly from the local client (a back door around the governed well).
 	bypassWarnings := reportBypasses(out)
+	mediationReady, mediationClause := reportMediation(out, mediation.Inspect(microagencyDir()))
 
 	fmt.Fprintln(out)
 	runtimeHealthy := false
@@ -138,7 +144,43 @@ func runDoctor(args []string) {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause))
+	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause, mediationReady, mediationClause))
+}
+
+func reportAuthPosture(out io.Writer) {
+	reportAuthPostureAt(out, authPosturePath())
+}
+
+func reportAuthPostureAt(out io.Writer, path string) {
+	posture, err := readAuthPosture(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(out, "  public auth      ⚠ unreadable posture: %v\n", err)
+		}
+		return
+	}
+	switch posture.Mode {
+	case "oauth-tunnel":
+		fmt.Fprintf(out, "  public auth      built-in OAuth (%s)\n", dash(posture.Tunnel))
+		fmt.Fprintf(out, "    issuer          %s\n", dash(posture.Issuer))
+		fmt.Fprintf(out, "    resource        %s\n", dash(posture.Resource))
+		fmt.Fprintf(out, "    audience        %s\n", dash(posture.Audience))
+		fmt.Fprintln(out, "    consent         loopback operator listener")
+	case "oauth-external":
+		fmt.Fprintf(out, "  public auth      external OAuth (issuer %s)\n", dash(posture.Issuer))
+		if posture.Resource != "" {
+			fmt.Fprintf(out, "    resource        %s\n", posture.Resource)
+		}
+		if posture.Audience != "" {
+			fmt.Fprintf(out, "    audience        %s\n", posture.Audience)
+		}
+	case "bearer":
+		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
+	case "oauth-local":
+		fmt.Fprintln(out, "  public auth      local built-in OAuth")
+	default:
+		fmt.Fprintf(out, "  public auth      ⚠ unknown posture %q\n", posture.Mode)
+	}
 }
 
 // closingVerdict composes the page's rollup sentence, gated on everything the
@@ -146,18 +188,44 @@ func runDoctor(args []string) {
 // end-to-end probe. It exists so a dead server can never sit above an ending
 // that reads green — the closing sentence answers for the whole page or it
 // does not claim readiness.
-func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string) string {
+func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string, mediationReady bool, mediationClause string) string {
 	switch {
 	case !serverUp:
-		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), and %s.", runtimeClause)
+		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), %s, and %s.", runtimeClause, mediationClause)
 	case bypassWarnings == 1:
 		return fmt.Sprintf("The server is running and %s, but one upstream is reachable around the gateway — remove the direct entry above so every call is governed and audited.", runtimeClause)
 	case bypassWarnings > 1:
 		return fmt.Sprintf("The server is running and %s, but %d upstreams are reachable around the gateway — remove the direct entries above so every call is governed and audited.", runtimeClause, bypassWarnings)
+	case !mediationReady:
+		return fmt.Sprintf("The server is running and %s, but %s.", runtimeClause, mediationClause)
 	case runtimeHealthy:
-		return fmt.Sprintf("microagency is ready: the server is running, and %s.", runtimeClause)
+		return fmt.Sprintf("microagency is ready: the server is running, %s, and %s.", runtimeClause, mediationClause)
 	default:
-		return fmt.Sprintf("The server is running, but %s.", runtimeClause)
+		return fmt.Sprintf("The server is running, but %s; %s.", runtimeClause, mediationClause)
+	}
+}
+
+func reportMediation(out io.Writer, status mediation.Status) (bool, string) {
+	fmt.Fprintf(out, "\n  direct mediation %s (%s)\n", status.Mode, status.State)
+	if status.Workspace != "" {
+		fmt.Fprintf(out, "    workspace       %s (%s)\n", status.Workspace, dash(status.WorkspaceState))
+		fmt.Fprintf(out, "    gateway         %s\n", status.GatewayURL)
+	}
+	if status.Reason != "" {
+		fmt.Fprintf(out, "    detail          %s\n", status.Reason)
+	}
+	if len(status.Uncovered) > 0 {
+		fmt.Fprintf(out, "    uncovered       %s\n", strings.Join(status.Uncovered, ", "))
+	}
+	switch status.State {
+	case "enforced":
+		return true, "direct upstreams are denied in the bound workspace"
+	case "configured":
+		return true, "the bound workspace policy is configured and fails closed when started"
+	case "advisory":
+		return true, "direct-upstream checks are advisory for local and unbound clients"
+	default:
+		return false, "enforced workspace mediation is " + status.State
 	}
 }
 
@@ -204,14 +272,70 @@ func reportBypasses(out *os.File) int {
 // reportSecretPosture tells the operator where upstream credentials are held —
 // the posture `up` selects — so "where are my secrets" has an answer up front.
 func reportSecretPosture(out io.Writer) {
+	reportSecretPostureWith(out, os.Getenv, baomanager.Available, microagencyDir())
+}
+
+func reportSecretPostureWith(out io.Writer, getenv func(string) string, baoAvailable func() bool, stateDir string) {
+	addr, token := getenv("VAULT_ADDR"), getenv("VAULT_TOKEN")
+	baoDir := filepath.Join(stateDir, "openbao")
+	baoOK := baoAvailable()
 	switch {
-	case os.Getenv("VAULT_ADDR") != "":
-		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", os.Getenv("VAULT_ADDR"))
-	case baomanager.Available():
-		fmt.Fprintln(out, "  secret store      ✓ managed OpenBao (loopback 127.0.0.1:8200)")
+	case addr != "" && token == "":
+		fmt.Fprintln(out, "  secret store      ✗ VAULT_ADDR is set but VAULT_TOKEN is missing")
+		fmt.Fprintln(out, "                    (startup will fail closed; provide the token or unset VAULT_ADDR)")
+	case addr == "" && token != "":
+		fmt.Fprintln(out, "  secret store      ✗ VAULT_TOKEN is set but VAULT_ADDR is missing")
+		fmt.Fprintln(out, "                    (startup will fail closed; provide the address or unset VAULT_TOKEN)")
+	case addr != "":
+		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", addr)
+	case baoOK || baomanager.ManagedConfigured(baoDir, getenv):
+		posture := baomanager.InspectCustody(context.Background(), baoDir, getenv)
+		switch {
+		case !baoOK && posture.Protected:
+			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s; OpenBao binary unavailable)\n", posture.Label)
+			fmt.Fprintln(out, "                    (startup will fail closed; reinstall OpenBao and keep the protector configured)")
+		case !baoOK:
+			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao state exists, but the OpenBao binary is unavailable")
+			fmt.Fprintln(out, "                    (startup will evaluate the configured local credential-store fallback)")
+		case !posture.Available:
+			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s unavailable)\n", posture.Label)
+			fmt.Fprintf(out, "                    (%s; startup will fail closed)\n", posture.Detail)
+		case posture.Protected:
+			fmt.Fprintf(out, "  secret store      ✓ managed protected OpenBao (%s)\n", posture.Label)
+			fmt.Fprintf(out, "                    (%s; loopback 127.0.0.1:8200)\n", posture.Detail)
+		default:
+			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao with same-disk degraded bootstrap custody")
+			fmt.Fprintln(out, "                    (OpenBao data, unseal material, and bootstrap login share ~/.microagency;")
+			fmt.Fprintln(out, "                     set MICROAGENCY_OPENBAO_PROTECTOR and migrate to protected custody)")
+		}
+	case strings.TrimSpace(getenv(secretstore.FileKeyEnv)) != "":
+		keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv))
+		key, err := secretstore.LoadFileKey(stateDir, keyPath)
+		if err == nil {
+			_, err = secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), key)
+		}
+		if err != nil {
+			fmt.Fprintf(out, "  secret store      ✗ encrypted file store is misconfigured: %v\n", err)
+			fmt.Fprintln(out, "                    (startup will fail closed; fix or unset MICROAGENCY_SECRET_KEY_FILE)")
+			return
+		}
+		fmt.Fprintln(out, "  secret store      ✓ AES-256-GCM file store with a separately supplied key")
+		fmt.Fprintf(out, "                    (key: %s; credentials: %s)\n", keyPath, filepath.Join(stateDir, "upstream-tokens.json"))
 	default:
-		fmt.Fprintln(out, "  secret store      ⚠ encrypted file store under ~/.microagency")
-		fmt.Fprintln(out, "                    (no OpenBao/Vault found — fine for single-user; install openbao or set VAULT_ADDR for hosted/multi-user)")
+		kind, err := secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), nil)
+		if errors.Is(err, secretstore.ErrKeyRequired) || kind == "encrypted-file" {
+			fmt.Fprintln(out, "  secret store      ✗ encrypted file store exists but MICROAGENCY_SECRET_KEY_FILE is not configured")
+			fmt.Fprintln(out, "                    (startup will fail closed; restore the separately held key setting)")
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(out, "  secret store      ✗ local credential store cannot be read: %v\n", err)
+			fmt.Fprintln(out, "                    (startup will fail closed; repair or restore the credential store)")
+			return
+		}
+		fmt.Fprintln(out, "  secret store      ⚠ degraded mode-0600 plaintext file under ~/.microagency")
+		fmt.Fprintln(out, "                    (credentials stay out of the agent, but are not encrypted at rest;")
+		fmt.Fprintln(out, "                     install OpenBao or configure MICROAGENCY_SECRET_KEY_FILE)")
 	}
 }
 

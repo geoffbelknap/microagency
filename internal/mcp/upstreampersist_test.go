@@ -10,8 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"microagency/internal/secretstore"
 )
 
 // addUpstream posts to the admin API and returns the decoded JSON response.
@@ -34,7 +32,7 @@ func addUpstream(t *testing.T, adminURL, opTok string, body map[string]any) (int
 func reloadInto(t *testing.T, dir string) *Server {
 	t.Helper()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	srv.ReloadUpstreams(context.Background())
 	return srv
 }
@@ -55,7 +53,7 @@ func TestTokenlessDiscoveredUpstreamReloads(t *testing.T) {
 	defer up.Close()
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
@@ -92,7 +90,7 @@ func TestStaticTokenUpstreamReloadsWithToken(t *testing.T) {
 
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
@@ -122,7 +120,7 @@ func TestEnableFlipsPersistedDiscover(t *testing.T) {
 	defer up.Close()
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
@@ -149,7 +147,7 @@ func TestRemovedUpstreamStaysGone(t *testing.T) {
 	defer up.Close()
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
@@ -180,7 +178,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 	defer up.Close()
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
-		WithSecretStore(secretstore.Open(dir, func(string) string { return "" }, nil)), WithStateDir(dir))
+		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 

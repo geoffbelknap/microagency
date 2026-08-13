@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // find_tools is the one data path that must stay inline — reffing the menu would
@@ -33,15 +34,34 @@ const (
 // findTools is the discover half of the off-context tool surface: the aggregated
 // upstream tools are kept OUT of tools/list, so an agent searches this index and
 // pulls only the relevant few — with their schemas — then invokes them via
-// call_tool. It ranks the indexed tools by keyword overlap over name and
-// description. Keyword match keeps it dependency-free; an embedding ranker can
-// replace the scorer later behind this same tool, without changing the surface.
+// call_tool. It ranks the caller-scoped index locally with deterministic exact-name
+// lookup followed by BM25 over names, descriptions, and schema property names.
 func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string]any {
+	return s.findToolsAllowed(ctx, args, nil)
+}
+
+// findToolsAllowed is the same caller-scoped discovery path with an optional
+// run capability filter. Governed programs use it so their in-sandbox schema
+// view cannot exceed the exact names granted by the outer reduce call.
+func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, allowed map[string]struct{}) map[string]any {
+	start := time.Now()
 	var in struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Query  string `json:"query"`
+		Limit  int    `json:"limit"`
+		TaskID string `json:"task_id"`
 	}
 	_ = json.Unmarshal(args, &in)
+	taskID, err := validateTaskID(in.TaskID)
+	if err != nil {
+		response := toolError("find_tools: %v", err)
+		s.putRun(s.nextRunID(), runRecord{
+			Kind: "discovery", User: principalOf(ctx).Subject,
+			LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
+			OutputBytes: marshalLen(response), ContextMeasured: true,
+			ExitCode: 1, AuditErr: err.Error(),
+		})
+		return response
+	}
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 10 // default
@@ -49,40 +69,26 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 	if limit > 50 {
 		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
-	terms := tokenize(in.Query)
-
-	type scored struct {
-		tool  map[string]any
-		score int
-		usage int
-	}
-	var hits []scored
 	// The index is scoped to the caller: shared connections + the caller's own.
-	indexed := s.indexedTools(principalOf(ctx).Subject)
-	for _, t := range indexed {
-		name, _ := t["name"].(string)
-		desc, _ := t["description"].(string)
-		score := matchScore(terms, name, desc)
-		if score > 0 {
-			usage, _ := t["usage"].(int)
-			hits = append(hits, scored{tool: t, score: score, usage: usage})
+	allIndexed := s.indexedTools(principalOf(ctx).Subject)
+	indexed := allIndexed
+	if allowed != nil {
+		indexed = make([]map[string]any, 0, len(allowed))
+		for _, tool := range allIndexed {
+			name, _ := tool["name"].(string)
+			if _, ok := allowed[name]; ok {
+				indexed = append(indexed, tool)
+			}
 		}
 	}
-	// Keyword relevance is primary; usage (how often a tool has actually been
-	// invoked) breaks ties, so popular, proven tools surface first. This is the
-	// free-signal precursor to a heavier embedding ranker.
-	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		return hits[i].usage > hits[j].usage
-	})
+	hits := rankIndexedTools(in.Query, indexed)
 
 	if limit > len(hits) {
 		limit = len(hits)
 	}
 	out := make([]map[string]any, 0, limit)
-	total, summarized, omitted := 0, 0, 0
+	total, fullSchemas, schemaDigests, summarized, omitted := 0, 0, 0, 0, 0
+	exactSchemaLookup := false
 	for i := 0; i < limit; i++ {
 		h := hits[i]
 		desc, _ := h.tool["description"].(string)
@@ -109,6 +115,10 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		if i == 0 || total+full <= findToolsFullBudget {
 			total += full
 			out = append(out, entry)
+			fullSchemas++
+			if name, _ := h.tool["name"].(string); strings.EqualFold(strings.TrimSpace(in.Query), name) {
+				exactSchemaLookup = true
+			}
 			continue
 		}
 		// Over the full budget. Beyond the absolute ceiling, drop the rest rather than
@@ -122,6 +132,7 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		entry["truncated"] = true
 		total += marshalLen(entry)
 		out = append(out, entry)
+		schemaDigests++
 		summarized++
 	}
 	result := map[string]any{"tools": out}
@@ -134,9 +145,11 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		// variations cannot conjure an upstream), while zero matches over a
 		// real index is the agent's cue to vary terms, not to conclude the
 		// capability does not exist.
-		if len(indexed) == 0 {
+		if len(allIndexed) == 0 {
 			result["note"] = "No upstream MCP servers are connected to this gateway yet, so there are no tools to find. " +
 				"This is an operator action, not something to retry: ask the operator to connect servers in the microagency console."
+		} else if allowed != nil && len(indexed) == 0 {
+			result["note"] = "None of this run's granted tools remain available. The gateway may have disabled, revoked, or refreshed a connection after the program started."
 		} else {
 			result["note"] = fmt.Sprintf("0 of %d indexed tools matched %q. The servers are connected and the index is live — "+
 				"vary the keywords (names and descriptions are matched) rather than concluding the capability is missing.",
@@ -151,7 +164,22 @@ func (s *Server) findTools(ctx context.Context, args json.RawMessage) map[string
 		}
 		result["note"] = note + " Narrow your query, or call find_tools with a tool's exact name for its full description and inputSchema."
 	}
-	return toolResult(result)
+	response := toolResult(result)
+	parentRun, delivery, requestID := programAuditContext(ctx)
+	outputBytes := marshalLen(response)
+	if delivery == "program" {
+		outputBytes = 0 // delivered to the sandbox, not to model context
+	}
+	s.putRun(s.nextRunID(), runRecord{
+		Kind: "discovery", TaskID: taskID, User: principalOf(ctx).Subject,
+		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
+		LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
+		OutputBytes: outputBytes, ContextMeasured: true,
+		FullSchemaEntries: fullSchemas, SchemaDigestEntries: schemaDigests,
+		SummarizedEntries: summarized, OmittedEntries: omitted,
+		ExactSchemaLookup: exactSchemaLookup,
+	})
+	return response
 }
 
 // marshalLen is the serialized byte size of v, used to track the running menu size.
@@ -211,7 +239,8 @@ func tokenize(q string) []string {
 	})
 }
 
-// matchScore counts term hits in name (weighted) and description.
+// matchScore is the previous substring scorer retained only for the checked-in
+// ranking baseline. Production discovery uses rankIndexedTools.
 func matchScore(terms []string, name, desc string) int {
 	n, d := strings.ToLower(name), strings.ToLower(desc)
 	score := 0
