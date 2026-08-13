@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -70,6 +71,16 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 	}
 	// microagent resolves its own guest binaries (relative to the installed
 	// microagent, not our binary) — we don't reach into its install layout.
+	// The Apple VF egress datapath is the exception: the library's fallback is
+	// os.Executable, which here is the microagency server (no --egress-datapath
+	// mode), so mediated boots would silently lose the datapath — the CA the
+	// guest fetches over vsock is never minted and every reduce(code) dies at
+	// "fetch CA cert: read length prefix: EOF". Pin the datapath to the
+	// microagent CLI before the boot; a mediated boot without it fails closed
+	// here rather than opaquely in the guest (ASK tenet 4).
+	if err := ensureEgressDatapathBin(opts.Backend); err != nil {
+		return Result{}, err
+	}
 	// Deny-all egress for compute-only reduce: mitm mode transparently
 	// mediates ALL egress (arbitrary reduce code won't cooperate with a
 	// forward proxy), and a LOCKED, empty allowlist reaches no destination
@@ -148,6 +159,34 @@ func (p MicroagentProvider) Run(ctx context.Context, spec Spec) (Result, error) 
 		}
 	}
 	return out, nil
+}
+
+// lookMicroagentPath resolves the microagent CLI from PATH; a test seam.
+var lookMicroagentPath = func() (string, error) { return exec.LookPath("microagent") }
+
+// ensureEgressDatapathBin pins MICROAGENT_EGRESS_DATAPATH_BIN to the microagent
+// CLI so the Apple VF supervisor spawns a binary that actually implements
+// --egress-datapath. The workspace library's fallback is os.Executable — correct
+// for the microagent CLI, wrong for any library embedder like this server. An
+// operator-set value always wins. Only the apple-vf backend consumes the
+// variable (Firecracker runs its mediator in-process), so other backends never
+// fail on it. Concurrent runs may race to set the same resolved value; that is
+// benign.
+func ensureEgressDatapathBin(backend string) error {
+	if backend != vmkit.BackendAppleVF {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv(vmkit.EgressDatapathBinEnv)) != "" {
+		return nil
+	}
+	bin, err := lookMicroagentPath()
+	if err != nil {
+		return fmt.Errorf("sandbox: mediated egress on %s needs the microagent CLI on PATH to host the egress datapath (or set %s): %w", vmkit.BackendAppleVF, vmkit.EgressDatapathBinEnv, err)
+	}
+	if err := os.Setenv(vmkit.EgressDatapathBinEnv, bin); err != nil {
+		return fmt.Errorf("sandbox: set %s: %w", vmkit.EgressDatapathBinEnv, err)
+	}
+	return nil
 }
 
 // runHostService owns the host-loopback listener for one sandbox run. The
