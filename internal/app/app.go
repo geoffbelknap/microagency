@@ -35,16 +35,17 @@ import (
 // modules are passed in as bytes so this package carries no embed of its own — the
 // binary that has them (the CLI) supplies them.
 type Config struct {
-	StateDir          string            // holds secrets, refs, the audit key (0700)
-	Version           string            // build version, surfaced in serverInfo/infra
-	ConsoleAddr       string            // where the operator console is bound (for infra display)
-	MaxInlineBytes    int               // results larger than this return as a <ref_>
-	WasmMaxMemMB      int               // per-wasm-run memory ceiling
-	PersistRefs       bool              // persist reffed payloads (encrypted, TTL'd) across restart
-	ReduceEnginesOnly bool              // disable the microVM code path (wasm engines only)
-	EngineSpecs       []string          // extra `name=path` query engines to load/override
-	BundledEngines    map[string][]byte // embedded query-engine modules by name
-	BundledMinimizers map[string][]byte // embedded field-minimizer modules by name
+	StateDir               string            // holds secrets, refs, the audit key (0700)
+	Version                string            // build version, surfaced in serverInfo/infra
+	ConsoleAddr            string            // where the operator console is bound (for infra display)
+	MaxInlineBytes         int               // results larger than this return as a <ref_>
+	WasmMaxMemMB           int               // per-wasm-run memory ceiling
+	PersistRefs            bool              // persist reffed payloads (encrypted, TTL'd) across restart
+	ReduceEnginesOnly      bool              // disable the microVM code path (wasm engines only)
+	HighAssuranceMultiUser bool              // exact operation grants + fail-closed decision ledger
+	EngineSpecs            []string          // extra `name=path` query engines to load/override
+	BundledEngines         map[string][]byte // embedded query-engine modules by name
+	BundledMinimizers      map[string][]byte // embedded field-minimizer modules by name
 }
 
 // BuildServer constructs the gateway server from cfg. Unlike the old package-main
@@ -101,6 +102,7 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 		mcp.WithBudgetGate(gate),
 		mcp.WithVersion(cfg.Version),
 		mcp.WithConsoleAddr(cfg.ConsoleAddr),
+		mcp.WithHighAssuranceMultiUser(cfg.HighAssuranceMultiUser),
 	}
 	// Sign the audit chain (ES256). Best-effort: if the key can't be loaded, the
 	// chain stays integrity-only rather than blocking startup.

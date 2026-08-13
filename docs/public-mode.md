@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -42,6 +42,12 @@ microagency up --tunnel cloudflare \
 
 Add `--require-scope <scope>` to require a scope from that issuer. External
 issuer mode does not mount the built-in authorization endpoints.
+
+For a deny-by-default shared gateway, add
+`--high-assurance-multi-user`. Tokens must carry a signed `campaign` or
+`campaign_id` claim in addition to `sub`, and every invocation needs an exact
+operator-owned operation grant. See
+[operation and resource grants](operation-grants.md).
 
 Use `--token <token>` only for a client that cannot complete OAuth. This flag
 selects static bearer mode instead of built-in OAuth.

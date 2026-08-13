@@ -4,7 +4,7 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 The guarantees, and where each one is enforced:
 
@@ -28,6 +28,10 @@ The guarantees, and where each one is enforced:
   ownership cannot be transferred.
   Reffed data is likewise bound to the principal that created it: another
   user holding the `<ref_>` handle can't reduce over it.
+  High-assurance shared deployments can additionally require an exact,
+  expiring [operation and resource grant](operation-grants.md) for the signed
+  principal and campaign. Arguments, URL targets, writable namespaces, request
+  count, bytes, and rate are bounded outside the agent request.
 - **Field minimization.** Sensitive field values in inline results are
   redacted or tokenized before they reach the model, on by default; a
   tokenized value is resolved back only on the principal's outbound call to
@@ -53,6 +57,9 @@ The guarantees, and where each one is enforced:
   declarative transform fused into `call_tool` records its engine, query
   digest, byte counts, latency, and outcome under that same run without
   retaining the query or raw result.
+  Governed invocations also use a separate signed decision ledger that is
+  fsynced and anchored before upstream egress. A ledger or anchor failure
+  refuses the call.
 - **Plane separation.** The operator surface (admin API and console) uses
   its own token. The public `/mcp` surface accepts audience-bound OAuth
   access tokens, or a separate user-supplied bearer in compatibility mode.

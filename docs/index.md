@@ -4,7 +4,7 @@ description: One MCP connection for every server, with credentials, datasets, an
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 microagency is an MCP gateway. Point Claude Code, Claude Desktop, Cursor, or
 any MCP client at it and put your servers behind it; one connection replaces
@@ -22,6 +22,9 @@ the conceptual overview. These pages cover each mechanism:
   modes and where every secret lives.
 - [The tool index](tool-index.md) — how `find_tools` and `call_tool` keep a
   thousand tools out of the context, and how invocation is gated.
+- [Operation and resource grants](operation-grants.md) — exact caller,
+  operation, argument, resource, destination, and budget authority for shared
+  gateways.
 - [Large results and reduce](reduce.md) — reference handles, query engines,
   the microVM path, and writing your own engine.
 - [Field minimization](field-minimization.md) — redaction and tokenization of

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"microagency/internal/budget"
 	"microagency/internal/gateway"
 	"microagency/internal/refstore"
+	"microagency/internal/safedial"
 	"microagency/internal/sandbox"
 )
 
@@ -58,6 +60,10 @@ type upstream struct {
 	// to reads so an org-scoped OAuth grant (e.g. Supabase across all projects) can't
 	// be used to mutate through microagency.
 	readOnly bool
+	// grants are immutable, operator-owned semantic capabilities. An empty set
+	// preserves the standard connection posture; high-assurance mode requires a
+	// matching grant and therefore treats empty as deny-all.
+	grants []OperationGrant
 	// owner scopes this connection to ONE authenticated principal (by subject).
 	// "" = shared: every authenticated user of this gateway may find and invoke it.
 	// Non-empty: the connection — and the credential it holds — is invisible and
@@ -361,16 +367,18 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 
 // UpstreamInfo is an operator-facing view of one registered upstream (no token).
 type UpstreamInfo struct {
-	Name        string `json:"name"`
-	URL         string `json:"url"`
-	State       string `json:"state"`           // "enabled" | "discovered"
-	Provenance  string `json:"provenance"`      // preloaded | catalog | discovered
-	ReadOnly    bool   `json:"read_only"`       // writes refused (least-privilege)
-	Owner       string `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
-	SelfService bool   `json:"self_service,omitempty"`
-	Template    string `json:"template,omitempty"`
-	Revoked     bool   `json:"revoked,omitempty"`
-	Tools       int    `json:"tools"` // count of advertised tools (shown per connection in the console)
+	Name         string   `json:"name"`
+	URL          string   `json:"url"`
+	State        string   `json:"state"`           // "enabled" | "discovered"
+	Provenance   string   `json:"provenance"`      // preloaded | catalog | discovered
+	ReadOnly     bool     `json:"read_only"`       // writes refused (least-privilege)
+	Owner        string   `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
+	SelfService  bool     `json:"self_service,omitempty"`
+	Template     string   `json:"template,omitempty"`
+	Revoked      bool     `json:"revoked,omitempty"`
+	Tools        int      `json:"tools"` // count of advertised tools (shown per connection in the console)
+	GrantCount   int      `json:"grant_count,omitempty"`
+	GrantDigests []string `json:"grant_digests,omitempty"`
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
@@ -446,6 +454,43 @@ func (s *Server) SetUpstreamReadOnly(name string, ro bool) error {
 	return nil
 }
 
+// SetUpstreamGrants atomically replaces an upstream's operation authority.
+// Definitions are validated before the live record changes; duplicate IDs or
+// duplicate principal/campaign/tool tuples are refused as ambiguous.
+func (s *Server) SetUpstreamGrants(name string, grants []OperationGrant) error {
+	validated := make([]OperationGrant, len(grants))
+	seenID, seenTuple := map[string]bool{}, map[string]bool{}
+	for i, grant := range grants {
+		var err error
+		validated[i], err = validateOperationGrant(grant, name)
+		if err != nil {
+			return fmt.Errorf("grant %d: %w", i+1, err)
+		}
+		tuple := validated[i].Principal + "\x00" + validated[i].Campaign + "\x00" + validated[i].Tool
+		if seenID[validated[i].ID] || seenTuple[tuple] {
+			return fmt.Errorf("grant %d duplicates an id or principal/campaign/operation tuple", i+1)
+		}
+		seenID[validated[i].ID], seenTuple[tuple] = true, true
+	}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.grants = validated
+	return nil
+}
+
+func matchingGrant(rec upstream, principal, campaign, tool string) (OperationGrant, bool) {
+	for _, grant := range rec.grants {
+		if grant.Principal == principal && grant.Campaign == campaign && grant.Tool == tool {
+			return grant, true
+		}
+	}
+	return OperationGrant{}, false
+}
+
 // UpstreamList returns the registered upstreams (enabled and discovered), sorted.
 func (s *Server) UpstreamList() []UpstreamInfo {
 	s.reg.mu.Lock()
@@ -464,7 +509,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
@@ -506,6 +551,10 @@ func (s *Server) RemoveUpstream(name string) bool {
 // invocation gate enforces the same boundary, so this filter is minimization,
 // not the only line of defense.
 func (s *Server) indexedTools(subject string) []map[string]any {
+	return s.indexedToolsFor(subject, "local")
+}
+
+func (s *Server) indexedToolsFor(subject, campaign string) []map[string]any {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
@@ -517,6 +566,29 @@ func (s *Server) indexedTools(subject string) []map[string]any {
 			continue
 		}
 		for _, t := range rec.tools {
+			if s.highAssurance || len(rec.grants) > 0 {
+				grant, ok := matchingGrant(*rec, subject, campaign, t.Name)
+				if !ok || (s.highAssurance && !grant.HighAssurance) || (rec.owner == "" && !grant.AllowShared) {
+					continue
+				}
+				expires, _ := time.Parse(time.RFC3339, grant.ExpiresAt)
+				grantWrites := grant.Effect == effectWrite
+				if !time.Now().Before(expires) || grantWrites != isHighAssuranceWriteTool(t) || (rec.readOnly && grantWrites) {
+					continue
+				}
+				if rec.owner == "" && grantWrites {
+					if len(grant.Resources) == 0 {
+						continue
+					}
+					allShared := true
+					for _, resource := range grant.Resources {
+						allShared = allShared && resource.SharedWritable
+					}
+					if !allShared {
+						continue
+					}
+				}
+			}
 			full := name + nsSep + t.Name
 			// A write tool on a read-only upstream is findable but NOT invocable, so
 			// the agent doesn't pick a tool the gate will refuse.
@@ -553,6 +625,15 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if !found {
 		return nil, false
 	}
+	principal, campaign := principalOf(ctx).Subject, campaignOf(ctx)
+	deny := func(connection, grantID, digest, reason string) (map[string]any, bool) {
+		ledgerErr := s.refuseDecision(principal, campaign, connection, tool, grantID, digest, reason)
+		s.recordGovernedDenial(ctx, connection, tool, grantID, digest, reason, ledgerErr)
+		// One stable response covers an unknown connection, another principal's
+		// hidden connection, an adjacent operation, and a malformed argument. The
+		// operator ledger keeps the reason without becoming a caller oracle.
+		return toolError("tool %q is not authorized for this caller", name), true
+	}
 	// A consistent SNAPSHOT of the record, not the live pointer: the gate below
 	// reads enabled/readOnly/tools/conn across the whole (network-bound) call, and
 	// an operator Enable/Rebind/SetUpstreamReadOnly mutates the live record under
@@ -560,18 +641,37 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// or call through a half-swapped connection.
 	rec, ok := s.snapshotUpstream(upName)
 	if !ok {
+		if s.highAssurance {
+			return deny(upName, "", "", "connection or operation is not granted")
+		}
 		return toolError("unknown tool %q; discover tools with find_tools", name), true
+	}
+	governed := s.highAssurance || len(rec.grants) > 0
+	grant, hasGrant := matchingGrant(rec, principal, campaign, tool)
+	grantID, digest := "", ""
+	if hasGrant {
+		grantID = grant.ID
+		digest, _ = grantDigest(grant)
 	}
 	// Ownership gate: a connection scoped to one principal is INVISIBLE to every
 	// other — same error as an unregistered tool, so a probing caller can't even
 	// learn the connection exists, let alone exercise its credential.
 	if rec.owner != "" && rec.owner != principalOf(ctx).Subject {
+		if governed {
+			return deny(upName, grantID, digest, "caller does not own the connection")
+		}
 		return toolError("unknown tool %q; discover tools with find_tools", name), true
 	}
 	if rec.revoked {
+		if governed {
+			return deny(upName, grantID, digest, "connection authority is revoked")
+		}
 		return toolError("unknown tool %q; discover tools with find_tools", name), true
 	}
 	if !rec.enabled {
+		if governed {
+			return deny(upName, grantID, digest, "connection is not enabled")
+		}
 		return toolError("tool %q is discovered but not enabled; ask the operator to enable upstream %q", name, upName), true
 	}
 	// Restore any tokenized-field placeholders the model authored back to their real
@@ -581,13 +681,67 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	// replayed by handing its placeholder to a different upstream. No-op unless a
 	// minimizer previously tokenized a value the model is now echoing back here.
 	args = s.resolveOutbound(ctx, upName, args)
+	var evaluated *evaluatedGrant
+	if governed {
+		if !hasGrant {
+			return deny(upName, "", "", "exact operation grant is absent")
+		}
+		if s.highAssurance && !grant.HighAssurance {
+			return deny(upName, grantID, digest, "grant is not marked high assurance")
+		}
+		if rec.owner == "" && !grant.AllowShared {
+			return deny(upName, grantID, digest, "shared connection credential is not explicitly granted")
+		}
+		spec, haveSpec := findTool(rec.tools, tool)
+		if !haveSpec || (isHighAssuranceWriteTool(spec) && grant.Effect != effectWrite) || (!isHighAssuranceWriteTool(spec) && grant.Effect != effectRead) {
+			return deny(upName, grantID, digest, "operation effect disagrees with retained tool authority")
+		}
+		if rec.readOnly && grant.Effect == effectWrite {
+			return deny(upName, grantID, digest, "connection is read-only")
+		}
+		if policy := programPolicyOf(ctx); policy != nil {
+			if _, allowed := policy.allowed[name]; !allowed || grant.Effect != effectRead {
+				return deny(upName, grantID, digest, "governed program authority does not include the operation")
+			}
+		}
+		if grant.Effect == effectWrite && len(grant.Resources) == 0 {
+			return deny(upName, grantID, digest, "write operation has no explicit resource namespace")
+		}
+		if rec.owner == "" && grant.Effect == effectWrite {
+			for _, resource := range grant.Resources {
+				if !resource.SharedWritable {
+					return deny(upName, grantID, digest, "shared writable namespace is not explicitly granted")
+				}
+			}
+		}
+		checked, err := evaluateOperationGrant(grant, principal, campaign, tool, args, time.Now())
+		if err != nil {
+			return deny(upName, grantID, digest, err.Error())
+		}
+		if err := s.authorizeDecision(checked, len(args), time.Now()); err != nil {
+			s.recordGovernedDenial(ctx, upName, tool, grantID, digest, "decision ledger or budget refused crossing", err)
+			return toolError("tool %q is not authorized for this caller", name), true
+		}
+		evaluated = &checked
+	}
 	runID := s.nextRunID()
 	start := time.Now()
-	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args)
+	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args, evaluated)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out)
+	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated)
 	return out.result, true
+}
+
+func (s *Server) recordGovernedDenial(ctx context.Context, upstream, tool, grantID, digest, reason string, ledgerErr error) {
+	if ledgerErr != nil {
+		reason += "; decision record: " + ledgerErr.Error()
+	}
+	s.putRun(s.nextRunID(), runRecord{
+		Kind: "decision", Upstream: upstream, Tool: tool, User: principalOf(ctx).Subject,
+		Campaign: campaignOf(ctx), GrantID: grantID, GrantDigest: digest,
+		ExitCode: 1, AuditErr: reason,
+	})
 }
 
 // proxyOutcome bundles a proxied call's result with everything recordProxy needs.
@@ -614,7 +768,7 @@ type proxyOutcome struct {
 // reference-by-default parking, or field minimization — returning a proxyOutcome
 // for each path. It performs the side effects that belong to a call (health,
 // usage), but never records the audit line itself; that is invokeUpstream's job.
-func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, upName, tool, name string, rec upstream, args json.RawMessage) proxyOutcome {
+func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, upName, tool, name string, rec upstream, args json.RawMessage, evaluated *evaluatedGrant) proxyOutcome {
 	upHost := hostFromURL(rec.conn.Endpoint()) // the egress target for calls that reach the upstream
 	spec, haveSpec := findTool(rec.tools, tool)
 	// A governed reduce program carries an exact, immutable per-run allowlist and
@@ -678,13 +832,19 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	if err != nil {
 		return proxyOutcome{result: toolError("upstream %q: %v", upName, err), rawBytes: len(res), err: err, egressHost: upHost}
 	}
+	if evaluated != nil && int64(len(res)) > evaluated.Grant.MaxResponseBytes {
+		return proxyOutcome{
+			result:   toolError("upstream %q response exceeded its operation grant and was withheld", upName),
+			rawBytes: len(res), err: fmt.Errorf("operation grant response byte bound exceeded"), egressHost: upHost,
+		}
+	}
 	var passthrough map[string]any
 	if uerr := json.Unmarshal(res, &passthrough); uerr != nil {
 		return proxyOutcome{result: toolError("upstream %q: malformed result: %v", upName, uerr), rawBytes: len(res), err: uerr, egressHost: upHost}
 	}
 	s.bumpUsage(name) // a successful call — a find_tools ranking signal
 	if transform := transformOf(ctx); transform != nil && !resultIsError(passthrough) {
-		return s.fusedProxyResult(ctx, runID, upName, tool, name, transform, passthrough, res, upHost)
+		return s.fusedProxyResult(ctx, runID, upName, tool, name, transform, passthrough, res, upHost, evaluated)
 	}
 	// Reference-by-default: a large result is held off-context as a handle the agent
 	// reduces, not flooded into context. Errors and small results pass through inline.
@@ -695,7 +855,7 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 		// fetch it host-side and treat the bytes as the real result; the agent never
 		// sees the URL.
 		if link := offloadURL(payload); link != "" {
-			data, ferr := s.fetchOffload(ctx, link)
+			data, ferr := s.fetchOffload(ctx, link, evaluated)
 			if ferr != nil {
 				return proxyOutcome{result: toolError("upstream %q returned an off-platform result link microagency could not retrieve (%v); the raw URL is withheld", upName, ferr), err: fmt.Errorf("offload rehydrate: %w", ferr), egressHost: upHost}
 			}
@@ -744,12 +904,35 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 // fetchOffload retrieves an upstream offload URL host-side through the SSRF-guarded
 // upstream client (so the bytes stay off the agent and internal addresses are
 // refused), bounded by maxOffloadBytes, transparently decompressing a gzip export.
-func (s *Server) fetchOffload(ctx context.Context, rawURL string) ([]byte, error) {
+func (s *Server) fetchOffload(ctx context.Context, rawURL string, evaluated *evaluatedGrant) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient().Do(req)
+	client := s.httpClient()
+	if evaluated != nil {
+		target, ok := findURLTarget(evaluated.Grant.URLTargets, "offload")
+		if !ok {
+			return nil, fmt.Errorf("operation grant does not authorize response offload retrieval")
+		}
+		if err := validateGrantedURL(rawURL, target); err != nil {
+			return nil, err
+		}
+		initialOrigin, _ := parseGrantOrigin(req.URL.Scheme + "://" + req.URL.Host)
+		client = safedial.GuardedClientForPolicy(0, 0, func(next *url.URL) error {
+			if err := validateGrantedURL(next.String(), target); err != nil {
+				return err
+			}
+			if !target.Redirect {
+				nextOrigin, _ := parseGrantOrigin(next.Scheme + "://" + next.Host)
+				if nextOrigin != initialOrigin {
+					return fmt.Errorf("offload redirect is not granted")
+				}
+			}
+			return nil
+		})
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -789,7 +972,7 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string) ([]byte, error
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome, evaluated *evaluatedGrant) {
 	exit, auditErr := 0, ""
 	if out.err != nil {
 		exit, auditErr = 1, out.err.Error()
@@ -820,10 +1003,16 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 	if delivery == "program" {
 		contextBytes = 0 // the raw/intermediate response went to the sandbox only
 	}
-	s.putRun(runID, runRecord{
-		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: string(args),
+	recordedArgs := string(args)
+	if evaluated != nil {
+		// Governed records carry opaque resource identifiers instead of raw
+		// object arguments, so a fleet correlator does not need payload access.
+		recordedArgs = ""
+	}
+	record := runRecord{
+		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: recordedArgs,
 		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
-		User:            principalOf(ctx).Subject,
+		User: principalOf(ctx).Subject, Campaign: campaignOf(ctx),
 		InputBytes:      len(args), // the tool arguments are the call's input payload
 		RawBytes:        out.rawBytes,
 		ParkedBytes:     parkedBytes,
@@ -840,7 +1029,12 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 		Reffed: out.outcome.Reffed, Ref: string(out.outcome.Ref),
 		Protected: out.protected,
 		ExitCode:  exit, AuditErr: auditErr, Audit: audit,
-	})
+	}
+	if evaluated != nil {
+		record.GrantID, record.GrantDigest, record.Effect = evaluated.Grant.ID, evaluated.Digest, evaluated.Grant.Effect
+		record.ResourceIDs = append([]string(nil), evaluated.ResourceIDs...)
+	}
+	s.putRun(runID, record)
 }
 
 // unwrapData digs through common wrappers to the bare rows. It pulls the outermost
