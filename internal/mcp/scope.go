@@ -13,5 +13,7 @@ func principalOf(ctx context.Context) *auth.Principal {
 	if p, ok := PrincipalFrom(ctx); ok && p != nil && p.Subject != "" {
 		return p
 	}
-	return &auth.Principal{Subject: "local"}
+	return &auth.Principal{Subject: "local", Campaign: "local"}
 }
+
+func campaignOf(ctx context.Context) string { return principalOf(ctx).Campaign }

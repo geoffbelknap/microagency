@@ -142,6 +142,12 @@ func TestParseUpOptionsVocabulary(t *testing.T) {
 	if _, err = parseUpOptions([]string{"--nope"}); err == nil {
 		t.Error("unknown argument accepted")
 	}
+	if _, err = parseUpOptions([]string{"--high-assurance-multi-user"}); err == nil {
+		t.Error("high-assurance mode accepted without an external issuer")
+	}
+	if o, err = parseUpOptions([]string{"--high-assurance-multi-user", "--issuer", "https://issuer.example"}); err != nil || !o.highAssuranceMultiUser {
+		t.Fatalf("high-assurance external issuer options = %+v, %v", o, err)
+	}
 	if o, _ = parseUpOptions([]string{"--help"}); !o.help {
 		t.Error("--help not recognized")
 	}

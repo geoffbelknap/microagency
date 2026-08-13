@@ -209,6 +209,7 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --token <tok>         use a static bearer instead of OAuth (compatibility)")
 	fmt.Fprintln(w, "    --issuer/--audience   external OAuth resource-server mode")
 	fmt.Fprintln(w, "    --require-scope <s>   with --issuer: refuse tokens not granted this OAuth scope")
+	fmt.Fprintln(w, "    --high-assurance-multi-user  require exact principal/campaign operation grants (external issuer)")
 	fmt.Fprintln(w, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
 	fmt.Fprintln(w, "                          (defaults to "+defaultAdminAddr+" when a tunnel is used)")
 	fmt.Fprintln(w, "    --engine name=path    add a query engine (a wasip1 module)")
@@ -243,9 +244,10 @@ type upOptions struct {
 	// reduce), leaving only the in-process wasm engines. Required where there
 	// is no nested virtualization to run a microVM in — e.g. microagency
 	// itself running inside a microVM.
-	reduceEnginesOnly bool
-	engineSpecs       []string
-	help              bool
+	reduceEnginesOnly      bool
+	highAssuranceMultiUser bool
+	engineSpecs            []string
+	help                   bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -298,6 +300,8 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.persistRefs = true
 		case args[i] == "--reduce-engines-only":
 			o.reduceEnginesOnly = true
+		case args[i] == "--high-assurance-multi-user":
+			o.highAssuranceMultiUser = true
 		case args[i] == "--no-register":
 			o.noRegister = true
 		case args[i] == "--foreground":
@@ -308,6 +312,9 @@ func parseUpOptions(args []string) (upOptions, error) {
 		default:
 			return o, fmt.Errorf("unknown argument: %s", args[i])
 		}
+	}
+	if o.highAssuranceMultiUser && o.issuer == "" {
+		return o, fmt.Errorf("--high-assurance-multi-user requires --issuer with a signed campaign or campaign_id claim")
 	}
 	return o, nil
 }
@@ -330,6 +337,7 @@ func run(args []string) {
 	stdio, public, noRegister, foreground := o.stdio, o.public, o.noRegister, o.foreground
 	persistRefs := o.persistRefs
 	reduceEnginesOnly := o.reduceEnginesOnly
+	highAssuranceMultiUser := o.highAssuranceMultiUser
 	engineSpecs := o.engineSpecs
 
 	if public && tunnelProvider == "" {
@@ -382,7 +390,7 @@ func run(args []string) {
 		}
 	}
 
-	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, reduceEnginesOnly, consoleAddr(cfg))
+	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, reduceEnginesOnly, highAssuranceMultiUser, consoleAddr(cfg))
 
 	if stdio {
 		if err := srv.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
@@ -971,18 +979,19 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 // the URL, approve once, no token handed over. --token forces a static bearer (for
 // clients that can't do OAuth); --issuer uses an external authorization server.
 // /admin + /console always sit behind a persistent operator token.
-func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly bool, consoleAddr string) *mcp.Server {
+func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly, highAssuranceMultiUser bool, consoleAddr string) *mcp.Server {
 	srv, err := app.BuildServer(app.Config{
-		StateDir:          microagencyDir(),
-		Version:           version,
-		ConsoleAddr:       consoleAddr,
-		MaxInlineBytes:    maxInlineBytes,
-		WasmMaxMemMB:      wasmMaxMemMB,
-		PersistRefs:       persistRefs,
-		ReduceEnginesOnly: reduceEnginesOnly,
-		EngineSpecs:       engineSpecs,
-		BundledEngines:    bundledEngines(),
-		BundledMinimizers: bundledMinimizers(),
+		StateDir:               microagencyDir(),
+		Version:                version,
+		ConsoleAddr:            consoleAddr,
+		MaxInlineBytes:         maxInlineBytes,
+		WasmMaxMemMB:           wasmMaxMemMB,
+		PersistRefs:            persistRefs,
+		ReduceEnginesOnly:      reduceEnginesOnly,
+		HighAssuranceMultiUser: highAssuranceMultiUser,
+		EngineSpecs:            engineSpecs,
+		BundledEngines:         bundledEngines(),
+		BundledMinimizers:      bundledMinimizers(),
 	})
 	if err != nil {
 		fatal("build server", "err", err)

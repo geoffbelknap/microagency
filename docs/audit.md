@@ -4,7 +4,7 @@ description: The signed, hash-chained log every call lands in, and how to verify
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 Every discovery, proxied call, and reduction is written to an append-only
 audit log. Each line is hash-chained to its predecessor and **signed** (ES256)
@@ -20,6 +20,22 @@ The log is also verifiable offline by anyone holding only the public key.
 Verify from the console, under Activity → verify audit chain, or with
 `GET /admin/audit/verify`. It reports lines checked, how many were chained
 and signed, and the first break.
+
+## Governed decision ledger
+
+Operation grants use a separate `decision-ledger.jsonl`. Before a governed
+call leaves the gateway, microagency reserves its finite grant budget, fsyncs
+a signed authorization record, and updates the out-of-band anchor in the
+secret store. Any failure refuses the call. Unlike the general activity log,
+this anchor is updated for every decision because it is part of the
+authorization path.
+
+Refusals record the principal, campaign, grant, operation, and reason.
+Authorized records add the effect, byte reservation, and opaque resource IDs.
+Neither record contains raw arguments or results. Verify the chain and its
+anchor through `GET /admin/decisions/verify`. See
+[operation and resource grants](operation-grants.md) for the grant and budget
+contract.
 
 Governed programs keep the same per-call records. Each brokered discovery and
 proxy call has `delivery: "program"`, the outer reduce's `parent_run_id`, and

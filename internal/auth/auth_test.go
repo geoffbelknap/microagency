@@ -60,12 +60,15 @@ func TestValidateAccepts(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	rs := newRS(t, key)
 
-	p, err := rs.Validate(context.Background(), signRS256(t, key, "k1", baseClaims()))
+	p, err := rs.Validate(context.Background(), signRS256(t, key, "k1", withClaim(baseClaims(), "campaign", "campaign-a")))
 	if err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 	if p.Subject != "user-123" {
 		t.Fatalf("subject = %q", p.Subject)
+	}
+	if p.Campaign != "campaign-a" {
+		t.Fatalf("campaign = %q", p.Campaign)
 	}
 	if !p.HasScope("mcp:run") || !p.HasScope("mcp:describe") || p.HasScope("admin") {
 		t.Fatalf("scopes wrong: %v", p.Scopes)

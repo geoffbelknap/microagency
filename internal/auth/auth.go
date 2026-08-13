@@ -41,9 +41,12 @@ type KeySet interface {
 // and the join to that user's connected upstreams.
 type Principal struct {
 	Subject string
-	Scopes  []string
-	Issuer  string
-	Expiry  time.Time
+	// Campaign is an immutable correlation/authority claim from the signed
+	// access token. The MCP request body cannot select or widen it.
+	Campaign string
+	Scopes   []string
+	Issuer   string
+	Expiry   time.Time
 }
 
 // HasScope reports whether the principal was granted scope s.
@@ -128,6 +131,11 @@ func (rs *ResourceServer) Validate(ctx context.Context, raw string) (*Principal,
 	}
 
 	p := &Principal{Subject: sub, Issuer: rs.Issuer, Scopes: parseScopes(claims)}
+	if campaign, _ := claims["campaign"].(string); strings.TrimSpace(campaign) != "" {
+		p.Campaign = strings.TrimSpace(campaign)
+	} else if campaign, _ := claims["campaign_id"].(string); strings.TrimSpace(campaign) != "" {
+		p.Campaign = strings.TrimSpace(campaign)
+	}
 	if exp, e := claims.GetExpirationTime(); e == nil && exp != nil {
 		p.Expiry = exp.Time
 	}

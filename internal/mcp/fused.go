@@ -84,11 +84,11 @@ func transformDigest(query string) string {
 // client round trip. The upstream call has already happened exactly once. Every
 // failure therefore withholds the raw result and explicitly avoids retry advice,
 // which is essential for mutating tools.
-func (s *Server) fusedProxyResult(ctx context.Context, runID, upstream, tool, sourceTool string, transform *declarativeTransform, passthrough map[string]any, raw json.RawMessage, egressHost string) proxyOutcome {
+func (s *Server) fusedProxyResult(ctx context.Context, runID, upstream, tool, sourceTool string, transform *declarativeTransform, passthrough map[string]any, raw json.RawMessage, egressHost string, evaluated *evaluatedGrant) proxyOutcome {
 	payload := resultPayload(passthrough)
 	rawBytes := max(len(raw), len(payload))
 	if link := offloadURL(payload); link != "" {
-		data, err := s.fetchOffload(ctx, link)
+		data, err := s.fetchOffload(ctx, link, evaluated)
 		if err != nil {
 			return fusedFailure(runID, rawBytes, 0, 0, "offload_error", egressHost,
 				"the upstream result could not be retrieved for transformation; it was withheld", false)

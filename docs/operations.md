@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-13_
 
 ## The CLI
 
@@ -36,11 +36,12 @@ Everything lives under `~/.microagency`:
 | `oauth-clients.json` | dynamic client registrations, bound to their issuer |
 | `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
 | `auth-posture.json` | the active public auth mode, issuer, and resource |
-| `upstreams.json` | non-secret connection registrations, ownership, template identity, and revoked state |
+| `upstreams.json` | non-secret connection registrations, ownership, operation grants, template identity, and revoked state |
 | `connection-templates.json` | operator-approved self-service provider, scope, parameter, and quota bounds; never OAuth client secrets |
 | `mediation.json` | non-secret enforced workspace, gateway URL/host, and policy digest |
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
+| `decision-ledger.jsonl` | fail-closed signed authorization and refusal decisions for governed calls |
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
 | `refs/` | parked reference payloads (encrypted; 24h TTL with `--persist-refs`) |
 | `refs.key` | the refs encryption key |

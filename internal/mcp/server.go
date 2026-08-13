@@ -105,6 +105,17 @@ type Server struct {
 	auditChained    int    // count of chained lines written/loaded (the log's height)
 	auditAnchoredAt int    // auditChained at the last out-of-band anchor save
 
+	// Privileged decisions use a separate fail-closed stream. Its lock covers
+	// both the chain head and finite grant-budget reservation, so concurrent
+	// calls cannot each spend the same last unit.
+	decisionMu       sync.Mutex
+	decisionHash     string
+	decisionSequence int64
+	decisionUsage    map[string]*grantUsage
+	decisionAppend   func(string, []byte) error
+	decisionLoadErr  string
+	highAssurance    bool
+
 	// Three concern-scoped stores, each with its OWN mutex — previously one shared
 	// mutex guarded runs, upstreams, tool usage, OAuth flows, and minimize policies
 	// alike. Splitting them cuts the blast radius (a change to run tracking can't
@@ -162,15 +173,20 @@ type runRecord struct {
 	// ParentRunID correlates a discovery/invocation performed inside a governed
 	// reduce program to the outer microVM run. Delivery="program" means the
 	// response went to that sandbox, not directly into model context.
-	ParentRunID      string `json:"parent_run_id,omitempty"`
-	Delivery         string `json:"delivery,omitempty"`
-	ProgramRequestID string `json:"program_request_id,omitempty"`
-	SourceID         string `json:"source_id,omitempty"`
-	Upstream         string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
-	Tool             string `json:"tool,omitempty"`     // proxy: the upstream tool name
-	Args             string `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
-	User             string `json:"user,omitempty"`     // the OAuth sub that ran it
-	Session          string `json:"session,omitempty"`  // per-run SPIFFE identity
+	ParentRunID      string   `json:"parent_run_id,omitempty"`
+	Delivery         string   `json:"delivery,omitempty"`
+	ProgramRequestID string   `json:"program_request_id,omitempty"`
+	SourceID         string   `json:"source_id,omitempty"`
+	Upstream         string   `json:"upstream,omitempty"` // proxy: the aggregated MCP name
+	Tool             string   `json:"tool,omitempty"`     // proxy: the upstream tool name
+	Args             string   `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
+	User             string   `json:"user,omitempty"`     // the OAuth sub that ran it
+	Campaign         string   `json:"campaign,omitempty"` // signed caller campaign claim
+	GrantID          string   `json:"grant_id,omitempty"`
+	GrantDigest      string   `json:"grant_digest,omitempty"`
+	Effect           string   `json:"effect,omitempty"`
+	ResourceIDs      []string `json:"resource_ids,omitempty"`
+	Session          string   `json:"session,omitempty"` // per-run SPIFFE identity
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.
@@ -237,12 +253,13 @@ type runRecord struct {
 
 func NewServer(r Runner, opts ...Option) *Server {
 	s := &Server{
-		runner:   r,
-		reg:      registry{conns: map[string]*upstream{}, usage: map[string]int{}, policies: map[string][]byte{}},
-		rs:       runStore{byID: map[string]runRecord{}, maxKept: defaultMaxRuns},
-		flows:    oauthFlowStore{byState: map[string]*oauthFlow{}},
-		self:     newSelfServiceStore(),
-		inflight: newInflight(),
+		runner:        r,
+		reg:           registry{conns: map[string]*upstream{}, usage: map[string]int{}, policies: map[string][]byte{}},
+		rs:            runStore{byID: map[string]runRecord{}, maxKept: defaultMaxRuns},
+		flows:         oauthFlowStore{byState: map[string]*oauthFlow{}},
+		self:          newSelfServiceStore(),
+		inflight:      newInflight(),
+		decisionUsage: map[string]*grantUsage{},
 		// SSRF-guarded; short dial (10s) but a generous request timeout (5m) so slow
 		// upstream tools — e.g. a security query that computes before its first byte —
 		// aren't killed mid-flight.
@@ -253,7 +270,20 @@ func NewServer(r Runner, opts ...Option) *Server {
 	}
 	s.loadConnectionTemplates()
 	s.loadAudit() // replay the persisted audit log so the operator's history survives restarts
+	s.loadDecisionLedger()
 	return s
+}
+
+// WithHighAssuranceMultiUser requires an exact operation grant for every
+// invocation and rejects implicit shared credential or writable authority.
+func WithHighAssuranceMultiUser(enabled bool) Option {
+	return func(s *Server) { s.highAssurance = enabled }
+}
+
+// withDecisionLedgerAppender is a narrow test seam for induced durable-write
+// failures. Production always uses an append+fsync implementation.
+func withDecisionLedgerAppender(appendLine func(string, []byte) error) Option {
+	return func(s *Server) { s.decisionAppend = appendLine }
 }
 
 // WithSecretStore installs the store that persists acquired credentials (upstream
