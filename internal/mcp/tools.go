@@ -100,28 +100,6 @@ func toolDefs() []map[string]any {
 					},
 					"task_id": taskProp,
 				},
-				// The contract, machine-checkable instead of prose-only: exactly
-				// one input (ref | refs | data), exactly one operation (query |
-				// code), and refs implies code. Runtime enforcement is
-				// unchanged and remains authoritative; this lets schema-
-				// validating clients refuse an invalid call before the round
-				// trip, instead of a schema that marked everything optional
-				// and asserted reduce({}) was valid.
-				"allOf": []map[string]any{
-					{"oneOf": []map[string]any{
-						{"required": []string{"ref"}},
-						{"required": []string{"refs"}},
-						{"required": []string{"data"}},
-					}},
-					{"oneOf": []map[string]any{
-						{"required": []string{"query"}},
-						{"required": []string{"code"}},
-					}},
-					{"if": map[string]any{"required": []string{"refs"}},
-						"then": map[string]any{"required": []string{"code"}}},
-					{"if": map[string]any{"required": []string{"program"}},
-						"then": map[string]any{"required": []string{"code"}}},
-				},
 			},
 		},
 	}

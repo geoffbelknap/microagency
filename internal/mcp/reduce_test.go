@@ -699,12 +699,11 @@ func TestRuntimeStderrStaysOperatorOnly(t *testing.T) {
 	}
 }
 
-// TestReduceSchemaEncodesTheContract pins the machine-checkable half of the
-// calling contract. The schema had no required array and six independently
-// optional properties, so it asserted reduce({}) was valid — a
-// schema-validating client got no help, and every invalid combination cost a
-// round trip the schema could have refused.
-func TestReduceSchemaEncodesTheContract(t *testing.T) {
+// TestReduceSchemaAvoidsTopLevelComposition pins compatibility with model APIs
+// that reject composition keywords at the root of custom tool input schemas.
+// The description documents valid combinations and runtime validation remains
+// authoritative.
+func TestReduceSchemaAvoidsTopLevelComposition(t *testing.T) {
 	var reduceDef map[string]any
 	for _, d := range toolDefs() {
 		if d["name"] == "reduce" {
@@ -715,19 +714,15 @@ func TestReduceSchemaEncodesTheContract(t *testing.T) {
 		t.Fatal("reduce not in toolDefs")
 	}
 	schema := reduceDef["inputSchema"].(map[string]any)
-	allOf, ok := schema["allOf"].([]map[string]any)
-	if !ok || len(allOf) != 4 {
-		t.Fatalf("schema allOf missing or wrong arity: %#v", schema["allOf"])
+	for _, keyword := range []string{"allOf", "anyOf", "oneOf"} {
+		if _, ok := schema[keyword]; ok {
+			t.Errorf("schema has provider-incompatible top-level %s: %#v", keyword, schema[keyword])
+		}
 	}
-	raw, _ := json.Marshal(schema)
-	for _, want := range []string{
-		`"oneOf":[{"required":["ref"]},{"required":["refs"]},{"required":["data"]}]`,
-		`"oneOf":[{"required":["query"]},{"required":["code"]}]`,
-		`"if":{"required":["refs"]}`,
-		`"if":{"required":["program"]}`,
-	} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("schema missing constraint %s:\n%s", want, raw)
+	description, _ := reduceDef["description"].(string)
+	for _, want := range []string{"Inputs (choose one)", "Then EITHER", "multiple inputs, large data, regex, or non-trivial logic"} {
+		if !strings.Contains(description, want) {
+			t.Errorf("description does not document %q", want)
 		}
 	}
 }
