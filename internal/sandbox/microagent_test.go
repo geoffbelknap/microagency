@@ -207,3 +207,69 @@ func TestProviderSurfacesDeny(t *testing.T) {
 		t.Fatalf("expected at least one deny audit event; got %d events: %+v", len(res.Audit), res.Audit)
 	}
 }
+
+// ensureEgressDatapathBin must pin the datapath to the microagent CLI for
+// apple-vf boots: the library's os.Executable fallback points the supervisor at
+// this server binary, which has no --egress-datapath mode, and the boot then
+// fails opaquely in the guest ("fetch CA cert: read length prefix: EOF").
+func TestEnsureEgressDatapathBin(t *testing.T) {
+	const env = "MICROAGENT_EGRESS_DATAPATH_BIN"
+
+	t.Run("non-applevf backend is a no-op", func(t *testing.T) {
+		t.Setenv(env, "")
+		orig := lookMicroagentPath
+		lookMicroagentPath = func() (string, error) { t.Fatal("must not resolve for linux-kvm"); return "", nil }
+		defer func() { lookMicroagentPath = orig }()
+		if err := ensureEgressDatapathBin("linux-kvm"); err != nil {
+			t.Fatalf("ensureEgressDatapathBin(linux-kvm) = %v, want nil", err)
+		}
+		if got := os.Getenv(env); got != "" {
+			t.Fatalf("%s = %q, want unset", env, got)
+		}
+	})
+
+	t.Run("operator preset wins", func(t *testing.T) {
+		t.Setenv(env, "/operator/pinned/microagent")
+		orig := lookMicroagentPath
+		lookMicroagentPath = func() (string, error) { t.Fatal("must not resolve past a preset"); return "", nil }
+		defer func() { lookMicroagentPath = orig }()
+		if err := ensureEgressDatapathBin("apple-vf"); err != nil {
+			t.Fatalf("ensureEgressDatapathBin(apple-vf) = %v, want nil", err)
+		}
+		if got := os.Getenv(env); got != "/operator/pinned/microagent" {
+			t.Fatalf("%s = %q, want operator preset kept", env, got)
+		}
+	})
+
+	t.Run("resolves the CLI from PATH", func(t *testing.T) {
+		t.Setenv(env, "")
+		orig := lookMicroagentPath
+		lookMicroagentPath = func() (string, error) { return "/resolved/bin/microagent", nil }
+		defer func() { lookMicroagentPath = orig }()
+		if err := ensureEgressDatapathBin("apple-vf"); err != nil {
+			t.Fatalf("ensureEgressDatapathBin(apple-vf) = %v, want nil", err)
+		}
+		if got := os.Getenv(env); got != "/resolved/bin/microagent" {
+			t.Fatalf("%s = %q, want resolved path", env, got)
+		}
+	})
+
+	t.Run("missing CLI fails closed with the knob named", func(t *testing.T) {
+		t.Setenv(env, "")
+		orig := lookMicroagentPath
+		lookMicroagentPath = func() (string, error) { return "", os.ErrNotExist }
+		defer func() { lookMicroagentPath = orig }()
+		err := ensureEgressDatapathBin("apple-vf")
+		if err == nil {
+			t.Fatal("ensureEgressDatapathBin(apple-vf) = nil, want error when the CLI is missing")
+		}
+		for _, want := range []string{"microagent CLI", env} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not mention %q", err, want)
+			}
+		}
+		if got := os.Getenv(env); got != "" {
+			t.Fatalf("%s = %q, want unset after failure", env, got)
+		}
+	})
+}
