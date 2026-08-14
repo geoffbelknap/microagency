@@ -2,7 +2,7 @@ module microagency
 
 go 1.26.3
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/geoffbelknap/microagent v0.9.1-0.20260812224853-21a99f69009d
