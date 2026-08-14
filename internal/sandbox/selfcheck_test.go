@@ -40,7 +40,8 @@ func TestSelfCheckPassesOnAHealthyHost(t *testing.T) {
 // stream, for two days, behind a doctor verdict that said reduce(code) would
 // work. This test manufactures that exact cache state (healthy entry copied,
 // base/ gutted to usr/ plus the stage marker so restore accepts it), points
-// the builder at it, and requires the self-check to fail with the guest's own
+// the builder at it, and requires the self-check to fail with either an
+// explicit pre-boot rejection of the missing guest init or the guest's own
 // start diagnosis rather than pass, time out, or blame the code.
 func TestSelfCheckCatchesAPoisonedRootfs(t *testing.T) {
 	requireVM(t)
@@ -73,6 +74,9 @@ func TestSelfCheckCatchesAPoisonedRootfs(t *testing.T) {
 		}
 	}
 	t.Setenv("MICROAGENT_ROOTFS_BASE_CACHE_DIR", poisoned)
+	t.Cleanup(func() {
+		cleanupWorkspace(context.Background(), workspace.DefaultOptions(), selfCheckName)
+	})
 
 	sc := SelfCheck(context.Background(), ReduceImage, ReduceCodePath, 2*time.Minute)
 
@@ -82,15 +86,48 @@ func TestSelfCheckCatchesAPoisonedRootfs(t *testing.T) {
 	if sc.TimedOut {
 		t.Fatalf("self-check timed out instead of diagnosing: %+v", sc)
 	}
-	if !strings.Contains(sc.Detail, "could not start") {
-		t.Errorf("failure not classified as a start failure: %q", sc.Detail)
-	}
-	if !strings.Contains(sc.Detail, "fork/exec") {
-		t.Errorf("the guest's own diagnosis is missing from the detail: %q", sc.Detail)
+	if !isExplicitPoisonedRootfsFailure(sc.Detail) {
+		t.Errorf("failure is not an explicit poisoned-rootfs diagnosis: %q", sc.Detail)
 	}
 	if !sc.Kept {
 		t.Error("failed probe workspace was not kept for inspection")
 	}
-	// Clean the kept workspace so the test leaves nothing behind.
-	cleanupWorkspace(context.Background(), workspace.DefaultOptions(), selfCheckName)
+}
+
+func isExplicitPoisonedRootfsFailure(detail string) bool {
+	guestStart := strings.Contains(detail, "could not start") && strings.Contains(detail, "fork/exec")
+	prebootRejection := strings.Contains(detail, "failed before returning a result") &&
+		strings.Contains(detail, "rootfs") &&
+		strings.Contains(detail, "/sbin/microagent-init") &&
+		(strings.Contains(detail, "not found") || strings.Contains(detail, "no such file"))
+	return guestStart || prebootRejection
+}
+
+func TestExplicitPoisonedRootfsFailureClassification(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		detail string
+		want   bool
+	}{
+		{
+			name:   "preboot metadata rejection",
+			detail: "the sandbox failed before returning a result: apply rootfs filesystem metadata: debugfs: /sbin/microagent-init: File not found by ext2_lookup",
+			want:   true,
+		},
+		{
+			name:   "guest start diagnosis",
+			detail: "the guest could not start the code runner: fork/exec /bin/sh: no such file or directory",
+			want:   true,
+		},
+		{name: "empty"},
+		{name: "ambiguous preboot failure", detail: "the sandbox failed before returning a result: rootfs construction failed"},
+		{name: "unclassified missing guest init", detail: "rootfs /sbin/microagent-init not found"},
+		{name: "ambiguous guest failure", detail: "the guest could not start the code runner"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isExplicitPoisonedRootfsFailure(test.detail); got != test.want {
+				t.Fatalf("isExplicitPoisonedRootfsFailure(%q) = %v, want %v", test.detail, got, test.want)
+			}
+		})
+	}
 }
