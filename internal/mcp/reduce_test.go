@@ -516,7 +516,16 @@ func TestMaterializeRefDeliversToOperator(t *testing.T) {
 	ref, _ := store.Put("198.51.100.7\n203.0.113.9\n", localCallerKey()) // PII the run kept off the model
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 1, Store: store}))
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/refs/x", nil)
+	// Without a reason the request is refused before any data moves.
+	bare := httptest.NewRequest(http.MethodGet, "/admin/refs/x", nil)
+	bare.SetPathValue("ref", string(ref))
+	refused := httptest.NewRecorder()
+	s.adminMaterializeRef(refused, bare)
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("materialize without a reason = %d, want 400", refused.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/refs/x?reason=incident+42", nil)
 	req.SetPathValue("ref", string(ref))
 	rec := httptest.NewRecorder()
 	s.adminMaterializeRef(rec, req)
@@ -531,6 +540,9 @@ func TestMaterializeRefDeliversToOperator(t *testing.T) {
 	for _, r := range s.RunLog() {
 		if r.Kind == "materialize" {
 			found = true
+			if r.Reason != "incident 42" {
+				t.Fatalf("audit trace lost the reason: %q", r.Reason)
+			}
 		}
 	}
 	if !found {

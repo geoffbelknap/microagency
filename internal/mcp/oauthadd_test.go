@@ -96,7 +96,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	tokenStore := openTestSecretStore(t, dir) // file store
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(tokenStore), WithStateDir(dir))
 	const opTok = "op"
-	admin := httptest.NewServer(srv.AdminHandler(opTok))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: opTok}))
 	defer admin.Close()
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -184,7 +184,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 // registers anything.
 func TestConsoleOAuthCallbackRejectsUnknownState(t *testing.T) {
 	srv := NewServer(fakeRunner{})
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 	r, err := http.Get(admin.URL + "/admin/oauth/callback?state=forged&code=x")
 	if err != nil {
@@ -233,7 +233,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "up", "url": upTS.URL, "scope": "limacharlie:read limacharlie:write"})
@@ -289,7 +289,7 @@ func TestConsoleOAuthAddRejectsHostlessResourceIndicator(t *testing.T) {
 	defer upTS.Close()
 
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "evil", "url": upTS.URL})
@@ -353,7 +353,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	if err := srv.AddUpstream(context.Background(), "lc", &gateway.Upstream{Name: "lc", URL: upTS.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("pre-register: %v", err)
 	}
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"scope": "limacharlie:read"})
@@ -418,7 +418,7 @@ func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
 	dir := t.TempDir()
 	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL, "client_id": "goog-client-123", "client_secret": "goog-secret"})
@@ -463,7 +463,7 @@ func TestConsoleOAuthSuppliedClientOverridesStored(t *testing.T) {
 	dir := t.TempDir()
 	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	add := func(id, secret string) string {
@@ -503,7 +503,7 @@ func TestConsoleOAuthAddNoDCRNoClientErrors(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL})
@@ -554,7 +554,7 @@ func TestAdminOAuthScopesDiscovery(t *testing.T) {
 	upstreamResource = upTS.URL
 
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, admin.URL+"/admin/oauth-scopes?url="+url.QueryEscape(upTS.URL), nil)

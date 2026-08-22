@@ -21,9 +21,14 @@ auto-registration, pass `--no-register`.
 The OAuth signing key lives at `~/.microagency/oauth-key` (mode 0600), so
 issued tokens survive restarts. Revoking a token at `/oauth/revoke` cuts off
 `/mcp` access immediately, and a used refresh token stays refused after a
-restart: both are recorded in `~/.microagency/oauth-revocations.json`. The
-admin API and the console use a separate operator token:
-`cat ~/.microagency/token`.
+restart: both are recorded in `~/.microagency/oauth-revocations.json`.
+
+The admin API and the console use separate operator tokens, never MCP
+tokens. Create named ones with
+`microagency token create <name> --role admin|auditor`; the original
+`~/.microagency/token` keeps working as a full-admin break-glass credential.
+See [operating the gateway](operations.md) for roles, expiry, rotation, and
+revocation.
 
 ## Where credentials live
 

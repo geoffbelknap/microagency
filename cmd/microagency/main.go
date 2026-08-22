@@ -34,6 +34,7 @@ import (
 	"microagency/internal/console"
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
+	"microagency/internal/optoken"
 	"microagency/internal/tunnel"
 )
 
@@ -96,6 +97,8 @@ func main() {
 		runHook(args[1:])
 	case "mediation":
 		runMediation(args[1:])
+	case "token":
+		runToken(args[1:])
 	default:
 		// The usage dump never named the input, so "doctr" got 20 lines with
 		// zero occurrences of "doctr" and no suggestion — while an unknown
@@ -113,7 +116,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation", "token"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -184,6 +187,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
+	fmt.Fprintln(w, "  microagency token         manage named operator tokens for /admin and the console")
 	fmt.Fprintln(w, "")
 	upFlags(w)
 }
@@ -914,7 +918,7 @@ func consoleAddr(cfg httpConfig) string {
 // two muxes are distinct and the agent plane cannot route to the operator
 // surface at all; otherwise both share one mux. mode and bearer feed the
 // connect banner.
-func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
+func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
 	audience := cfg.audience
 	if audience == "" {
 		if cfg.tunnel != "" && cfg.issuer == "" && cfg.token == "" {
@@ -1054,8 +1058,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 	if builtInAS != nil && mode == "oauth-tunnel" {
 		builtInAS.RegisterOperator(adminMux)
 	}
-	adminMux.Handle("/admin/", srv.AdminHandler(operatorToken))
-	adminMux.Handle("/console", console.Handler(operatorToken))
+	adminMux.Handle("/admin/", srv.AdminHandler(opAuth))
+	// The console self-authenticates on loopback with the legacy operator token
+	// (full admin — the console is a management UI).
+	adminMux.Handle("/console", console.Handler(opAuth.LegacyToken))
 	return mcpMux, adminMux, mode, bearer, nil
 }
 
@@ -1087,6 +1093,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
+	opAuth := mcp.OperatorAuth{LegacyToken: operatorToken, Tokens: optoken.NewStore(operatorTokensPath())}
 	mcpListener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		fatal("bind MCP listener", "addr", cfg.addr, "err", err)
@@ -1149,7 +1156,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		_ = os.Remove(tunnelStatePath())
 	}
 
-	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, operatorToken)
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, opAuth)
 	if err != nil {
 		if tun != nil {
 			_ = tun.Close()
@@ -1500,8 +1507,12 @@ func firstNonEmpty(values ...string) string {
 // persistentToken reads-or-mints a stable bearer token at ~/.microagency/token
 // (0600), so the client config and any auto-registration survive restarts. file is
 // "" only when there is no home directory.
-// persistentToken is the OPERATOR token: it gates /admin + /console. It never
-// authenticates the agent-facing /mcp surface.
+// persistentToken is the LEGACY operator token: a full-admin break-glass
+// credential gating /admin + /console, and the value the loopback console
+// self-authenticates with. Named tokens (`microagency token`) are the managed
+// alternative with roles and expiry; admin actions with this one audit under
+// the fixed name optoken.LegacyName. It never authenticates the agent-facing
+// /mcp surface.
 func persistentToken() (token, file string) { return persistentTokenAt("token") }
 
 // persistentTokenAt reads (or mints and 0600-persists) a random token in

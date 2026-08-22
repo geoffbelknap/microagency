@@ -30,7 +30,7 @@ func TestConsoleAffordancesMatchAdminAPI(t *testing.T) {
 	// ...and the endpoints they call behave.
 	up := cannedUpstream(t)
 	defer up.Close()
-	admin := httptest.NewServer(s.AdminHandler("op"))
+	admin := httptest.NewServer(s.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 	call := func(method, path, payload string) (int, string) {
 		t.Helper()

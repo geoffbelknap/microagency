@@ -26,7 +26,7 @@ func TestAdminRegistrySearch(t *testing.T) {
 	reg := fakeMCPRegistry()
 	defer reg.Close()
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 
 	rec := adminGET(t, h, "/admin/registry?url="+reg.URL+"&limit=50", "tok")
 	if rec.Code != http.StatusOK {
@@ -53,7 +53,7 @@ func TestAdminRegistryImportIsGatedAndIdempotent(t *testing.T) {
 	reg := fakeMCPRegistry()
 	defer reg.Close()
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 
 	post := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/admin/registry/import", strings.NewReader(body))

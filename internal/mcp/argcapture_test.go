@@ -203,7 +203,7 @@ func TestAdminAuditCapturePersistsAndReloads(t *testing.T) {
 	}
 	s.persistRegistration("u", up.URL, false, authNone, "")
 
-	admin := s.AdminHandler("tok")
+	admin := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 	req := httptest.NewRequest("POST", "/admin/upstreams/u/audit-capture", bytes.NewBufferString(`{"full_args":true}`))
 	req.Header.Set("Authorization", "Bearer tok")
 	rr := httptest.NewRecorder()

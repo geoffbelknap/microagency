@@ -62,7 +62,7 @@ func TestMetricsPrometheusEmptyBreakdown(t *testing.T) {
 // The admin endpoint serves the exposition format behind the operator token.
 func TestMetricsPrometheusEndpoint(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
-	srv := httptest.NewServer(s.AdminHandler("op"))
+	srv := httptest.NewServer(s.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/metrics/prometheus", nil)
@@ -80,7 +80,7 @@ func TestMetricsPrometheusEndpoint(t *testing.T) {
 	}
 	// Unauthenticated is refused (same gate as the rest of /admin).
 	rec := httptest.NewRecorder()
-	s.AdminHandler("op").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/metrics/prometheus", nil))
+	s.AdminHandler(OperatorAuth{LegacyToken: "op"}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/metrics/prometheus", nil))
 	if rec.Code == http.StatusOK {
 		t.Fatal("prometheus endpoint must sit behind the operator token")
 	}

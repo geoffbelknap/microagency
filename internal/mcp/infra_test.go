@@ -49,7 +49,7 @@ func TestInfraStatusReportsRealComponents(t *testing.T) {
 // The /admin/infra route is wired and returns the status as JSON.
 func TestInfraEndpointServesJSON(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
-	admin := httptest.NewServer(s.AdminHandler("op"))
+	admin := httptest.NewServer(s.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, admin.URL+"/admin/infra", nil)

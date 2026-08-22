@@ -202,7 +202,8 @@ type runRecord struct {
 	// against the signed chain. Both set only under "structure" capture.
 	ArgsShape   json.RawMessage `json:"args_shape,omitempty"`
 	ArgsSHA256  string          `json:"args_sha256,omitempty"`
-	User        string          `json:"user,omitempty"`     // the OAuth sub that ran it
+	User        string          `json:"user,omitempty"`     // the OAuth sub that ran it; admin-plane records carry the acting operator token's name
+	Reason      string          `json:"reason,omitempty"`   // operator-supplied justification (required for ref materialization)
 	Campaign    string          `json:"campaign,omitempty"` // signed caller campaign claim
 	GrantID     string          `json:"grant_id,omitempty"`
 	GrantDigest string          `json:"grant_digest,omitempty"`

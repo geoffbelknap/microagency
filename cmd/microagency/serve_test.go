@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"microagency/internal/auth"
+	"microagency/internal/mcp"
 )
 
 func TestEffectiveAdminAddr(t *testing.T) {
@@ -40,7 +41,7 @@ func TestTunnelBuiltInOAuthUsesDiscoveredOriginAndKeepsConsentLocal(t *testing.T
 		addr: "127.0.0.1:8765", tunnel: "cloudflare",
 		publicURL: "https://gateway.example", authDir: t.TempDir(),
 	}
-	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestTunnelExternalIssuerRemainsDistinctFromBuiltInOAuth(t *testing.T) {
 		addr: "127.0.0.1:8765", tunnel: "ngrok", publicURL: "https://gateway.example",
 		issuer: issuer.URL, audience: "gateway-audience",
 	}
-	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestTunnelIsolatesOperatorSurface(t *testing.T) {
 	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "agent-tok", publicURL: "https://gateway.example"}
 
-	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +306,7 @@ func TestExplicitTunnelBearerIsDistinctFromOperatorToken(t *testing.T) {
 	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "mcp-bearer-tok", publicURL: "https://gateway.example"}
 
-	mcpMux, _, mode, bearer, err := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, _, mode, bearer, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestOperatorSurfaceSharesListenerByDefault(t *testing.T) {
 	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765")
 	cfg := httpConfig{addr: "127.0.0.1:8765", token: "agent-tok"} // bearer mode: no signer/issuer I/O
 
-	mcpMux, adminMux, _, _, err := buildMuxes(srv, cfg, "op-tok")
+	mcpMux, adminMux, _, _, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
 		t.Fatal(err)
 	}

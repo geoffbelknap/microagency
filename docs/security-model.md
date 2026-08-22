@@ -69,14 +69,21 @@ The guarantees, and where each one is enforced:
   connection, and disclosed by `microagency doctor` (see
   [the audit chain](audit.md)).
 - **Plane separation.** The operator surface (admin API and console) uses
-  its own token. The public `/mcp` surface accepts audience-bound OAuth
-  access tokens, or a separate user-supplied bearer in compatibility mode.
-  Public consent and all operator routes stay on a loopback listener that
-  the tunnel never exposes. Every consent decision is bound to single-use,
-  unguessable request state, and a consent POST the browser labels
-  cross-site (`Sec-Fetch-Site`, `Origin`) is refused — a web page cannot
-  forge approval to the loopback listener. An MCP token cannot authenticate
-  the operator API, and the operator token cannot authenticate `/mcp`.
+  its own tokens: named operator tokens with a role (`admin`, or read-only
+  `auditor`) and optional expiry, plus the legacy single token as a
+  full-admin break-glass credential. Token values are stored only as hashes;
+  a request with no valid operator token is always refused, so an
+  unconfigured operator plane is closed, not open. Admin actions audit under
+  the acting token's name, and materializing parked data requires the admin
+  role plus an explicit reason that lands in the audit record. The public
+  `/mcp` surface accepts audience-bound OAuth access tokens, or a separate
+  user-supplied bearer in compatibility mode. Public consent and all
+  operator routes stay on a loopback listener that the tunnel never exposes.
+  Every consent decision is bound to single-use, unguessable request state,
+  and a consent POST the browser labels cross-site (`Sec-Fetch-Site`,
+  `Origin`) is refused — a web page cannot forge approval to the loopback
+  listener. An MCP token cannot authenticate the operator API, and operator
+  tokens cannot authenticate `/mcp`.
   The public `/connections` account API accepts the MCP principal token but
   cannot route to `/admin`; its unauthenticated provider callback is protected
   by expiring, single-use OAuth state and PKCE.
