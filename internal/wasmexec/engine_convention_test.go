@@ -22,6 +22,7 @@ import (
 // Each case builds the real module, so this is the convention as shipped rather
 // than as documented.
 func TestEnginesRejectBadQueriesWithExitTwo(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		engine string
 		dir    string
@@ -35,6 +36,7 @@ func TestEnginesRejectBadQueriesWithExitTwo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.engine, func(t *testing.T) {
+			t.Parallel()
 			eng := SandboxEngine{Module: buildWasip1(t, tt.dir)}
 			_, err := eng.Run(context.Background(), tt.query, []byte(tt.data))
 			if err == nil {
@@ -56,6 +58,7 @@ func TestEnginesRejectBadQueriesWithExitTwo(t *testing.T) {
 // valid query over unusable data must not classify as a rejected query, or the
 // agent would be told to fix a query that is already correct.
 func TestDataFailureIsNotAQueryRejection(t *testing.T) {
+	t.Parallel()
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/jq")}
 	_, err := eng.Run(context.Background(), ".[0]", []byte("this is not json at all"))
 	if err == nil {
@@ -79,6 +82,7 @@ func TestDataFailureIsNotAQueryRejection(t *testing.T) {
 // bad-query diagnostic, so an engine that starts reading data before parsing
 // fails here rather than leaking through the returned message.
 func TestBadQueryStderrNamesTheQueryNotTheData(t *testing.T) {
+	t.Parallel()
 	const sentinel = "SECRET-ROW-VALUE-9f2c"
 	tests := []struct {
 		engine string
@@ -93,6 +97,7 @@ func TestBadQueryStderrNamesTheQueryNotTheData(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.engine, func(t *testing.T) {
+			t.Parallel()
 			eng := SandboxEngine{Module: buildWasip1(t, tt.dir)}
 			_, err := eng.Run(context.Background(), tt.query, []byte(tt.data))
 			var exitErr *ExitError

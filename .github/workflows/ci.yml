@@ -19,9 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/go-cache
         with:
-          go-version-file: go.mod
+          job: build-test
       - name: Build
         run: go build ./...
       - name: Vet
@@ -47,9 +47,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/go-cache
         with:
-          go-version-file: go.mod
+          job: race
       - name: Race test
         run: go test -race -short ./...
 
@@ -58,9 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/go-cache
         with:
-          go-version-file: go.mod
+          job: static-analysis
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -73,8 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/go-cache
         with:
-          go-version-file: go.mod
+          job: workflow-checks
       - name: Lint GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

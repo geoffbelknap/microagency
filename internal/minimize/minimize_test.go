@@ -11,11 +11,34 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/geoffbelknap/microagent/pkg/sandbox"
 )
+
+// warmWazero creates one throwaway sandbox runtime while the process is still
+// single-threaded.
+//
+// wazero caches its own version string in an unsynchronized package-level
+// variable, populated the first time a runtime is created
+// (internal/version.GetWazeroVersion). Two goroutines creating a runtime
+// concurrently before that cache is warm race on it, inside the dependency.
+// Touching it once here closes that window for the parallel tests below.
+//
+// It is a one-shot lazy init, so this suppresses nothing else: every other race,
+// in this package or in wazero's engine, is still reported normally.
+func warmWazero() {
+	// The 8-byte header is the smallest well-formed module. Only runtime
+	// creation matters here, so a compile failure is fine to ignore.
+	rt, err := sandbox.Compile(context.Background(), []byte("\x00asm\x01\x00\x00\x00"), sandbox.RuntimeOptions{})
+	if err == nil {
+		_ = rt.Close(context.Background())
+	}
+}
 
 // The pipeline threads each module's transformed output into the next and
 // accumulates tokens + alerts across the chain.
 func TestPipelineChainsAndAccumulates(t *testing.T) {
+	t.Parallel()
 	upper := Func{N: "upper", F: func(_ context.Context, in ScanInput) (ScanResult, error) {
 		return ScanResult{Transformed: []byte(strings.ToUpper(string(in.Payload))), Tokens: []Token{{Placeholder: "<a>", Value: "1"}}}, nil
 	}}
@@ -37,6 +60,7 @@ func TestPipelineChainsAndAccumulates(t *testing.T) {
 // A module error aborts the chain with no payload — mediation must fail closed
 // (never emit un-minimized data).
 func TestPipelineFailsClosed(t *testing.T) {
+	t.Parallel()
 	boom := Func{N: "boom", F: func(_ context.Context, _ ScanInput) (ScanResult, error) {
 		return ScanResult{}, fmt.Errorf("detector crashed")
 	}}
@@ -52,6 +76,7 @@ func TestPipelineFailsClosed(t *testing.T) {
 // Tokenized placeholders round-trip: what a minimizer swapped out on the way to
 // the model is restored on the way back to the upstream.
 func TestResolvePlaceholders(t *testing.T) {
+	t.Parallel()
 	store := NewMemTokenStore()
 	scope := TokenScope{Owner: "u1", Upstream: "acme"}
 	_ = store.Put(scope, []Token{{Placeholder: "<mtok_ab>", Value: "5PY89921"}, {Placeholder: "<mtok_abcd>", Value: "long"}})
@@ -77,6 +102,7 @@ func TestResolvePlaceholders(t *testing.T) {
 // email, tokenize + round-trip a card, alert on an SSN — run concurrently to
 // exercise the cluster.
 func TestWasmRedactorWarmPool(t *testing.T) {
+	t.Parallel()
 	mod := buildWasip1(t, "../../minimizers/redactor")
 	ctx := context.Background()
 	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 4, Timeout: 5 * time.Second, MaxMemoryPages: 256})
@@ -133,13 +159,9 @@ func TestWasmRedactorWarmPool(t *testing.T) {
 
 // A non-Luhn 16-digit sequence (e.g. an order id) must NOT be treated as a card.
 func TestWasmRedactorLuhnGuardsCards(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	res, err := m.Scan(ctx, ScanInput{Payload: []byte(`{"order":"1234567890123456"}`), Direction: ToModel, Policy: []byte(`{"card":"tokenize"}`)})
 	if err != nil {
@@ -158,13 +180,9 @@ func TestWasmRedactorLuhnGuardsCards(t *testing.T) {
 // while a reference key (account_id) under the same policy is left alone, and a
 // formatted value in an unrelated field is still caught by content patterns.
 func TestWasmRedactorFieldNameEnforcement(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	const acct = "5PY89921" // opaque — no content signature a detector could catch
 	payload := []byte(`{"account_number":"` + acct + `","account_id":"cf-tenant-123","note":"reach me at a@b.com"}`)
@@ -196,13 +214,9 @@ func TestWasmRedactorFieldNameEnforcement(t *testing.T) {
 // the string. A non-Luhn synthetic card is tokenized by its COLUMN NAME (content
 // detection would reject it), proving the structured walk found the embedded rows.
 func TestWasmRedactorEmbeddedJSONInProse(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	const pan = "4796988725904349" // synthetic, NOT Luhn-valid → content detection ignores it
 	// A valid JSON envelope whose "result" string wraps rows in prose (Supabase shape):
@@ -234,13 +248,9 @@ func TestWasmRedactorEmbeddedJSONInProse(t *testing.T) {
 // in free text), a personal name, a bare phone column, and a card CVV — the m5
 // security_events / customers gaps.
 func TestWasmRedactorSecretsNamesPhone(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	payload := []byte(`{"api_key":"sk-abcdef0123456789abcd","bearer_token":"tok-xyz","full_name":"Frank Jones","phone":"+11090741218","card_cvv":"828","primary_key":"pk-42","note":"leaked AKIA1234567890ABCDEF in logs"}`)
 	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"secret":"redact","name":"redact","phone":"redact","card":"tokenize"}`)})
@@ -262,13 +272,9 @@ func TestWasmRedactorSecretsNamesPhone(t *testing.T) {
 // PHI (m5.patients shape): clinical fields with no content format are redacted by
 // field name, while a reference key (patient_id) survives.
 func TestWasmRedactorHealth(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	payload := []byte(`{"patient_id":"p-1","mrn":"MRN00042","diagnosis_codes":"E11.9,I10","medications":"metformin","mental_health_flag":"positive","provider_notes":"stable","insurance_member_id":"INS-99"}`)
 	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"health":"redact"}`)})
@@ -289,13 +295,9 @@ func TestWasmRedactorHealth(t *testing.T) {
 // A PEM private key must be redacted as a WHOLE block — header, base64 body, and
 // footer — not just its BEGIN line, which would leave the key material behind.
 func TestWasmRedactorPEMPrivateKeyWholeBlock(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDbogusKEYmaterial"
 	pem := "-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----"
@@ -317,13 +319,9 @@ func TestWasmRedactorPEMPrivateKeyWholeBlock(t *testing.T) {
 // visible (alert) must still be content-scanned, so other PII embedded in it
 // (an email, a card) can't ride through under that field name.
 func TestWasmRedactorFieldAlertStillScansEmbedded(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	payload := []byte(`{"ssn":"contact a@b.com or card 4111111111111111"}`)
 	res, err := m.Scan(ctx, ScanInput{Payload: payload, Direction: ToModel, Policy: []byte(`{"ssn":"alert","email":"redact","card":"tokenize"}`)})
@@ -345,13 +343,9 @@ func TestWasmRedactorFieldAlertStillScansEmbedded(t *testing.T) {
 // A sensitive value stored as a JSON NUMBER (not a string) must be enforced by its
 // field name, not silently passed through because it isn't a string.
 func TestWasmRedactorNumericFieldValue(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	res, err := m.Scan(ctx, ScanInput{Payload: []byte(`{"card_number":4111111111111111}`), Direction: ToModel, Policy: []byte(`{"card":"tokenize"}`)})
 	if err != nil {
@@ -369,13 +363,9 @@ func TestWasmRedactorNumericFieldValue(t *testing.T) {
 // same value tokenizes to DIFFERENT placeholders under different salts, so an agent
 // that sees a placeholder can't brute-force a low-entropy value by hashing candidates.
 func TestWasmRedactorSaltedPlaceholders(t *testing.T) {
-	mod := buildWasip1(t, "../../minimizers/redactor")
+	t.Parallel()
 	ctx := context.Background()
-	m, err := LoadWasm(ctx, "redactor", mod, Options{Instances: 2, Timeout: 5 * time.Second, MaxMemoryPages: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close(ctx)
+	m := sharedRedactor(t)
 
 	payload := []byte(`{"account_number":"5PY89921"}`)
 	policy := []byte(`{"account":"tokenize"}`)
@@ -398,6 +388,51 @@ func TestWasmRedactorSaltedPlaceholders(t *testing.T) {
 	if r3.Tokens[0].Placeholder != r1.Tokens[0].Placeholder {
 		t.Fatal("placeholders must be stable for the same value+salt")
 	}
+}
+
+// --- shared compiled module ---
+
+// sharedRedactor returns one compiled redactor module shared by every test that
+// just needs to Scan it.
+//
+// Compiling is the expensive step by a wide margin, and the race detector
+// instruments the compiler heavily, so a compile per test dominated this
+// package's runtime. Scan is by contrast a cheap instantiate-run-discard on a
+// fresh, isolated guest and is documented safe to run concurrently, so a single
+// compiled module serves the whole package without changing what any test
+// observes: each caller still gets its own guest instance per Scan.
+//
+// The cluster is left at its default size (GOMAXPROCS) rather than a fixed 2 so
+// parallel tests are not queued behind a bounded semaphore. None of the callers
+// assert on cluster size; TestWasmRedactorWarmPool still builds its own module
+// with an explicit Instances to cover that behavior.
+var (
+	sharedRedactorOnce sync.Once
+	sharedRedactorMod  *WasmModule
+	sharedRedactorErr  error
+)
+
+func sharedRedactor(t *testing.T) *WasmModule {
+	t.Helper()
+	mod := buildWasip1(t, "../../minimizers/redactor") // skips when the toolchain is absent
+	sharedRedactorOnce.Do(func() {
+		sharedRedactorMod, sharedRedactorErr = LoadWasm(context.Background(), "redactor", mod,
+			Options{Timeout: 5 * time.Second, MaxMemoryPages: 256})
+	})
+	if sharedRedactorErr != nil {
+		t.Fatal(sharedRedactorErr)
+	}
+	return sharedRedactorMod
+}
+
+// TestMain releases the shared module once the whole package is done with it.
+func TestMain(m *testing.M) {
+	warmWazero()
+	code := m.Run()
+	if sharedRedactorMod != nil {
+		_ = sharedRedactorMod.Close(context.Background())
+	}
+	os.Exit(code)
 }
 
 // --- wasip1 build helper (mirrors internal/wasmexec) ---
