@@ -17,10 +17,20 @@ The guarantees, and where each one is enforced:
   Linux Secret Service, or an operator KMS helper. The initial root token is
   revoked after narrow AppRole provisioning; protected-provider failure stops
   startup instead of selecting another credential store.
+  A [delegated connection](delegated-access.md)'s service-account key lives
+  in the same store, is accepted only through the operator API, and is never
+  echoed back; the registry keeps only non-secret configuration. The
+  short-lived per-user tokens derived from it stay inside the gateway,
+  cached per caller and dropped when the connection is disabled or revoked.
   Nothing in the agent's config, context, or tool results can reveal them.
 - **Least privilege.** A connection can be read-only, narrowed to specific
   OAuth scopes, restricted to one user (`owner`), or held in the index as
   discovered — findable but not invocable until an operator enables it.
+  A [delegated connection](delegated-access.md) goes further on a shared
+  gateway: every call runs under a token derived for the calling user's
+  provider-verified identity, so the provider's own ACLs bound each result.
+  The gateway never queries broadly and filters afterwards, and a caller
+  with no verified identity is refused before any egress.
   Self-service users can instantiate only operator-approved templates; the
   provider URL, scopes, curated provider parameters, and per-user quota are
   bounded before an OAuth flow starts. Their token, client registration,

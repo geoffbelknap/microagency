@@ -34,12 +34,19 @@ type upstreamReg struct {
 	Owner    string `json:"owner,omitempty"`     // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	// AuditFullArgs opts this connection up to full argument capture in the
 	// audit log on a multi-principal gateway (default there: structure + digest).
-	AuditFullArgs bool             `json:"audit_full_args,omitempty"`
-	Minimize      string           `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
-	SelfService   bool             `json:"self_service,omitempty"` // admitted from an operator-approved template
-	Template      string           `json:"template,omitempty"`     // template id for self-service connections
-	Revoked       bool             `json:"revoked,omitempty"`      // credential deleted; never reload as callable
-	Grants        []OperationGrant `json:"grants,omitempty"`       // non-secret operator authority
+	AuditFullArgs bool   `json:"audit_full_args,omitempty"`
+	Minimize      string `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
+	SelfService   bool   `json:"self_service,omitempty"` // admitted from an operator-approved template
+	Template      string `json:"template,omitempty"`     // template id for self-service connections
+	Revoked       bool   `json:"revoked,omitempty"`      // credential deleted; never reload as callable
+	// Strategy declares how a calling principal maps to upstream authority
+	// (StrategyStatic | StrategyPerUserOAuth | StrategyGoogleDWD). "" derives
+	// the legacy meaning: per-user-oauth for self-service records, else static.
+	Strategy string `json:"strategy,omitempty"`
+	// Delegation is the non-secret google-dwd configuration. The
+	// service-account key lives only in the secret store.
+	Delegation *DelegationSummary `json:"delegation,omitempty"`
+	Grants     []OperationGrant   `json:"grants,omitempty"` // non-secret operator authority
 }
 
 // authKind returns the registration's auth kind, treating a legacy empty value as
@@ -64,6 +71,12 @@ type UpstreamRegistration struct {
 	// AuditFullArgs: this connection is opted up to full argument capture in the
 	// audit log on a multi-principal gateway. Doctor discloses the opt-up.
 	AuditFullArgs bool
+	// Strategy is the connection's credential strategy (StrategyStatic,
+	// StrategyPerUserOAuth, or StrategyGoogleDWD), and Delegation the
+	// non-secret google-dwd config. Doctor reports delegated connections and
+	// their prerequisites from these.
+	Strategy   string
+	Delegation *DelegationSummary
 }
 
 // ReadUpstreamRegistrations returns the persisted upstream registrations under
@@ -82,7 +95,7 @@ func ReadUpstreamRegistrations(stateDir string) []UpstreamRegistration {
 	}
 	out := make([]UpstreamRegistration, 0, len(regs))
 	for _, r := range regs {
-		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL, AuditFullArgs: r.AuditFullArgs})
+		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL, AuditFullArgs: r.AuditFullArgs, Strategy: r.strategyKind(), Delegation: r.Delegation})
 	}
 	return out
 }
@@ -193,6 +206,12 @@ func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 				}
 				if !reg.SelfService && regs[i].SelfService {
 					reg.SelfService, reg.Template = true, regs[i].Template
+				}
+				if reg.Strategy == "" {
+					reg.Strategy = regs[i].Strategy // preserve the credential strategy across re-registration
+				}
+				if reg.Delegation == nil {
+					reg.Delegation = regs[i].Delegation
 				}
 				regs[i] = reg
 				return regs, true
@@ -330,10 +349,13 @@ func (s *Server) removeRegistration(ctx context.Context, name string) {
 	})
 	if s.secrets != nil {
 		key := tokenKey(name)
-		if removed != nil {
+		switch {
+		case removed != nil:
 			key = credentialKeyForRegistration(*removed)
-		} else if liveOK && live.selfService {
+		case liveOK && live.selfService:
 			key = selfServiceTokenKey(live.owner, name)
+		case liveOK && live.delegation != nil:
+			key = DelegationKeyKey(name)
 		}
 		if err := s.secrets.Delete(ctx, key); err != nil && err != secretstore.ErrNotFound {
 			slog.Error("remove upstream secret failed", "upstream", name, "err", err)
@@ -360,6 +382,9 @@ func (s *Server) revokeRegistration(ctx context.Context, name string) error {
 	})
 	if found == nil && liveOK {
 		found = &upstreamReg{Name: name, URL: live.conn.Endpoint(), Owner: live.owner, SelfService: live.selfService, Template: live.template, Revoked: true}
+		if live.delegation != nil {
+			found.Strategy = StrategyGoogleDWD
+		}
 	}
 	if found == nil {
 		return fmt.Errorf("unknown upstream %q", name)
@@ -433,38 +458,65 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 			_ = s.registerUpstream(reg.Name, &upstream{conn: u, provenance: "preloaded"}, append(opts, WithRevoked())...)
 			continue
 		}
-		switch reg.authKind() {
-		case authNone:
-			// No credential — reconnect as-is (its tools/list is reachable unauthenticated).
-		case authStatic:
+		if err := validateStrategy(reg); err != nil {
+			// A contradictory record must not reload under the wrong
+			// caller-to-credential mapping.
+			slog.Warn("reload upstream skipped: invalid credential strategy", "upstream", reg.Name, "err", err)
+			continue
+		}
+		if reg.strategyKind() == StrategyGoogleDWD {
+			// Delegated connection: the stored service-account key plus the
+			// registry's non-secret config rebuild the per-caller token source.
 			if s.secrets == nil {
 				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
 				continue
 			}
-			raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
+			raw, err := s.secrets.Load(ctx, DelegationKeyKey(reg.Name))
 			if err != nil {
-				slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
+				slog.Warn("reload delegated upstream failed: service-account key unavailable", "upstream", reg.Name, "err", err)
 				continue
 			}
-			u.Token = string(raw)
-		default: // authOAuth
-			if s.secrets == nil {
-				slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
+			src, err := buildDelegatedSource(*reg.Delegation, raw)
+			if err != nil {
+				slog.Warn("reload delegated upstream failed", "upstream", reg.Name, "err", err)
 				continue
 			}
-			raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
-			if err != nil {
-				if err != secretstore.ErrNotFound {
-					slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
+			u.Bearer = delegatedBearer(src)
+			opts = append(opts, WithDelegation(src))
+		} else {
+			switch reg.authKind() {
+			case authNone:
+				// No credential — reconnect as-is (its tools/list is reachable unauthenticated).
+			case authStatic:
+				if s.secrets == nil {
+					slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
+					continue
 				}
-				continue
+				raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
+				if err != nil {
+					slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
+					continue
+				}
+				u.Token = string(raw)
+			default: // authOAuth
+				if s.secrets == nil {
+					slog.Warn("reload upstream skipped: no secret store", "upstream", reg.Name)
+					continue
+				}
+				raw, err := s.secrets.Load(ctx, credentialKeyForRegistration(reg))
+				if err != nil {
+					if err != secretstore.ErrNotFound {
+						slog.Warn("reload upstream failed", "upstream", reg.Name, "err", err)
+					}
+					continue
+				}
+				var rec auth.TokenRecord
+				if err := json.Unmarshal(raw, &rec); err != nil {
+					slog.Warn("reload upstream: bad token record", "upstream", reg.Name, "err", err)
+					continue
+				}
+				u.Bearer = s.refreshingBearerAtKey(reg.Name, credentialKeyForRegistration(reg), auth.TokenFromRecord(rec), 0, reg.SelfService)
 			}
-			var rec auth.TokenRecord
-			if err := json.Unmarshal(raw, &rec); err != nil {
-				slog.Warn("reload upstream: bad token record", "upstream", reg.Name, "err", err)
-				continue
-			}
-			u.Bearer = s.refreshingBearerAtKey(reg.Name, credentialKeyForRegistration(reg), auth.TokenFromRecord(rec), 0, reg.SelfService)
 		}
 		var aerr error
 		if reg.Discover {

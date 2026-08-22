@@ -123,6 +123,13 @@ type Server struct {
 	// up to full capture. Set once at wiring time, before the server serves.
 	multiPrincipal bool
 
+	// delegatedEmail resolves a caller subject to their provider-verified
+	// email — the identity delegated (google-dwd) connections act as. Wired
+	// from the federated sign-in identity table (SetDelegatedEmailLookup),
+	// before the server serves; nil means no caller has one, so delegated
+	// connections are hidden and fail closed.
+	delegatedEmail func(subject string) string
+
 	// Three concern-scoped stores, each with its OWN mutex — previously one shared
 	// mutex guarded runs, upstreams, tool usage, OAuth flows, and minimize policies
 	// alike. Splitting them cuts the blast radius (a change to run tracking can't
@@ -200,16 +207,20 @@ type runRecord struct {
 	// types, string byte counts); ArgsSHA256 is the hex SHA-256 of the
 	// canonicalized arguments, so a claimed argument set stays verifiable
 	// against the signed chain. Both set only under "structure" capture.
-	ArgsShape   json.RawMessage `json:"args_shape,omitempty"`
-	ArgsSHA256  string          `json:"args_sha256,omitempty"`
-	User        string          `json:"user,omitempty"`     // the OAuth sub that ran it; admin-plane records carry the acting operator token's name
-	Reason      string          `json:"reason,omitempty"`   // operator-supplied justification (required for ref materialization)
-	Campaign    string          `json:"campaign,omitempty"` // signed caller campaign claim
-	GrantID     string          `json:"grant_id,omitempty"`
-	GrantDigest string          `json:"grant_digest,omitempty"`
-	Effect      string          `json:"effect,omitempty"`
-	ResourceIDs []string        `json:"resource_ids,omitempty"`
-	Session     string          `json:"session,omitempty"` // per-run SPIFFE identity
+	ArgsShape  json.RawMessage `json:"args_shape,omitempty"`
+	ArgsSHA256 string          `json:"args_sha256,omitempty"`
+	User       string          `json:"user,omitempty"`   // the OAuth sub that ran it; admin-plane records carry the acting operator token's name
+	Reason     string          `json:"reason,omitempty"` // operator-supplied justification (required for ref materialization)
+	// DelegatedIdentity is the provider identity a delegated (google-dwd) call
+	// acted as — the derived subject — recorded beside the caller identity so
+	// the audit trail shows both who called and who the upstream saw.
+	DelegatedIdentity string   `json:"delegated_identity,omitempty"`
+	Campaign          string   `json:"campaign,omitempty"` // signed caller campaign claim
+	GrantID           string   `json:"grant_id,omitempty"`
+	GrantDigest       string   `json:"grant_digest,omitempty"`
+	Effect            string   `json:"effect,omitempty"`
+	ResourceIDs       []string `json:"resource_ids,omitempty"`
+	Session           string   `json:"session,omitempty"` // per-run SPIFFE identity
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.

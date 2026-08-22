@@ -113,6 +113,11 @@ func configureBuiltInFederation(builtInAS *auth.AuthServer, srv *mcp.Server, cfg
 	}
 	builtInAS.ConfigureFederation(fed)
 	builtInAS.LoadFederatedIdentities(ssoIdentitiesPathFor(cfg.authDir))
+	// Delegated (google-dwd) connections act as the caller's provider-verified
+	// email, which federation records at sign-in. This lookup is the only
+	// source of that mapping; without federation it stays unset and delegated
+	// connections fail closed for every caller.
+	srv.SetDelegatedEmailLookup(builtInAS.FederatedEmail)
 	return true, nil
 }
 

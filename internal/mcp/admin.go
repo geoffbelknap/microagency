@@ -41,6 +41,7 @@ type RunInfo struct {
 	ArgsSHA256           string          `json:"args_sha256,omitempty"`
 	User                 string          `json:"user,omitempty"`
 	Reason               string          `json:"reason,omitempty"`
+	DelegatedIdentity    string          `json:"delegated_identity,omitempty"`
 	Campaign             string          `json:"campaign,omitempty"`
 	GrantID              string          `json:"grant_id,omitempty"`
 	GrantDigest          string          `json:"grant_digest,omitempty"`
@@ -101,7 +102,7 @@ func (s *Server) RunLog() []RunInfo {
 			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
 			ArgsCapture: rec.ArgsCapture, ArgsShape: rec.ArgsShape, ArgsSHA256: rec.ArgsSHA256,
-			User: rec.User, Reason: rec.Reason, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
+			User: rec.User, Reason: rec.Reason, DelegatedIdentity: rec.DelegatedIdentity, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
 			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
@@ -237,6 +238,7 @@ func (s *Server) AdminHandler(opAuth OperatorAuth) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/grants", g(s.adminSetGrants))
 	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
 	mux.HandleFunc("POST /admin/upstreams/{name}/owner", g(s.adminSetOwner))
+	mux.HandleFunc("POST /admin/upstreams/{name}/delegation", g(s.adminUpdateDelegation))
 	mux.HandleFunc("GET /admin/oauth-scopes", g(s.adminOAuthScopes))
 	mux.HandleFunc("GET /admin/provider-params", g(s.adminProviderParams))
 	mux.HandleFunc("GET /admin/registry", g(s.adminRegistrySearch))
@@ -332,6 +334,15 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		// most enterprise IdPs). When set, they seed the stored client and skip DCR.
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
+		// Strategy selects how a calling principal maps to upstream authority.
+		// "" and "static" are today's shared-credential behavior. "google-dwd"
+		// requires Delegation (non-secret config) and ServiceAccountKey (the
+		// provider's JSON key document, stored only in the secret store).
+		// "per-user-oauth" is refused here: those connections are created by
+		// each user from an operator-approved connection template.
+		Strategy          string             `json:"strategy"`
+		Delegation        *DelegationSummary `json:"delegation"`
+		ServiceAccountKey string             `json:"service_account_key"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -355,6 +366,41 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.URL = scopedURL
+	// Credential-strategy dispatch. Contradictory inputs are invalid
+	// configuration and fail closed, naming both sides.
+	switch in.Strategy {
+	case "", StrategyStatic:
+		if in.Delegation != nil || in.ServiceAccountKey != "" {
+			http.Error(w, "delegation config and service_account_key require strategy \"google-dwd\"; set it, or drop them", http.StatusBadRequest)
+			return
+		}
+	case StrategyGoogleDWD:
+		if in.Token != "" {
+			http.Error(w, "token and strategy \"google-dwd\" are mutually exclusive: a delegated connection derives a per-caller credential and cannot also hold a static bearer; drop one of them", http.StatusBadRequest)
+			return
+		}
+		state, code, err := s.addDelegatedUpstream(r.Context(), in.Name, in.URL, in.Discover, in.ReadOnly, in.Owner, in.Delegation, in.ServiceAccountKey)
+		if err != nil {
+			http.Error(w, err.Error(), code)
+			return
+		}
+		rec, _ := s.snapshotUpstream(in.Name)
+		resp := map[string]any{"name": in.Name, "state": state, "read_only": in.ReadOnly, "owner": in.Owner, "strategy": StrategyGoogleDWD}
+		if rec.delegation != nil {
+			resp["delegation"] = DelegationInfo{
+				ClientEmail: rec.delegation.ClientEmail(), TokenEndpoint: rec.delegation.TokenEndpoint(),
+				Scopes: rec.delegation.Scopes(), KeyConfigured: true,
+			}
+		}
+		writeJSON(w, http.StatusCreated, resp)
+		return
+	case StrategyPerUserOAuth:
+		http.Error(w, "per-user-oauth connections are created by each user from an operator-approved connection template (POST /admin/connection-templates), not on this surface", http.StatusBadRequest)
+		return
+	default:
+		http.Error(w, "unknown credential strategy "+strconv.Quote(in.Strategy)+"; one of: static, per-user-oauth, google-dwd", http.StatusBadRequest)
+		return
+	}
 	u := &gateway.Upstream{Name: in.Name, URL: in.URL, Token: in.Token, Client: s.upstreamClient}
 	// No static token → probe for OAuth. If the upstream requires it, start the web
 	// flow and return an authorize URL for the operator's browser to visit (no PAT).

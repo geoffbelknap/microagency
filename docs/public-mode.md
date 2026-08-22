@@ -112,7 +112,9 @@ and completes the client's authorization. Each token's subject is the
 provider's stable `sub` claim, so every account is a distinct principal:
 connections, parked references, and grants are scoped per person exactly as
 under an external issuer. The provider-verified email is recorded alongside
-for display; identity comparisons use only the subject.
+for display and as the acting identity for
+[delegated connections](delegated-access.md); identity comparisons use only
+the subject.
 
 With `--sso-hd`, the ID token must carry that exact `hd` (hosted domain)
 claim. An account outside the domain is refused during sign-in, before any

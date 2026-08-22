@@ -282,6 +282,9 @@ func templateClientKey(template string) string {
 }
 
 func credentialKeyForRegistration(reg upstreamReg) string {
+	if reg.strategyKind() == StrategyGoogleDWD {
+		return DelegationKeyKey(reg.Name)
+	}
 	if reg.SelfService && reg.Owner != "" {
 		return selfServiceTokenKey(reg.Owner, reg.Name)
 	}

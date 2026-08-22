@@ -380,8 +380,12 @@ func (s *Server) completeUpstreamOAuth(w http.ResponseWriter, r *http.Request, s
 		}
 		return
 	}
-	s.saveUpstreamTokenAtKey(flow.name, key, tok, flow.authGeneration, flow.selfService)                                                                                                                                   // persist only after the generation-bound registration commits
-	s.persistRegistrationRecord(upstreamReg{Name: flow.name, URL: flow.url, Discover: flow.discover, Auth: authOAuth, ReadOnly: flow.readOnly, Owner: flow.owner, SelfService: flow.selfService, Template: flow.template}) // reload across restarts
+	s.saveUpstreamTokenAtKey(flow.name, key, tok, flow.authGeneration, flow.selfService) // persist only after the generation-bound registration commits
+	reg := upstreamReg{Name: flow.name, URL: flow.url, Discover: flow.discover, Auth: authOAuth, ReadOnly: flow.readOnly, Owner: flow.owner, SelfService: flow.selfService, Template: flow.template}
+	if flow.selfService {
+		reg.Strategy = StrategyPerUserOAuth // the user's own grant IS the credential
+	}
+	s.persistRegistrationRecord(reg) // reload across restarts
 	// Apply the operator's read-only choice from onboarding (reauth preserves the
 	// existing setting, so it's only applied on a fresh add/discover).
 	if !flow.selfService && !flow.reauth && flow.readOnly {

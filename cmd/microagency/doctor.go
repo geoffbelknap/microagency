@@ -32,7 +32,7 @@ func runDoctor(args []string) {
 		case "-h", "--help", "help":
 			fmt.Fprintln(os.Stdout, "usage: microagency doctor")
 			fmt.Fprintln(os.Stdout, "  check runtime + engine health (server, secret store, public auth + tunnel,")
-			fmt.Fprintln(os.Stdout, "  query engines, microVM runtime, enforcement-hygiene bypasses)")
+			fmt.Fprintln(os.Stdout, "  delegated connections, query engines, microVM runtime, enforcement-hygiene bypasses)")
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
@@ -53,6 +53,7 @@ func runDoctor(args []string) {
 	}
 	reportSecretPosture(out)
 	reportAuthPosture(out)
+	reportDelegatedConnections(out)
 	tunnelOK, tunnelClause := reportTunnelHealth(out, pid != 0)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
@@ -150,6 +151,54 @@ func runDoctor(args []string) {
 
 func reportAuthPosture(out io.Writer) {
 	reportAuthPostureAt(out, authPosturePath(), optedUpConnections(mcp.ReadUpstreamRegistrations(microagencyDir())))
+}
+
+func reportDelegatedConnections(out io.Writer) {
+	reportDelegatedConnectionsAt(out, microagencyDir(), authPosturePath())
+}
+
+// reportDelegatedConnectionsAt renders each delegated (google-dwd) connection
+// and the two prerequisites every delegated call needs: the service-account
+// key in the secret store, and federated sign-in recording callers' verified
+// emails. Rendered only when a delegated connection exists; a secret store
+// that cannot be opened reports the key as unverified, never as present.
+func reportDelegatedConnectionsAt(out io.Writer, stateDir, posturePath string) {
+	var delegated []mcp.UpstreamRegistration
+	for _, reg := range mcp.ReadUpstreamRegistrations(stateDir) {
+		if reg.Strategy == mcp.StrategyGoogleDWD {
+			delegated = append(delegated, reg)
+		}
+	}
+	if len(delegated) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "  delegated access  per-caller upstream identity (google-dwd)")
+	store, storeErr := secretstore.Open(stateDir, os.Getenv, nil)
+	for _, reg := range delegated {
+		email := ""
+		scopes := 0
+		if reg.Delegation != nil {
+			email, scopes = reg.Delegation.ClientEmail, len(reg.Delegation.Scopes)
+		}
+		switch {
+		case storeErr != nil:
+			fmt.Fprintf(out, "    %-15s ⚠ key unverified — the secret store could not be opened: %v\n", reg.Name, storeErr)
+		default:
+			if _, err := store.Load(context.Background(), mcp.DelegationKeyKey(reg.Name)); err != nil {
+				fmt.Fprintf(out, "    %-15s ✗ service-account key missing — delegated calls will fail;\n", reg.Name)
+				fmt.Fprintf(out, "                    re-add it: POST /admin/upstreams/%s/delegation with service_account_key\n", reg.Name)
+			} else {
+				fmt.Fprintf(out, "    %-15s ✓ key present (acting service account %s, %d scopes)\n", reg.Name, dash(email), scopes)
+			}
+		}
+	}
+	posture, err := readAuthPosture(posturePath)
+	if err == nil && posture.SSOIssuer != "" {
+		fmt.Fprintf(out, "    email mapping   ✓ federated sign-in (%s) records callers' verified emails\n", posture.SSOIssuer)
+	} else {
+		fmt.Fprintln(out, "    email mapping   ✗ no federated sign-in — no caller has a provider-verified email, so")
+		fmt.Fprintln(out, "                    every delegated call will refuse; start with --sso-issuer to enable it")
+	}
 }
 
 // optedUpConnections returns the names of persisted connections opted up to
