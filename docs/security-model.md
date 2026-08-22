@@ -4,7 +4,7 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-21_
 
 The guarantees, and where each one is enforced:
 
@@ -60,6 +60,14 @@ The guarantees, and where each one is enforced:
   Governed invocations also use a separate signed decision ledger that is
   fsynced and anchored before upstream egress. A ledger or anchor failure
   refuses the call.
+- **Caller privacy in the shared log.** On a multi-user gateway (external
+  issuer), proxy records capture argument structure and a SHA-256 digest of
+  the canonicalized arguments instead of the values, so one operator-readable
+  file does not concentrate every caller's raw arguments. Single-user
+  deployments keep full capture. An operator can opt a connection back up to
+  full capture; the opt-up is marked on every record, listed on the
+  connection, and disclosed by `microagency doctor` (see
+  [the audit chain](audit.md)).
 - **Plane separation.** The operator surface (admin API and console) uses
   its own token. The public `/mcp` surface accepts audience-bound OAuth
   access tokens, or a separate user-supplied bearer in compatibility mode.

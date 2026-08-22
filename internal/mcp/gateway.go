@@ -61,6 +61,11 @@ type upstream struct {
 	// to reads so an org-scoped OAuth grant (e.g. Supabase across all projects) can't
 	// be used to mutate through microagency.
 	readOnly bool
+	// auditFullArgs opts this connection up to FULL argument capture in the
+	// audit log on a multi-principal gateway, where the default is structure +
+	// digest (see argcapture.go). Inert on single-principal deployments, which
+	// always capture full arguments. Disclosed in UpstreamList and by doctor.
+	auditFullArgs bool
 	// grants are immutable, operator-owned semantic capabilities. An empty set
 	// preserves the standard connection posture; high-assurance mode requires a
 	// matching grant and therefore treats empty as deny-all.
@@ -371,18 +376,21 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 
 // UpstreamInfo is an operator-facing view of one registered upstream (no token).
 type UpstreamInfo struct {
-	Name         string   `json:"name"`
-	URL          string   `json:"url"`
-	State        string   `json:"state"`           // "enabled" | "discovered"
-	Provenance   string   `json:"provenance"`      // preloaded | catalog | discovered
-	ReadOnly     bool     `json:"read_only"`       // writes refused (least-privilege)
-	Owner        string   `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
-	SelfService  bool     `json:"self_service,omitempty"`
-	Template     string   `json:"template,omitempty"`
-	Revoked      bool     `json:"revoked,omitempty"`
-	Tools        int      `json:"tools"` // count of advertised tools (shown per connection in the console)
-	GrantCount   int      `json:"grant_count,omitempty"`
-	GrantDigests []string `json:"grant_digests,omitempty"`
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	State      string `json:"state"`           // "enabled" | "discovered"
+	Provenance string `json:"provenance"`      // preloaded | catalog | discovered
+	ReadOnly   bool   `json:"read_only"`       // writes refused (least-privilege)
+	Owner      string `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
+	// AuditFullArgs: this connection is opted up to full argument capture in the
+	// audit log on a multi-principal gateway (default there: structure + digest).
+	AuditFullArgs bool     `json:"audit_full_args,omitempty"`
+	SelfService   bool     `json:"self_service,omitempty"`
+	Template      string   `json:"template,omitempty"`
+	Revoked       bool     `json:"revoked,omitempty"`
+	Tools         int      `json:"tools"` // count of advertised tools (shown per connection in the console)
+	GrantCount    int      `json:"grant_count,omitempty"`
+	GrantDigests  []string `json:"grant_digests,omitempty"`
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
@@ -466,6 +474,20 @@ func (s *Server) SetUpstreamReadOnly(name string, ro bool) error {
 	return nil
 }
 
+// SetUpstreamAuditFullArgs toggles a connection's opt-up to full argument
+// capture in the audit log on a multi-principal gateway (the default there is
+// structure + digest). Errors if the upstream is unknown.
+func (s *Server) SetUpstreamAuditFullArgs(name string, on bool) error {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.auditFullArgs = on
+	return nil
+}
+
 // SetUpstreamGrants atomically replaces an upstream's operation authority.
 // Definitions are validated before the live record changes; duplicate IDs or
 // duplicate principal/campaign/tool tuples are refused as ambiguous.
@@ -525,7 +547,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
 			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
@@ -747,7 +769,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args, evaluated)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated)
+	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated, rec.auditFullArgs)
 	return out.result, true
 }
 
@@ -984,13 +1006,16 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string, evaluated *eva
 }
 
 // recordProxy writes an audit record for one aggregated-MCP tool call, so the
-// proxy path shows up in /admin/runs and /admin/metrics exactly like a run. The
-// full arguments are recorded (no redaction — audit means audit).
+// proxy path shows up in /admin/runs and /admin/metrics exactly like a run.
+// On a single-principal gateway the full arguments are recorded (no redaction —
+// the operator reading the log made the calls). On a multi-principal gateway
+// the record carries argument structure + digest instead, unless the connection
+// is opted up to full capture (fullCapture); see argcapture.go.
 // egressHost is the upstream host this call reached (mediated, cred-blind), or ""
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome, evaluated *evaluatedGrant) {
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome, evaluated *evaluatedGrant, fullCapture bool) {
 	exit, auditErr := 0, ""
 	if out.err != nil {
 		exit, auditErr = 1, out.err.Error()
@@ -1021,14 +1046,28 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 	if delivery == "program" {
 		contextBytes = 0 // the raw/intermediate response went to the sandbox only
 	}
-	recordedArgs := string(args)
+	recordedArgs, capture := string(args), ""
+	var argsShape json.RawMessage
+	argsDigest := ""
+	switch {
+	case s.multiPrincipalAudit() && !fullCapture:
+		// Multi-principal gateway: keep every caller's argument VALUES out of the
+		// shared operator-readable log; keep the record provable via the shape and
+		// the canonicalized-argument digest.
+		recordedArgs, capture = "", argsCaptureStructure
+		argsShape, argsDigest = argShape(args), argsSHA256(args)
+	case s.multiPrincipalAudit() && evaluated == nil:
+		capture = argsCaptureFull // this connection is explicitly opted up
+	}
 	if evaluated != nil {
 		// Governed records carry opaque resource identifiers instead of raw
 		// object arguments, so a fleet correlator does not need payload access.
+		// This blank wins over a full-capture opt-up.
 		recordedArgs = ""
 	}
 	record := runRecord{
 		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: recordedArgs,
+		ArgsCapture: capture, ArgsShape: argsShape, ArgsSHA256: argsDigest,
 		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
 		User: callerKey(ctx), Campaign: campaignOf(ctx),
 		InputBytes:      len(args), // the tool arguments are the call's input payload
