@@ -141,10 +141,11 @@ func TestAuthServerFullFlow(t *testing.T) {
 	}
 }
 
-// A refresh re-stamps the CURRENT single-user subject, not the one baked into the
-// old refresh token — so an upgraded binary (new OS-user attribution) corrects run
-// attribution without forcing the client to re-consent.
-func TestRefreshRestampsCurrentSubject(t *testing.T) {
+// A refresh honors the subject baked into the presented token. When the local
+// principal changes between issue and refresh, the session no longer belongs to
+// that identity, so the refresh is refused (forcing re-consent) rather than
+// silently rebound to the new subject.
+func TestRefreshRefusedOnSubjectChange(t *testing.T) {
 	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
 	if err != nil {
 		t.Fatal(err)
@@ -168,22 +169,62 @@ func TestRefreshRestampsCurrentSubject(t *testing.T) {
 		t.Fatal("no refresh token")
 	}
 
-	// The binary is upgraded: the current subject is now the real OS user.
-	as.Subject = "alice"
-
+	// Same subject: the refresh succeeds and honors the token's own sub.
 	status, rf := postForm(t, c, ts.URL+"/oauth/token", url.Values{
 		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
 	})
 	if status != http.StatusOK {
-		t.Fatalf("refresh = %d (%v)", status, rf)
+		t.Fatalf("same-subject refresh = %d (%v)", status, rf)
 	}
+	rotated, _ := rf["refresh_token"].(string)
 	rs := &ResourceServer{Issuer: testIss, Audience: testAud, Keys: signer.KeySet()}
 	p, err := rs.Validate(context.Background(), rf["access_token"].(string))
 	if err != nil {
 		t.Fatalf("refreshed token invalid: %v", err)
 	}
-	if p.Subject != "alice" {
-		t.Fatalf("refresh should re-stamp the current subject; got %q, want alice", p.Subject)
+	if p.Subject != "operator" {
+		t.Fatalf("refresh should honor the token subject; got %q, want operator", p.Subject)
+	}
+
+	// The local principal changes (upgraded binary, reconfigured Subject).
+	as.Subject = "alice"
+
+	// The rotated token still carries sub=operator, which no longer matches the
+	// server. The refresh is refused, and the client must re-consent.
+	status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {rotated}, "client_id": {clientID},
+	})
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("subject-changed refresh = %d (%v), want 400 invalid_grant", status, body)
+	}
+}
+
+// A refresh token minted before client binding and jti existed (the legacy
+// form) is refused outright in local mode — it is unrotatable and, lacking a
+// jti, unrevocable.
+func TestRefreshRejectsLegacyFormat(t *testing.T) {
+	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
+	mux := http.NewServeMux()
+	as.Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	// A legacy refresh JWT: correct audience and subject, but no client_id and
+	// no jti — exactly what older builds minted.
+	legacy, err := signer.mint(testIss, testAud+refreshAudienceSuffix, "operator", []string{"mcp"}, refreshTTL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {legacy}, "client_id": {""},
+	})
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("legacy refresh = %d (%v), want 400 invalid_grant", status, body)
 	}
 }
 

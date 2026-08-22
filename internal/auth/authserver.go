@@ -398,40 +398,43 @@ func (s *AuthServer) grantCode(w http.ResponseWriter, f url.Values) {
 }
 
 func (s *AuthServer) grantRefresh(w http.ResponseWriter, f url.Values) {
-	_, scope, clientID, tokenID, expiry, ok := s.parseRefreshGrant(f.Get("refresh_token"))
+	subject, scope, clientID, tokenID, expiry, ok := s.parseRefreshGrant(f.Get("refresh_token"))
 	requestedClientID := f.Get("client_id")
-	if clientID == "" && !s.requireResource {
-		// Upgrade path for refresh tokens minted before client binding and jti
-		// were added. A successful refresh replaces the legacy token with a
-		// bound, rotating token. Public OAuth never accepts this legacy form.
-		clientID = requestedClientID
-	}
-	if !ok || clientID == "" || clientID != requestedClientID || (s.requireResource && tokenID == "") {
+	// Every token this server mints carries a client_id and a jti, so requiring
+	// both accepts nothing legitimate. It drops only refresh tokens minted
+	// before client binding and jti existed: unrotatable and, with no jti, not
+	// revocable — a 30-day credential we cannot cut off. Pre-production, so
+	// there is no compatibility to preserve.
+	if !ok || clientID == "" || tokenID == "" || clientID != requestedClientID {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	if tokenID != "" {
-		consumed, err := s.revocations.Consume(tokenID, expiry)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-			return
-		}
-		if !consumed {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
-			return
-		}
-	}
-	// Single-user AS: the identity is always the current local principal, not the
-	// subject baked into an older refresh token. Re-stamp s.Subject so an upgraded
-	// binary (e.g. one that now attributes to the real OS user instead of the
-	// legacy "operator") corrects the attribution WITHOUT forcing re-consent. The
-	// refresh token still had to be one we signed — it proves the session, the
-	// identity is ours to set. This changes when microagency grows multi-principal.
+	// Honor the subject baked into the refresh token, not the server's current
+	// one. If the local principal has changed since this token was issued (an
+	// upgraded binary now attributing to a different OS user, or a reconfigured
+	// Subject), the session no longer belongs to that identity: refuse so the
+	// client re-consents rather than silently rebinding the session across the
+	// identity change. This changes when microagency grows multi-principal.
 	s.mu.Lock()
-	subject := s.Subject
+	current := s.Subject
 	s.mu.Unlock()
-	if subject == "" {
-		subject = "operator"
+	if current == "" {
+		current = "operator"
+	}
+	if subject != current {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	// Consume the rotating token's jti only after every other check passes, so a
+	// request we are going to refuse never burns the token.
+	consumed, err := s.revocations.Consume(tokenID, expiry)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+	if !consumed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		return
 	}
 	s.issueTokens(w, subject, scope, clientID)
 }
