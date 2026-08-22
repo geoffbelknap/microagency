@@ -864,7 +864,7 @@ func validateHTTPConfig(cfg httpConfig) error {
 	if cfg.issuer == "" && cfg.token == "" && !cfg.singleUser {
 		return fmt.Errorf("a public tunnel with built-in OAuth is single-user: every token it issues authenticates as %q, so different people connecting would be indistinguishable and would share connections, credentials, and parked data.\n"+
 			"  Serving only yourself: add --single-user to accept that posture.\n"+
-			"  Serving several people: validate an external identity provider's tokens with --issuer <url>.", localSubject())
+			"  Serving several people: validate an external identity provider's tokens with --issuer <url>", localSubject())
 	}
 	return nil
 }
