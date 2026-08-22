@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"microagency/internal/auth"
 	"microagency/internal/budget"
 	"microagency/internal/gateway"
 	"microagency/internal/refstore"
@@ -64,12 +65,14 @@ type upstream struct {
 	// preserves the standard connection posture; high-assurance mode requires a
 	// matching grant and therefore treats empty as deny-all.
 	grants []OperationGrant
-	// owner scopes this connection to ONE authenticated principal (by subject).
+	// owner scopes this connection to ONE authenticated principal, by canonical
+	// identity key (auth.PrincipalKey — issuer#subject, never a bare subject).
 	// "" = shared: every authenticated user of this gateway may find and invoke it.
 	// Non-empty: the connection — and the credential it holds — is invisible and
 	// uninvocable to every other principal, enforced at find_tools and at the
 	// invocation gate. This is what keeps one user's OAuth grant from being
-	// exercised by another user of a shared (--issuer) deployment.
+	// exercised by another user of a shared (--issuer) deployment, including a
+	// caller whose token asserts the same subject under a different issuer.
 	owner string
 	// selfService marks a principal-created connection. Its ownership is immutable:
 	// an operator may disable, revoke, or delete it, but cannot transfer an OAuth
@@ -133,8 +136,9 @@ func suggestionFor(tools []gateway.Tool) json.RawMessage {
 // is visible as shared.
 type UpstreamOption func(*upstream)
 
-// WithOwner scopes the connection to the principal with the given subject.
-func WithOwner(subject string) UpstreamOption { return func(u *upstream) { u.owner = subject } }
+// WithOwner scopes the connection to the principal with the given canonical
+// identity key (auth.PrincipalKey — issuer#subject).
+func WithOwner(key string) UpstreamOption { return func(u *upstream) { u.owner = key } }
 
 // WithSelfService marks a connection as created by its owning principal from an
 // operator-approved template.
@@ -372,7 +376,7 @@ type UpstreamInfo struct {
 	State        string   `json:"state"`           // "enabled" | "discovered"
 	Provenance   string   `json:"provenance"`      // preloaded | catalog | discovered
 	ReadOnly     bool     `json:"read_only"`       // writes refused (least-privilege)
-	Owner        string   `json:"owner,omitempty"` // principal subject this connection is scoped to; "" = shared
+	Owner        string   `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	SelfService  bool     `json:"self_service,omitempty"`
 	Template     string   `json:"template,omitempty"`
 	Revoked      bool     `json:"revoked,omitempty"`
@@ -397,9 +401,17 @@ type UpstreamInfo struct {
 	LastErrorAt string `json:"last_error_at,omitempty"` // RFC3339 of the last failed call
 }
 
-// SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to one
-// principal's subject. Errors if the upstream is unknown.
+// SetUpstreamOwner scopes (or, with "", un-scopes) a registered connection to
+// one principal's canonical identity key (auth.PrincipalKey — issuer#subject).
+// A bare subject is refused: it matches no authenticated caller, so accepting
+// it would silently scope the connection to nobody. Errors if the upstream is
+// unknown.
 func (s *Server) SetUpstreamOwner(name, owner string) error {
+	if owner != "" {
+		if _, _, err := auth.SplitPrincipalKey(owner); err != nil {
+			return fmt.Errorf("gateway: owner: %w", err)
+		}
+	}
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	rec, ok := s.reg.conns[name]
@@ -482,9 +494,13 @@ func (s *Server) SetUpstreamGrants(name string, grants []OperationGrant) error {
 	return nil
 }
 
-func matchingGrant(rec upstream, principal, campaign, tool string) (OperationGrant, bool) {
+// matchingGrant selects the grant bound to the caller's canonical identity key
+// (issuer#subject), campaign, and exact tool. Grants store the composite key,
+// so a grant written for one issuer's subject never matches the same subject
+// asserted by another issuer.
+func matchingGrant(rec upstream, callerKey, campaign, tool string) (OperationGrant, bool) {
 	for _, grant := range rec.grants {
-		if grant.Principal == principal && grant.Campaign == campaign && grant.Tool == tool {
+		if grant.Principal == callerKey && grant.Campaign == campaign && grant.Tool == tool {
 			return grant, true
 		}
 	}
@@ -543,18 +559,18 @@ func (s *Server) RemoveUpstream(name string) bool {
 	return true
 }
 
-// indexedTools returns the searchable index FOR ONE PRINCIPAL: every registered
-// upstream's tools the subject may see — shared connections plus the ones owned
-// by that subject — namespaced and tagged with enabled (invocable) + provenance.
-// Kept OUT of tools/list so the model's context isn't flooded with the whole
-// catalog. An owned connection never appears in another principal's index; the
-// invocation gate enforces the same boundary, so this filter is minimization,
-// not the only line of defense.
-func (s *Server) indexedTools(subject string) []map[string]any {
-	return s.indexedToolsFor(subject, "local")
+// indexedTools returns the searchable index FOR ONE PRINCIPAL, identified by
+// canonical identity key: every registered upstream's tools that caller may
+// see — shared connections plus the ones owned by that key — namespaced and
+// tagged with enabled (invocable) + provenance. Kept OUT of tools/list so the
+// model's context isn't flooded with the whole catalog. An owned connection
+// never appears in another principal's index; the invocation gate enforces the
+// same boundary, so this filter is minimization, not the only line of defense.
+func (s *Server) indexedTools(callerKey string) []map[string]any {
+	return s.indexedToolsFor(callerKey, "local")
 }
 
-func (s *Server) indexedToolsFor(subject, campaign string) []map[string]any {
+func (s *Server) indexedToolsFor(callerKey, campaign string) []map[string]any {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
@@ -562,12 +578,12 @@ func (s *Server) indexedToolsFor(subject, campaign string) []map[string]any {
 		if rec.revoked {
 			continue
 		}
-		if rec.owner != "" && rec.owner != subject {
+		if rec.owner != "" && rec.owner != callerKey {
 			continue
 		}
 		for _, t := range rec.tools {
 			if s.highAssurance || len(rec.grants) > 0 {
-				grant, ok := matchingGrant(*rec, subject, campaign, t.Name)
+				grant, ok := matchingGrant(*rec, callerKey, campaign, t.Name)
 				if !ok || (s.highAssurance && !grant.HighAssurance) || (rec.owner == "" && !grant.AllowShared) {
 					continue
 				}
@@ -625,7 +641,7 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	if !found {
 		return nil, false
 	}
-	principal, campaign := principalOf(ctx).Subject, campaignOf(ctx)
+	principal, campaign := callerKey(ctx), campaignOf(ctx)
 	deny := func(connection, grantID, digest, reason string) (map[string]any, bool) {
 		ledgerErr := s.refuseDecision(principal, campaign, connection, tool, grantID, digest, reason)
 		s.recordGovernedDenial(ctx, connection, tool, grantID, digest, reason, ledgerErr)
@@ -655,8 +671,10 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 	}
 	// Ownership gate: a connection scoped to one principal is INVISIBLE to every
 	// other — same error as an unregistered tool, so a probing caller can't even
-	// learn the connection exists, let alone exercise its credential.
-	if rec.owner != "" && rec.owner != principalOf(ctx).Subject {
+	// learn the connection exists, let alone exercise its credential. Compared by
+	// canonical identity key, so the same subject under a different issuer is
+	// "every other", not the owner.
+	if rec.owner != "" && rec.owner != principal {
 		if governed {
 			return deny(upName, grantID, digest, "caller does not own the connection")
 		}
@@ -738,7 +756,7 @@ func (s *Server) recordGovernedDenial(ctx context.Context, upstream, tool, grant
 		reason += "; decision record: " + ledgerErr.Error()
 	}
 	s.putRun(s.nextRunID(), runRecord{
-		Kind: "decision", Upstream: upstream, Tool: tool, User: principalOf(ctx).Subject,
+		Kind: "decision", Upstream: upstream, Tool: tool, User: callerKey(ctx),
 		Campaign: campaignOf(ctx), GrantID: grantID, GrantDigest: digest,
 		ExitCode: 1, AuditErr: reason,
 	})
@@ -873,7 +891,7 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 			if !rehydrated && len(payload) < len(res)/2 {
 				stored = string(res) // extraction dropped data — ref the full result instead
 			}
-			ref, sum := s.budget.Store.Put(stored, principalOf(ctx).Subject)
+			ref, sum := s.budget.Store.Put(stored, callerKey(ctx))
 			return proxyOutcome{result: s.refHandleResult(ref, sum, name), rawBytes: max(len(res), len(stored)), outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
@@ -1012,7 +1030,7 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 	record := runRecord{
 		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: recordedArgs,
 		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
-		User: principalOf(ctx).Subject, Campaign: campaignOf(ctx),
+		User: callerKey(ctx), Campaign: campaignOf(ctx),
 		InputBytes:      len(args), // the tool arguments are the call's input payload
 		RawBytes:        out.rawBytes,
 		ParkedBytes:     parkedBytes,

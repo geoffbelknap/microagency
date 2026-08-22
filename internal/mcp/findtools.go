@@ -55,7 +55,7 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 	if err != nil {
 		response := toolError("find_tools: %v", err)
 		s.putRun(s.nextRunID(), runRecord{
-			Kind: "discovery", User: principalOf(ctx).Subject,
+			Kind: "discovery", User: callerKey(ctx),
 			LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
 			OutputBytes: marshalLen(response), ContextMeasured: true,
 			ExitCode: 1, AuditErr: err.Error(),
@@ -70,7 +70,7 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		limit = 50 // clamp to the max, rather than snapping back to the default
 	}
 	// The index is scoped to the caller: shared connections + the caller's own.
-	allIndexed := s.indexedToolsFor(principalOf(ctx).Subject, campaignOf(ctx))
+	allIndexed := s.indexedToolsFor(callerKey(ctx), campaignOf(ctx))
 	indexed := allIndexed
 	if allowed != nil {
 		indexed = make([]map[string]any, 0, len(allowed))
@@ -171,7 +171,7 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		outputBytes = 0 // delivered to the sandbox, not to model context
 	}
 	s.putRun(s.nextRunID(), runRecord{
-		Kind: "discovery", TaskID: taskID, User: principalOf(ctx).Subject,
+		Kind: "discovery", TaskID: taskID, User: callerKey(ctx),
 		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
 		LatencyMs: time.Since(start).Milliseconds(), InputBytes: len(in.Query),
 		OutputBytes: outputBytes, ContextMeasured: true,

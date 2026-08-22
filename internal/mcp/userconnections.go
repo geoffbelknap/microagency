@@ -259,18 +259,22 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func opaqueSubject(subject string) string {
-	sum := sha256.Sum256([]byte(subject))
+// opaquePrincipal derives the secret-path segment for one caller from the
+// canonical principal key (issuer#subject). Hashing the composite key keeps
+// raw identities out of secret paths AND keeps two issuers' identical subjects
+// on different paths — a bare-subject digest would collide them.
+func opaquePrincipal(key string) string {
+	sum := sha256.Sum256([]byte(key))
 	return base64.RawURLEncoding.EncodeToString(sum[:18])
 }
 
 func selfServiceTokenKey(owner, name string) string {
-	return "self-service/subjects/" + opaqueSubject(owner) + "/upstreams/" + name + "/token"
+	return "self-service/subjects/" + opaquePrincipal(owner) + "/upstreams/" + name + "/token"
 }
 
 func selfServiceClientKey(owner, template, upstreamURL string) string {
 	sum := sha256.Sum256([]byte(upstreamURL))
-	return "self-service/subjects/" + opaqueSubject(owner) + "/clients/" + template + "/" + base64.RawURLEncoding.EncodeToString(sum[:12])
+	return "self-service/subjects/" + opaquePrincipal(owner) + "/clients/" + template + "/" + base64.RawURLEncoding.EncodeToString(sum[:12])
 }
 
 func templateClientKey(template string) string {
@@ -289,8 +293,8 @@ func (s *Server) recordConnectionEvent(owner, name, action string) {
 }
 
 func (s *Server) reserveConnectionStart(owner, template string, maxPerUser, existingForTemplate, existingGlobal int, reauth bool) (string, error) {
-	if owner == "" || len(owner) > 512 || strings.ContainsRune(owner, '\x00') {
-		return "", errors.New("authenticated principal subject is missing or too long")
+	if owner == "" || len(owner) > 1024 || strings.ContainsRune(owner, '\x00') {
+		return "", errors.New("authenticated principal identity is missing or too long")
 	}
 	s.self.mu.Lock()
 	defer s.self.mu.Unlock()
@@ -689,7 +693,7 @@ type userConnectionInfo struct {
 }
 
 func (s *Server) userListConnections(w http.ResponseWriter, r *http.Request) {
-	owner := principalOf(r.Context()).Subject
+	owner := callerKey(r.Context())
 	all := s.UpstreamList()
 	out := make([]userConnectionInfo, 0, len(all))
 	for _, connection := range all {
@@ -797,7 +801,7 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	owner := principalOf(r.Context()).Subject
+	owner := callerKey(r.Context())
 	perTemplate, global := s.selfServiceCounts(owner, template.ID)
 	reservation, err := s.reserveConnectionStart(owner, template.ID, template.MaxPerUser, perTemplate, global, false)
 	if err != nil {
@@ -836,7 +840,7 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 
 func (s *Server) ownedSelfServiceConnection(ctx context.Context, name string) (upstream, bool) {
 	record, ok := s.snapshotUpstream(name)
-	if !ok || !record.selfService || record.owner != principalOf(ctx).Subject {
+	if !ok || !record.selfService || record.owner != callerKey(ctx) {
 		return upstream{}, false
 	}
 	return record, true
@@ -844,7 +848,7 @@ func (s *Server) ownedSelfServiceConnection(ctx context.Context, name string) (u
 
 func (s *Server) userRefreshConnection(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	owner := principalOf(r.Context()).Subject
+	owner := callerKey(r.Context())
 	if _, ok := s.ownedSelfServiceConnection(r.Context(), name); !ok {
 		s.recordConnectionEvent(owner, "", "refresh_denied")
 		http.Error(w, "unknown connection", http.StatusNotFound)
@@ -860,7 +864,7 @@ func (s *Server) userRefreshConnection(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Request, callback string) {
 	name := r.PathValue("name")
-	owner := principalOf(r.Context()).Subject
+	owner := callerKey(r.Context())
 	record, ok := s.ownedSelfServiceConnection(r.Context(), name)
 	if !ok {
 		s.recordConnectionEvent(owner, "", "reauthorize_denied")
@@ -923,7 +927,7 @@ func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) userDeleteConnection(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	owner := principalOf(r.Context()).Subject
+	owner := callerKey(r.Context())
 	record, ok := s.ownedSelfServiceConnection(r.Context(), name)
 	if !ok {
 		s.recordConnectionEvent(owner, "", "delete_denied")

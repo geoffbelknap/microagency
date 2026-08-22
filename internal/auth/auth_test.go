@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,4 +151,45 @@ func withoutClaim(c jwt.MapClaims, k string) jwt.MapClaims {
 		}
 	}
 	return out
+}
+
+func TestPrincipalKeyCompositeIdentity(t *testing.T) {
+	a := (&Principal{Subject: "alice", Issuer: "https://issuer-a.test"}).Key()
+	b := (&Principal{Subject: "alice", Issuer: "https://issuer-b.test"}).Key()
+	if a == b {
+		t.Fatal("two issuers asserting the same subject must yield distinct keys")
+	}
+	if a != "https://issuer-a.test#alice" {
+		t.Fatalf("canonical form = %q", a)
+	}
+	iss, sub, err := SplitPrincipalKey(a)
+	if err != nil || iss != "https://issuer-a.test" || sub != "alice" {
+		t.Fatalf("split = %q %q %v", iss, sub, err)
+	}
+}
+
+func TestPrincipalKeyEscapingRoundTrips(t *testing.T) {
+	for _, tc := range [][2]string{
+		{"local", "local"},
+		{"https://issuer.test", "user#with#hash"},
+		{"weird#issuer", "sub%25percent"},
+		{"%", "#"},
+	} {
+		key := PrincipalKey(tc[0], tc[1])
+		if strings.Count(key, "#") != 1 {
+			t.Fatalf("key %q must contain exactly one separator", key)
+		}
+		iss, sub, err := SplitPrincipalKey(key)
+		if err != nil || iss != tc[0] || sub != tc[1] {
+			t.Fatalf("round trip (%q,%q) → %q → (%q,%q,%v)", tc[0], tc[1], key, iss, sub, err)
+		}
+	}
+}
+
+func TestSplitPrincipalKeyRejectsNonCanonicalForms(t *testing.T) {
+	for _, bad := range []string{"", "alice", "#alice", "issuer#", "a#b#c"} {
+		if _, _, err := SplitPrincipalKey(bad); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
 }

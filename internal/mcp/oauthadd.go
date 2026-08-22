@@ -30,8 +30,9 @@ type oauthFlow struct {
 	discover  bool
 	reauth    bool // re-authorizing an already-registered upstream (rebind, don't re-add)
 	readOnly  bool // apply the read-only restriction once the upstream is registered
-	// owner scopes the connection to one principal's subject at registration
-	// ("" = shared). Reauth flows leave it empty — rebind preserves the record.
+	// owner scopes the connection to one principal's canonical identity key
+	// (issuer#subject) at registration ("" = shared). Reauth flows leave it
+	// empty — rebind preserves the record.
 	owner        string
 	meta         *auth.ASMetadata
 	clientID     string

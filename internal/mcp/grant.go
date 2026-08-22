@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"microagency/internal/auth"
 )
 
 const (
@@ -30,11 +32,15 @@ const (
 // lives beside a connection, never in agent arguments, and is evaluated again
 // at the last invocation gate before any upstream call.
 type OperationGrant struct {
-	Version     string           `json:"version"`
-	ID          string           `json:"id"`
-	Connection  string           `json:"connection"`
-	Tool        string           `json:"tool"`
-	Effect      string           `json:"effect"`
+	Version    string `json:"version"`
+	ID         string `json:"id"`
+	Connection string `json:"connection"`
+	Tool       string `json:"tool"`
+	Effect     string `json:"effect"`
+	// Principal is the caller's canonical identity key: the composite
+	// issuer#subject form (auth.PrincipalKey). A bare token subject is refused
+	// at validation, so a grant can never bind to "whichever issuer happens to
+	// assert this subject".
 	Principal   string           `json:"principal"`
 	Campaign    string           `json:"campaign"`
 	ExpiresAt   string           `json:"expires_at"`
@@ -168,6 +174,9 @@ func validateOperationGrant(grant OperationGrant, connection string) (OperationG
 	if grant.Principal == "" || grant.Campaign == "" {
 		return OperationGrant{}, fmt.Errorf("grant requires principal and campaign ownership")
 	}
+	if _, _, err := auth.SplitPrincipalKey(grant.Principal); err != nil {
+		return OperationGrant{}, fmt.Errorf("grant.principal: %w", err)
+	}
 	expiry, err := time.Parse(time.RFC3339, grant.ExpiresAt)
 	if err != nil || expiry.IsZero() {
 		return OperationGrant{}, fmt.Errorf("grant.expires_at must be RFC3339")
@@ -254,8 +263,8 @@ func validateOperationGrant(grant OperationGrant, connection string) (OperationG
 	return grant, nil
 }
 
-func evaluateOperationGrant(grant OperationGrant, principal, campaign, tool string, args json.RawMessage, now time.Time) (evaluatedGrant, error) {
-	if principal != grant.Principal || campaign == "" || campaign != grant.Campaign {
+func evaluateOperationGrant(grant OperationGrant, callerKey, campaign, tool string, args json.RawMessage, now time.Time) (evaluatedGrant, error) {
+	if callerKey != grant.Principal || campaign == "" || campaign != grant.Campaign {
 		return evaluatedGrant{}, fmt.Errorf("caller authority does not match grant ownership")
 	}
 	if tool != grant.Tool {

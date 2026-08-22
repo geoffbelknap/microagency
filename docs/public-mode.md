@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-22_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -85,10 +85,14 @@ port. Configure `--issuer` with the external authorization server in that mode.
 Connections are operator-curated and shared by default: every authenticated
 user of the gateway can find and invoke them, against the one set of
 credentials the gateway holds. To restrict a connection to a single user,
-set its `owner` to that user's token subject, at add time or from the
-console. Other users can't see or call an owned connection or the credential
+set its `owner` to that user's principal key, at add time or from the
+console. A principal key is `issuer#subject` — for example
+`https://issuer.example#user-123` — with any literal `#` or `%` inside either
+half written as `%23` or `%25`. Identity is the issuer and subject together,
+so tokens from two issuers that assert the same `sub` are two different
+users. Other users can't see or call an owned connection or the credential
 it holds; the index and the invocation gate both enforce it. Off-context
-results are scoped the same way: each `<ref_>` is bound to the subject
+results are scoped the same way: each `<ref_>` is bound to the principal
 that created it, so one user can't reduce over another's parked data even
 with the handle.
 
@@ -168,8 +172,9 @@ registration.
 
 Each self-service token, dynamic client registration, pending OAuth request,
 connection record, tool view, and reference is keyed or checked against the
-token subject. Secret-store paths use a one-way subject digest rather than the
-raw identity. A connection name or `<ref_>` handle is not authority. If an
+caller's principal key — the token issuer and subject together. Secret-store
+paths use a one-way digest of that key rather than the raw identity. A
+connection name or `<ref_>` handle is not authority. If an
 identity changes or disappears, its old resources remain inaccessible; ownership
 cannot be transferred because the OAuth grant belongs to the original identity.
 The operator must revoke or delete those resources, and the new identity creates

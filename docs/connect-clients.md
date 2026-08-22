@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-22_
 
 ## Built-in OAuth (the default)
 
@@ -67,7 +67,8 @@ fail-closed recovery, rotation, and backup procedures.
 
 In a multi-user self-service deployment, each upstream token and dynamic
 client record uses a principal-specific secret-store path. The path contains a
-one-way digest of the token subject, not the raw identity. The non-secret
+one-way digest of the caller's principal key — the token issuer and subject
+together — not the raw identity. The non-secret
 connection index records ownership so the gateway can rebuild the same boundary
 after a restart. See [public mode](public-mode.md#allow-self-service-connections)
 for the operator template and user authorization flow.

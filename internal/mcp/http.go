@@ -35,7 +35,9 @@ func (s staticAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 			return nil, auth.ErrUnauthenticated
 		}
 	}
-	return &auth.Principal{Subject: "local"}, nil
+	// The static bearer authenticates one process-local caller; the fixed local
+	// issuer keeps its identity key stable across restarts and config changes.
+	return &auth.Principal{Subject: "local", Issuer: auth.LocalIssuer}, nil
 }
 
 // oauthAuth validates an OAuth/OIDC access token via the resource server and,

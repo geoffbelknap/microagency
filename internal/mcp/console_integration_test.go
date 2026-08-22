@@ -57,10 +57,10 @@ func TestConsoleAffordancesMatchAdminAPI(t *testing.T) {
 		t.Fatalf("enable: %d %s", code, out)
 	}
 	// owner — the scope-to-user modal's POST.
-	if code, out := call(http.MethodPost, "/admin/upstreams/docs/owner", `{"owner":"alice"}`); code != http.StatusOK {
+	if code, out := call(http.MethodPost, "/admin/upstreams/docs/owner", `{"owner":"`+pk("alice")+`"}`); code != http.StatusOK {
 		t.Fatalf("set owner: %d %s", code, out)
 	}
-	if code, out := call(http.MethodGet, "/admin/upstreams", ""); code != http.StatusOK || !strings.Contains(out, `"owner":"alice"`) || !strings.Contains(out, `"state":"enabled"`) {
+	if code, out := call(http.MethodGet, "/admin/upstreams", ""); code != http.StatusOK || !strings.Contains(out, `"owner":"`+pk("alice")+`"`) || !strings.Contains(out, `"state":"enabled"`) {
 		t.Fatalf("list after enable+scope: %d %s", code, out)
 	}
 	// verify — the audit-chain button's GET.

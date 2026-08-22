@@ -241,10 +241,20 @@ func TestRegisterUpstreamAtomic(t *testing.T) {
 	}
 }
 
+// testIssuer is the issuer test principals authenticate under. pk composes a
+// test subject's canonical identity key, the way auth.Principal.Key does.
+const testIssuer = "https://issuer.test"
+
+func pk(sub string) string { return auth.PrincipalKey(testIssuer, sub) }
+
+// localCallerKey is the canonical identity key of the synthetic local caller
+// (the stdio / static-bearer principal).
+func localCallerKey() string { return auth.PrincipalKey(auth.LocalIssuer, "local") }
+
 // withPrincipal returns a context authenticated as the given subject, the way
 // the HTTP layer injects it.
 func withPrincipal(sub string) context.Context {
-	return context.WithValue(context.Background(), principalKey, &auth.Principal{Subject: sub})
+	return context.WithValue(context.Background(), principalKey, &auth.Principal{Subject: sub, Issuer: testIssuer})
 }
 
 // An owner-scoped connection is invisible and uninvocable to every other
@@ -255,7 +265,7 @@ func TestOwnerScopedUpstreamIsolation(t *testing.T) {
 	ts := cannedUpstream(t)
 	defer ts.Close()
 	s := newTestServer(t, fakeRunner{})
-	if err := s.AddUpstream(context.Background(), "alicedocs", &gateway.Upstream{Name: "alicedocs", URL: ts.URL}, WithOwner("alice")); err != nil {
+	if err := s.AddUpstream(context.Background(), "alicedocs", &gateway.Upstream{Name: "alicedocs", URL: ts.URL}, WithOwner(pk("alice"))); err != nil {
 		t.Fatalf("add owned upstream: %v", err)
 	}
 	if err := s.AddUpstream(context.Background(), "shared", &gateway.Upstream{Name: "shared", URL: ts.URL}); err != nil {
@@ -263,10 +273,10 @@ func TestOwnerScopedUpstreamIsolation(t *testing.T) {
 	}
 
 	// find_tools: alice sees both; bob sees only the shared connection.
-	if got := len(s.indexedTools("alice")); got != 2 {
+	if got := len(s.indexedTools(pk("alice"))); got != 2 {
 		t.Fatalf("owner must see shared + own connections; got %d tools", got)
 	}
-	bobIdx := s.indexedTools("bob")
+	bobIdx := s.indexedTools(pk("bob"))
 	if len(bobIdx) != 1 || bobIdx[0]["name"].(string) != "shared__search" {
 		t.Fatalf("another principal must see ONLY shared connections; got %v", bobIdx)
 	}
@@ -299,7 +309,7 @@ func TestSetUpstreamOwner(t *testing.T) {
 	if err := s.AddUpstream(context.Background(), "docs", &gateway.Upstream{Name: "docs", URL: ts.URL}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if err := s.SetUpstreamOwner("docs", "carol"); err != nil {
+	if err := s.SetUpstreamOwner("docs", pk("carol")); err != nil {
 		t.Fatalf("set owner: %v", err)
 	}
 	if out, _ := s.invokeUpstream(withPrincipal("dave"), "docs__search", json.RawMessage(`{}`)); !out["isError"].(bool) {
@@ -308,10 +318,10 @@ func TestSetUpstreamOwner(t *testing.T) {
 	if out, _ := s.invokeUpstream(withPrincipal("carol"), "docs__search", json.RawMessage(`{"q":"x"}`)); out["isError"].(bool) {
 		t.Fatalf("the new owner must be able to invoke: %v", out)
 	}
-	if lst := s.UpstreamList(); len(lst) != 1 || lst[0].Owner != "carol" {
+	if lst := s.UpstreamList(); len(lst) != 1 || lst[0].Owner != pk("carol") {
 		t.Fatalf("operator view must report the owner: %+v", lst)
 	}
-	if err := s.SetUpstreamOwner("ghost", "x"); err == nil {
+	if err := s.SetUpstreamOwner("ghost", pk("x")); err == nil {
 		t.Fatal("scoping an unknown upstream must error")
 	}
 }
