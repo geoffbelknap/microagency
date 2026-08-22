@@ -153,18 +153,8 @@ func authorizeSelfServiceConnection(t *testing.T, fixture *selfServiceFixture, s
 	if started.Name == "" || started.AuthorizeURL == "" {
 		t.Fatalf("incomplete authorization response: %+v", started)
 	}
-	authorize, err := url.Parse(started.AuthorizeURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	form := authorize.Query()
-	form.Set("approve", "yes")
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	approved, err := noRedirect.PostForm(authorize.Scheme+"://"+authorize.Host+authorize.Path, form)
-	if err != nil {
-		t.Fatal(err)
-	}
-	approved.Body.Close()
+	approved := approveAtAS(t, noRedirect, started.AuthorizeURL)
 	if approved.StatusCode != http.StatusFound {
 		t.Fatalf("approve = %d, want 302", approved.StatusCode)
 	}

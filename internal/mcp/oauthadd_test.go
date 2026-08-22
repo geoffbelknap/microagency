@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,36 @@ import (
 	"microagency/internal/auth"
 	"microagency/internal/gateway"
 )
+
+// approveAtAS runs the browser consent flow at the AS: GET the consent page,
+// then POST the approval bound to the request ID the page carries.
+func approveAtAS(t *testing.T, c *http.Client, authURL string) *http.Response {
+	t.Helper()
+	page, err := c.Get(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if err != nil || page.StatusCode != http.StatusOK {
+		t.Fatalf("consent GET = %d (%v)", page.StatusCode, err)
+	}
+	m := regexp.MustCompile(`name="request" value="([^"]+)"`).FindSubmatch(body)
+	if m == nil {
+		t.Fatal("consent page has no request binding")
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := c.PostForm(u.Scheme+"://"+u.Host+u.Path,
+		url.Values{"request": {string(m[1])}, "approve": {"yes"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = approved.Body.Close()
+	return approved
+}
 
 // TestConsoleOAuthAddUpstream drives the whole console OAuth-add flow: POST the
 // upstream (no token) → get an authorize URL → the operator approves at the
@@ -91,13 +122,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	}
 
 	// 2. the operator approves at the upstream's AS → 302 back to our callback
-	au, _ := url.Parse(added.AuthorizeURL)
-	form := au.Query()
-	form.Set("approve", "yes")
-	approveResp, err := noRedirect.PostForm(au.Scheme+"://"+au.Host+au.Path, form)
-	if err != nil {
-		t.Fatal(err)
-	}
+	approveResp := approveAtAS(t, noRedirect, added.AuthorizeURL)
 	if approveResp.StatusCode != http.StatusFound {
 		t.Fatalf("approve = %d, want 302", approveResp.StatusCode)
 	}

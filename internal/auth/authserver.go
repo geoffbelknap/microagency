@@ -43,7 +43,7 @@ type AuthServer struct {
 	mu          sync.Mutex
 	clients     map[string]clientReg // client_id -> registration
 	codes       map[string]authCode  // auth code -> pending grant (single-use, short TTL)
-	pending     map[string]authCode  // public flow waiting for approval on the loopback listener
+	pending     map[string]authCode  // request-ID-bound grants awaiting the consent decision
 	clientsPath string               // if set, client registrations persist here across restarts
 
 	resource        string
@@ -214,23 +214,26 @@ func (s *AuthServer) register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorize renders the one-click consent page (GET) and issues an auth code on
-// approval (POST). An unregistered client or mismatched redirect_uri is a hard 400
-// — we never redirect to an unvetted URI.
+// authorize renders the one-click consent page (GET), bound to a pending grant
+// under an unguessable request ID. The consent decision arrives as a POST that
+// carries only that ID (localConsent); authorization parameters are never
+// accepted over POST. An unregistered client or mismatched redirect_uri is a
+// hard 400 — we never redirect to an unvetted URI.
 func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPost:
+		if s.approvalBase != "" {
+			http.Error(w, "public consent is decided on the operator listener", http.StatusMethodNotAllowed)
+			return
+		}
+		s.localConsent(w, r)
+		return
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	q := r.URL.Query()
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid authorization request", http.StatusBadRequest)
-			return
-		}
-		q = r.Form
-	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 	challenge := q.Get("code_challenge")
@@ -250,45 +253,103 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectErr(w, r, redirectURI, state, "invalid_request")
 		return
 	}
+	requestID, ok := s.storePending(authCode{
+		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
+		scope: scope, state: state, resource: resource,
+	})
+	if !ok {
+		http.Error(w, "too many pending authorization requests", http.StatusTooManyRequests)
+		return
+	}
 	if s.approvalBase != "" {
-		if r.Method != http.MethodGet {
-			http.Error(w, "public consent is decided on the operator listener", http.StatusMethodNotAllowed)
-			return
-		}
-		requestID := randToken(24)
-		s.mu.Lock()
-		s.prunePendingLocked(time.Now())
-		s.pending[requestID] = authCode{
-			clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
-			subject: s.currentSubjectLocked(), scope: scope, state: state,
-			resource: resource, expiry: time.Now().Add(5 * time.Minute),
-		}
-		s.mu.Unlock()
 		u := s.approvalBase + "/oauth/consent?request=" + url.QueryEscape(requestID)
 		http.Redirect(w, r, u, http.StatusSeeOther)
 		return
 	}
+	authui.WriteConsent(w, client.name, redirectURI, map[string]string{"request": requestID})
+}
 
-	if r.Method == http.MethodGet {
-		authui.WriteConsent(w, client.name, redirectURI, map[string]string{
-			"response_type": "code", "client_id": clientID, "redirect_uri": redirectURI,
-			"code_challenge": challenge, "code_challenge_method": "S256", "state": state, "scope": scope,
-		})
+// storePending records a pending grant under a fresh unguessable request ID,
+// stamping the current subject and a 5-minute expiry. It refuses when the
+// pending table is full, so an unauthenticated flood cannot grow memory
+// without bound.
+func (s *AuthServer) storePending(pending authCode) (string, bool) {
+	requestID := randToken(24)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prunePendingLocked(time.Now())
+	if len(s.pending) >= 4096 {
+		return "", false
+	}
+	pending.subject = s.currentSubjectLocked()
+	pending.expiry = time.Now().Add(5 * time.Minute)
+	s.pending[requestID] = pending
+	return requestID, true
+}
+
+// localConsent decides a pending local-mode authorization. Cross-site request
+// forgery is the live threat: any web page in the operator's browser can fire
+// a form POST at the loopback listener, and open client registration means the
+// attacker controls a registered redirect_uri. Two independent defenses: the
+// POST must carry the unguessable single-use request ID that only the consent
+// page this server rendered contains, and a request the browser labels
+// cross-site (Sec-Fetch-Site, Origin) is refused outright.
+func (s *AuthServer) localConsent(w http.ResponseWriter, r *http.Request) {
+	if reason := crossSiteReason(r); reason != "" {
+		http.Error(w, "cross-site consent refused ("+reason+")", http.StatusForbidden)
 		return
 	}
-	// POST = the consent decision.
-	if q.Get("approve") != "yes" {
-		s.redirectErr(w, r, redirectURI, state, "access_denied")
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid consent", http.StatusBadRequest)
+		return
+	}
+	requestID := r.Form.Get("request")
+	s.mu.Lock()
+	s.prunePendingLocked(time.Now())
+	pending, ok := s.pending[requestID]
+	if ok {
+		delete(s.pending, requestID) // single-use, even on deny
+	}
+	s.mu.Unlock()
+	if !ok || requestID == "" {
+		authui.WriteMessage(w, "This authorization request is missing, expired, or was already used.")
+		return
+	}
+	if r.Form.Get("approve") != "yes" {
+		s.redirectErr(w, r, pending.redirectURI, pending.state, "access_denied")
 		return
 	}
 	code := randToken(24)
+	pending.expiry = time.Now().Add(60 * time.Second)
 	s.mu.Lock()
-	s.codes[code] = authCode{
-		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
-		subject: s.currentSubjectLocked(), scope: scope, resource: resource, expiry: time.Now().Add(60 * time.Second),
-	}
+	s.codes[code] = pending
 	s.mu.Unlock()
-	s.redirectAuthorizationResult(w, r, redirectURI, state, "code", code)
+	s.redirectAuthorizationResult(w, r, pending.redirectURI, pending.state, "code", code)
+}
+
+// crossSiteReason reports why r must be refused as a cross-site browser
+// request, or "" when it is acceptable. Browsers label every request with
+// Sec-Fetch-Site and attach Origin to cross-origin POSTs: only same-origin
+// requests and user-initiated navigations ("none") pass, and a present Origin
+// must match the host being served. A client that sends neither header (curl,
+// tests) passes — forging consent still requires the unguessable request ID.
+func crossSiteReason(r *http.Request) string {
+	site := r.Header.Get("Sec-Fetch-Site")
+	switch strings.ToLower(site) {
+	case "", "same-origin", "none":
+	default:
+		return "Sec-Fetch-Site " + site
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
+		return "Origin " + origin
+	}
+	return ""
 }
 
 // operatorConsent is deliberately reachable only on the separate loopback
@@ -306,6 +367,10 @@ func (s *AuthServer) operatorConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := r.URL.Query().Get("request")
 	if r.Method == http.MethodPost {
+		if reason := crossSiteReason(r); reason != "" {
+			http.Error(w, "cross-site consent refused ("+reason+")", http.StatusForbidden)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "invalid consent", http.StatusBadRequest)
