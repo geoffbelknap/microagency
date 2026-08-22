@@ -31,7 +31,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -182,7 +182,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -294,7 +294,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

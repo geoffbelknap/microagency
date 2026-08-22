@@ -54,7 +54,7 @@ func newSelfServiceFixture(t *testing.T, maxPerUser int) *selfServiceFixture {
 	as := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + as.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "upstream", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "upstream", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"resource": upstreamResource, "authorization_servers": []string{asURL}})
