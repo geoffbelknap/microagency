@@ -83,8 +83,10 @@ func shell(title, extraHead, body string) string {
 
 // --- 1. Client consent -------------------------------------------------------
 
-// consentTmpl keeps the original contract: POST back with approve=yes|no and the
-// upstream authorize params replayed as hidden inputs from Fields.
+// consentTmpl POSTs back approve=yes|no plus the hidden Fields. For
+// microagency's own AS that is a single-use request ID binding the decision to
+// the pending grant — never replayed authorize parameters, which a cross-site
+// form could fabricate.
 var consentTmpl = template.Must(template.New("consent").Parse(shell(
 	"microagency — Approve", "", `
 <div class="card">

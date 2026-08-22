@@ -160,14 +160,11 @@ func TestAuthorizeURLResourceIndicator(t *testing.T) {
 	}
 }
 
-// approveAndCode POSTs the authorize params with approve=yes (simulating the
-// operator clicking Approve) and returns the issued auth code from the redirect.
+// approveAndCode runs the browser consent flow (simulating the operator
+// clicking Approve) and returns the issued auth code from the redirect.
 func approveAndCode(t *testing.T, c *http.Client, authURL string) string {
 	t.Helper()
-	u, _ := url.Parse(authURL)
-	form := u.Query()
-	form.Set("approve", "yes")
-	r, err := c.PostForm(u.Scheme+"://"+u.Host+u.Path, form)
+	r, err := browserConsent(c, authURL, "yes")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,7 @@ description: The signed, hash-chained log every call lands in, and how to verify
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-21_
+_Last updated: 2026-08-22_
 
 Every discovery, proxied call, and reduction is written to an append-only
 audit log. Each line is hash-chained to its predecessor and **signed** (ES256)
