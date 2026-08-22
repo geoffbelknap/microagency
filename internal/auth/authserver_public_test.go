@@ -30,11 +30,11 @@ func newPublicTestAS(t *testing.T) (*AuthServer, *httptest.Server, *httptest.Ser
 	if err != nil {
 		t.Fatal(err)
 	}
-	as := NewAuthServer(signer, publicIssuer, publicResource, time.Hour)
+	as := NewAuthServer(signer, publicIssuer, publicResource, time.Hour, revocations)
 	adminMux := http.NewServeMux()
 	admin := httptest.NewServer(adminMux)
 	t.Cleanup(admin.Close)
-	if err := as.ConfigurePublicFlow(publicResource, admin.URL, revocations); err != nil {
+	if err := as.ConfigurePublicFlow(publicResource, admin.URL); err != nil {
 		t.Fatal(err)
 	}
 	as.RegisterOperator(adminMux)

@@ -194,7 +194,7 @@ func TestOAuthClientFullFlowAgainstOwnAS(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()
@@ -262,7 +262,7 @@ func TestRefreshTokenSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a restart: a brand-new AuthServer (empty maps) with the SAME signer.
-	as2 := NewAuthServer(signer, issuer, aud, time.Hour)
+	as2 := NewAuthServer(signer, issuer, aud, time.Hour, nil)
 	sub, scope, ok := as2.parseRefresh(rt)
 	if !ok {
 		t.Fatal("refresh token rejected after restart — the session would force re-auth")

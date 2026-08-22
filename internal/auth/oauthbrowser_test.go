@@ -21,7 +21,7 @@ func TestAcquireInteractive(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()
@@ -69,7 +69,7 @@ func TestAcquireInteractiveDenied(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()

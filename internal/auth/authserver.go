@@ -76,12 +76,18 @@ type authCode struct {
 }
 
 // NewAuthServer builds an AS that issues for audience, identified by issuer (our
-// own URL). accessTTL defaults to 1h.
-func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Duration) *AuthServer {
+// own URL). accessTTL defaults to 1h. revocations is the single denylist that
+// /oauth/revoke writes and refresh rotation consumes; the caller hands the SAME
+// list to its ResourceServer so a revoked token stops validating immediately,
+// and passes a file-backed list so rotation state survives restarts. A nil
+// revocations falls back to an ephemeral in-memory list for tests.
+func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Duration, revocations *RevocationList) *AuthServer {
 	if accessTTL <= 0 {
 		accessTTL = time.Hour
 	}
-	revocations, _ := NewRevocationList("")
+	if revocations == nil {
+		revocations, _ = NewRevocationList("")
+	}
 	return &AuthServer{
 		signer: signer, issuer: issuer, audience: audience, accessTTL: accessTTL,
 		clients: map[string]clientReg{}, codes: map[string]authCode{}, pending: map[string]authCode{},
@@ -94,7 +100,7 @@ func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Durat
 // human consent decision to approvalBase, which must be an HTTP loopback origin
 // served by the separate operator listener. The operator credential therefore
 // never crosses the public tunnel.
-func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string, revocations *RevocationList) error {
+func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string) error {
 	u, err := url.Parse(approvalBase)
 	if err != nil || u.Scheme != "http" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("public OAuth approval URL must be a loopback HTTP origin")
@@ -102,12 +108,8 @@ func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string, revocati
 	if strings.TrimSpace(resource) == "" {
 		return fmt.Errorf("public OAuth resource must be non-empty")
 	}
-	if revocations == nil {
-		return fmt.Errorf("public OAuth revocation list is required")
-	}
 	s.resource = resource
 	s.approvalBase = strings.TrimSuffix(approvalBase, "/")
-	s.revocations = revocations
 	s.requireState = true
 	s.requireResource = true
 	return nil
