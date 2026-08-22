@@ -48,6 +48,12 @@ type DelegationSummary struct {
 	ClientEmail   string   `json:"client_email"`
 	TokenEndpoint string   `json:"token_endpoint"`
 	Scopes        []string `json:"scopes"`
+	// DiscoverySubject is the identity wiring-time calls act as: registration
+	// and index refresh carry no caller, so without it those calls go out
+	// unauthenticated and an upstream that authenticates tools/list cannot be
+	// registered. It reads a caller-independent tool catalog, and never stands
+	// in for a real caller — see delegatedBearer.
+	DiscoverySubject string `json:"discovery_subject,omitempty"`
 }
 
 // DelegationKeyKey is the secret-store key holding a delegated connection's
@@ -115,13 +121,23 @@ func delegatedCallFrom(ctx context.Context) (caller, subject string) {
 // acting as the context's delegation subject. The gateway acts upstream as
 // the mapped per-user identity, so the provider's own ACLs trim results — it
 // never queries broadly under the service account and filters afterwards.
-// Wiring-time calls (initialize and tools/list at registration) carry no
-// caller and go unauthenticated rather than acting as anyone.
-func delegatedBearer(src *auth.DelegatedTokenSource) func(context.Context) (string, error) {
+// Wiring-time calls (initialize and tools/list at registration or refresh)
+// carry no caller. They act as the operator-declared discovery subject when
+// there is one, and otherwise go out unauthenticated rather than acting as
+// anyone.
+//
+// The discovery subject can never stand in for a real caller: invokeUpstream
+// refuses a delegated call whose caller has no provider-verified email BEFORE
+// the bearer is built, so an empty subject here means there was no caller at
+// all. TestDiscoverySubjectNeverSubstitutesForACaller pins that ordering.
+func delegatedBearer(src *auth.DelegatedTokenSource, discoverySubject string) func(context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		caller, subject := delegatedCallFrom(ctx)
 		if subject == "" {
-			return "", nil
+			if discoverySubject == "" {
+				return "", nil
+			}
+			return src.DiscoveryToken(ctx)
 		}
 		return src.Token(ctx, caller, subject)
 	}
@@ -182,10 +198,11 @@ func buildDelegatedSource(cfg DelegationSummary, rawKey []byte) (*auth.Delegated
 		return nil, err
 	}
 	return auth.NewDelegatedTokenSource(auth.DelegationConfig{
-		ClientEmail:   cfg.ClientEmail,
-		TokenEndpoint: cfg.TokenEndpoint,
-		Scopes:        cfg.Scopes,
-		HTTPClient:    delegationHTTPClient,
+		ClientEmail:      cfg.ClientEmail,
+		TokenEndpoint:    cfg.TokenEndpoint,
+		Scopes:           cfg.Scopes,
+		DiscoverySubject: cfg.DiscoverySubject,
+		HTTPClient:       delegationHTTPClient,
 	}, sa)
 }
 
@@ -193,9 +210,10 @@ func buildDelegatedSource(cfg DelegationSummary, rawKey []byte) (*auth.Delegated
 // key defaults are applied — what gets persisted and reported.
 func resolvedDelegationSummary(src *auth.DelegatedTokenSource) *DelegationSummary {
 	return &DelegationSummary{
-		ClientEmail:   src.ClientEmail(),
-		TokenEndpoint: src.TokenEndpoint(),
-		Scopes:        src.Scopes(),
+		ClientEmail:      src.ClientEmail(),
+		TokenEndpoint:    src.TokenEndpoint(),
+		Scopes:           src.Scopes(),
+		DiscoverySubject: src.DiscoverySubject(),
 	}
 }
 
@@ -290,7 +308,7 @@ func (s *Server) adminUpdateDelegation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	u := &gateway.Upstream{Name: name, URL: rec.conn.Endpoint(), Client: s.upstreamClient, Bearer: delegatedBearer(src)}
+	u := &gateway.Upstream{Name: name, URL: rec.conn.Endpoint(), Client: s.upstreamClient, Bearer: delegatedBearer(src, src.DiscoverySubject())}
 	if err := s.RebindUpstream(r.Context(), name, u); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -347,7 +365,7 @@ func (s *Server) addDelegatedUpstream(ctx context.Context, name, rawURL string, 
 		client = safedial.GuardedClientForDestination(0, 0, dest)
 		opts = append(opts, WithPrivateDestination())
 	}
-	u := &gateway.Upstream{Name: name, URL: rawURL, Client: client, Bearer: delegatedBearer(src)}
+	u := &gateway.Upstream{Name: name, URL: rawURL, Client: client, Bearer: delegatedBearer(src, src.DiscoverySubject())}
 	if owner != "" {
 		opts = append(opts, WithOwner(owner))
 	}

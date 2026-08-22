@@ -106,6 +106,10 @@ type DelegationConfig struct {
 	TokenEndpoint string
 	// Scopes are the OAuth scopes every derived token is limited to.
 	Scopes []string
+	// DiscoverySubject is the identity wiring-time calls act as. Those calls
+	// carry no caller, so without it they go out unauthenticated. It reads a
+	// caller-independent tool catalog and never stands in for a real caller.
+	DiscoverySubject string
 	// HTTPClient performs the exchange. The token endpoint is
 	// operator-configured infrastructure (like the SSO issuer), not an
 	// untrusted upstream URL. nil means http.DefaultClient.
@@ -179,6 +183,11 @@ func NewDelegatedTokenSource(cfg DelegationConfig, sa *ServiceAccountKey) (*Dele
 	if err := CheckDelegationEndpoint(cfg.TokenEndpoint); err != nil {
 		return nil, err
 	}
+	if sub := cfg.DiscoverySubject; sub != "" {
+		if !strings.Contains(sub, "@") || strings.ContainsAny(sub, " \t\r\n") {
+			return nil, fmt.Errorf("delegation: discovery subject %q must be a provider identity (an email address)", sub)
+		}
+	}
 	if len(cfg.Scopes) == 0 {
 		return nil, errors.New("delegation: at least one scope is required — a derived token's authority must be explicit")
 	}
@@ -197,6 +206,24 @@ func (d *DelegatedTokenSource) ClientEmail() string { return d.cfg.ClientEmail }
 
 // TokenEndpoint returns the endpoint assertions are exchanged at.
 func (d *DelegatedTokenSource) TokenEndpoint() string { return d.cfg.TokenEndpoint }
+
+// DiscoverySubject returns the identity wiring-time calls act as, or "" when
+// the operator declared none.
+func (d *DelegatedTokenSource) DiscoverySubject() string { return d.cfg.DiscoverySubject }
+
+// discoveryCallerKey partitions the token cache for wiring-time calls. A real
+// caller key is a canonical issuer#subject pair, which cannot contain a space,
+// so a discovery token can never be served to a principal's call.
+const discoveryCallerKey = "gateway discovery"
+
+// DiscoveryToken returns a token acting as the configured discovery subject,
+// for wiring-time calls (registration and index refresh) that carry no caller.
+func (d *DelegatedTokenSource) DiscoveryToken(ctx context.Context) (string, error) {
+	if d.cfg.DiscoverySubject == "" {
+		return "", errors.New("delegation: no discovery subject is configured")
+	}
+	return d.Token(ctx, discoveryCallerKey, d.cfg.DiscoverySubject)
+}
 
 // Scopes returns the scopes every derived token carries.
 func (d *DelegatedTokenSource) Scopes() []string { return append([]string(nil), d.cfg.Scopes...) }

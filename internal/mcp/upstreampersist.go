@@ -499,7 +499,7 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 				slog.Warn("reload delegated upstream failed", "upstream", reg.Name, "err", err)
 				continue
 			}
-			u.Bearer = delegatedBearer(src)
+			u.Bearer = delegatedBearer(src, src.DiscoverySubject())
 			opts = append(opts, WithDelegation(src))
 		} else {
 			switch reg.authKind() {
