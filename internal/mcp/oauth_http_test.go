@@ -44,7 +44,7 @@ func TestHTTPOAuthMode(t *testing.T) {
 		t.Fatalf("discover: %v", err)
 	}
 	rs := &auth.ResourceServer{Issuer: issuer.URL, Audience: "microagency", Keys: ks}
-	h := newTestServer(t, fakeRunner{}).HTTPHandlerAuth(OAuthAuthenticator(rs, ""))
+	h := newTestServer(t, fakeRunner{}).HTTPHandlerAuth(OAuthAuthenticator(rs, "", false))
 
 	sign := func(claims jwt.MapClaims) string {
 		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -106,7 +106,7 @@ func TestHTTPOAuthRequiredScope(t *testing.T) {
 		t.Fatalf("discover: %v", err)
 	}
 	rs := &auth.ResourceServer{Issuer: issuer.URL, Audience: "microagency", Keys: ks}
-	h := newTestServer(t, fakeRunner{}).HTTPHandlerAuth(OAuthAuthenticator(rs, "mcp"))
+	h := newTestServer(t, fakeRunner{}).HTTPHandlerAuth(OAuthAuthenticator(rs, "mcp", false))
 
 	sign := func(claims jwt.MapClaims) string {
 		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)

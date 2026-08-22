@@ -26,17 +26,20 @@ const (
 // (an OAuth refresh token or a static bearer) lives in the secret store, never
 // here; Auth records which kind so reload knows how to restore it.
 type upstreamReg struct {
-	Name        string           `json:"name"`
-	URL         string           `json:"url"`
-	Discover    bool             `json:"discover"`
-	Auth        string           `json:"auth,omitempty"`         // authOAuth|authStatic|authNone; "" = oauth (legacy)
-	ReadOnly    bool             `json:"read_only,omitempty"`    // writes refused (least-privilege)
-	Owner       string           `json:"owner,omitempty"`        // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
-	Minimize    string           `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
-	SelfService bool             `json:"self_service,omitempty"` // admitted from an operator-approved template
-	Template    string           `json:"template,omitempty"`     // template id for self-service connections
-	Revoked     bool             `json:"revoked,omitempty"`      // credential deleted; never reload as callable
-	Grants      []OperationGrant `json:"grants,omitempty"`       // non-secret operator authority
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Discover bool   `json:"discover"`
+	Auth     string `json:"auth,omitempty"`      // authOAuth|authStatic|authNone; "" = oauth (legacy)
+	ReadOnly bool   `json:"read_only,omitempty"` // writes refused (least-privilege)
+	Owner    string `json:"owner,omitempty"`     // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
+	// AuditFullArgs opts this connection up to full argument capture in the
+	// audit log on a multi-principal gateway (default there: structure + digest).
+	AuditFullArgs bool             `json:"audit_full_args,omitempty"`
+	Minimize      string           `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
+	SelfService   bool             `json:"self_service,omitempty"` // admitted from an operator-approved template
+	Template      string           `json:"template,omitempty"`     // template id for self-service connections
+	Revoked       bool             `json:"revoked,omitempty"`      // credential deleted; never reload as callable
+	Grants        []OperationGrant `json:"grants,omitempty"`       // non-secret operator authority
 }
 
 // authKind returns the registration's auth kind, treating a legacy empty value as
@@ -52,11 +55,15 @@ func (s *Server) registrationsPath() string { return filepath.Join(s.stateDir, "
 
 // UpstreamRegistration is the non-secret identity (name + URL) of a persisted
 // upstream. It's exported so out-of-server tooling — notably `microagency doctor`'s
-// bypass check — can enumerate what microagency proxies without constructing a full
-// Server. No credential is ever exposed here; those live only in the secret store.
+// bypass check and its audit-capture posture line — can enumerate what microagency
+// proxies without constructing a full Server. No credential is ever exposed here;
+// those live only in the secret store.
 type UpstreamRegistration struct {
 	Name string
 	URL  string
+	// AuditFullArgs: this connection is opted up to full argument capture in the
+	// audit log on a multi-principal gateway. Doctor discloses the opt-up.
+	AuditFullArgs bool
 }
 
 // ReadUpstreamRegistrations returns the persisted upstream registrations under
@@ -75,7 +82,7 @@ func ReadUpstreamRegistrations(stateDir string) []UpstreamRegistration {
 	}
 	out := make([]UpstreamRegistration, 0, len(regs))
 	for _, r := range regs {
-		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL})
+		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL, AuditFullArgs: r.AuditFullArgs})
 	}
 	return out
 }
@@ -176,6 +183,7 @@ func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 		for i := range regs {
 			if regs[i].Name == reg.Name {
 				reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
+				reg.AuditFullArgs = regs[i].AuditFullArgs
 				reg.Minimize = regs[i].Minimize
 				if len(reg.Grants) == 0 {
 					reg.Grants = regs[i].Grants
@@ -229,6 +237,21 @@ func (s *Server) persistReadOnly(name string, ro bool) {
 		for i := range regs {
 			if regs[i].Name == name {
 				regs[i].ReadOnly = ro
+				return regs, true
+			}
+		}
+		return regs, false
+	})
+}
+
+// persistAuditFullArgs updates just the audit-capture opt-up of a persisted
+// registration, so the setting survives restart independently of the add/enable
+// path — and stays readable by doctor's posture disclosure.
+func (s *Server) persistAuditFullArgs(name string, on bool) {
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].AuditFullArgs = on
 				return regs, true
 			}
 		}
@@ -455,6 +478,9 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		}
 		if reg.ReadOnly {
 			_ = s.SetUpstreamReadOnly(reg.Name, true)
+		}
+		if reg.AuditFullArgs {
+			_ = s.SetUpstreamAuditFullArgs(reg.Name, true)
 		}
 		if len(reg.Grants) > 0 {
 			if err := s.SetUpstreamGrants(reg.Name, reg.Grants); err != nil {

@@ -913,12 +913,13 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			}
 			resource := publicIssuer + "/mcp"
 			metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			// An external issuer attests arbitrary subjects — a multi-principal surface.
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope, true)
 			connectionBase, connectionMetadata = publicIssuer, metadataURL
 			mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 			mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(resource, cfg.issuer))
 		} else {
-			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope, true)
 			connectionBase, connectionMetadata = "http://"+cfg.addr, "/.well-known/oauth-protected-resource"
 			mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 			mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, cfg.issuer))
@@ -959,7 +960,8 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			Revocations: revocations, RequireTokenID: true,
 		}
 		metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		// The built-in AS mints tokens for the one local operator subject.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
 		connectionBase, connectionMetadata = publicIssuer, metadataURL
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 		mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(publicResource, publicIssuer))
@@ -991,14 +993,19 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			Revocations: revocations, RequireTokenID: true,
 		}
 		// The built-in AS always grants "mcp", so requiring it costs nothing and
-		// makes scope enforcement real instead of decorative.
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		// makes scope enforcement real instead of decorative. Single-principal:
+		// it mints tokens for the one local operator subject.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
 		connectionBase, connectionMetadata = issuer, "/.well-known/oauth-protected-resource"
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, issuer))
 		mode = "oauth-local"
 	}
 	if connectionAuth != nil {
+		// Copy the authenticator's declared capability onto the server: it selects
+		// audit argument capture (structure + digest when multi-principal). Static
+		// bearer and stdio never reach here and keep the single-principal default.
+		srv.SetMultiPrincipalAuth(connectionAuth.MultiPrincipal())
 		connections, err := srv.UserConnectionsHandler(connectionAuth, connectionBase, connectionMetadata)
 		if err != nil {
 			return nil, nil, "", "", err

@@ -25,6 +25,8 @@ import (
 
 type bearerSubjectAuth struct{}
 
+func (bearerSubjectAuth) MultiPrincipal() bool { return true } // any bearer becomes its own subject
+
 func (bearerSubjectAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 	subject := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if subject == "" || subject == r.Header.Get("Authorization") {

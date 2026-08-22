@@ -149,10 +149,23 @@ func runDoctor(args []string) {
 }
 
 func reportAuthPosture(out io.Writer) {
-	reportAuthPostureAt(out, authPosturePath())
+	reportAuthPostureAt(out, authPosturePath(), optedUpConnections(mcp.ReadUpstreamRegistrations(microagencyDir())))
 }
 
-func reportAuthPostureAt(out io.Writer, path string) {
+// optedUpConnections returns the names of persisted connections opted up to
+// full audit argument capture, sorted, for the posture disclosure below.
+func optedUpConnections(regs []mcp.UpstreamRegistration) []string {
+	var names []string
+	for _, reg := range regs {
+		if reg.AuditFullArgs {
+			names = append(names, reg.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 	posture, err := readAuthPosture(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -177,6 +190,14 @@ func reportAuthPostureAt(out io.Writer, path string) {
 			fmt.Fprintf(out, "    audience        %s\n", posture.Audience)
 		}
 		reportTunnelStability(out, posture)
+		// Multi-user deployment: say what the shared audit log retains. The
+		// default keeps callers' argument values out of the operator-readable
+		// file; a per-connection opt-up widens that, so it never passes silently.
+		if len(optedUp) == 0 {
+			fmt.Fprintln(out, "    audit capture   argument structure + digest (callers' argument values stay out of the shared log)")
+		} else {
+			fmt.Fprintf(out, "    audit capture   ⚠ FULL arguments for: %s (operator opt-up; other connections record structure + digest)\n", strings.Join(optedUp, ", "))
+		}
 	case "bearer":
 		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
 	case "oauth-local":

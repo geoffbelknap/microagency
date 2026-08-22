@@ -19,6 +19,8 @@ import (
 // validated tokens assert the same `sub`.
 type issuerBearerAuth struct{}
 
+func (issuerBearerAuth) MultiPrincipal() bool { return true } // attests arbitrary issuer+subject pairs
+
 func (issuerBearerAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	issuer, subject, ok := strings.Cut(raw, "|")

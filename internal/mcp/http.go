@@ -22,11 +22,20 @@ const maxHTTPBody = 1 << 20 // 1 MiB
 // surfaces never share an audience.
 type Authenticator interface {
 	Authenticate(r *http.Request) (*auth.Principal, error)
+	// MultiPrincipal reports whether this authenticator can attest MORE THAN ONE
+	// distinct principal. It is a declared capability, not a mode-string check:
+	// wiring copies it onto the server (SetMultiPrincipalAuth), and any future
+	// auth mode declares its own answer here. It selects audit argument capture
+	// (structure + digest on multi-principal gateways; see argcapture.go).
+	MultiPrincipal() bool
 }
 
 // staticAuth accepts a single shared bearer token (loopback / dev). An empty
 // token means no check — safe only on loopback.
 type staticAuth struct{ token string }
+
+// MultiPrincipal: one shared token, one subject ("local") — single-principal.
+func (staticAuth) MultiPrincipal() bool { return false }
 
 func (s staticAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 	if s.token != "" {
@@ -45,7 +54,12 @@ func (s staticAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 type oauthAuth struct {
 	rs    *auth.ResourceServer
 	scope string // "" = no scope requirement
+	// multiPrincipal is declared at construction: true for an external issuer
+	// (arbitrary subjects), false for the built-in AS (one local subject).
+	multiPrincipal bool
 }
+
+func (o oauthAuth) MultiPrincipal() bool { return o.multiPrincipal }
 
 func (o oauthAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -64,9 +78,12 @@ func (o oauthAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 // OAuthAuthenticator validates OAuth/OIDC access tokens via the resource server.
 // A non-empty requiredScope must be present in the token's granted scopes;
 // pass "" to accept any valid token (e.g. an external issuer that doesn't model
-// scopes).
-func OAuthAuthenticator(rs *auth.ResourceServer, requiredScope string) Authenticator {
-	return oauthAuth{rs: rs, scope: requiredScope}
+// scopes). multiPrincipal declares whether the issuer authenticates more than
+// one distinct subject: true for an external issuer, false for the built-in AS,
+// which mints tokens for the one local operator subject. The wiring copies the
+// declaration onto the server, where it selects audit argument capture.
+func OAuthAuthenticator(rs *auth.ResourceServer, requiredScope string, multiPrincipal bool) Authenticator {
+	return oauthAuth{rs: rs, scope: requiredScope, multiPrincipal: multiPrincipal}
 }
 
 type ctxKey int
