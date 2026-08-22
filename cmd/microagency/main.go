@@ -222,6 +222,9 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --high-assurance-multi-user  require exact principal/campaign operation grants (external issuer)")
 	fmt.Fprintln(w, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
 	fmt.Fprintln(w, "                          (defaults to "+defaultAdminAddr+" when a tunnel is used)")
+	fmt.Fprintln(w, "    --allow-remote-admin  serve /admin + /console on a non-loopback bind (cleartext HTTP,")
+	fmt.Fprintln(w, "                          operator token only — required when --http or --admin-addr leaves")
+	fmt.Fprintln(w, "                          loopback; prefer a loopback bind reached over SSH forwarding)")
 	fmt.Fprintln(w, "    --engine name=path    add a query engine (a wasip1 module)")
 	fmt.Fprintln(w, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
 	fmt.Fprintln(w, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
@@ -260,9 +263,13 @@ type upOptions struct {
 	// singleUser acknowledges that a public tunnel in front of the built-in
 	// OAuth server serves exactly one person — the local operator. Without it,
 	// a tunnel with built-in OAuth refuses to start (see validateHTTPConfig).
-	singleUser  bool
-	engineSpecs []string
-	help        bool
+	singleUser bool
+	// allowRemoteAdmin acknowledges serving the operator surface (/admin +
+	// /console) on a non-loopback bind. Without it, such a bind refuses to
+	// start (see validateHTTPConfig).
+	allowRemoteAdmin bool
+	engineSpecs      []string
+	help             bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -325,6 +332,8 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.highAssuranceMultiUser = true
 		case args[i] == "--single-user":
 			o.singleUser = true
+		case args[i] == "--allow-remote-admin":
+			o.allowRemoteAdmin = true
 		case args[i] == "--no-register":
 			o.noRegister = true
 		case args[i] == "--foreground":
@@ -402,7 +411,7 @@ func run(args []string) {
 		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
-		noRegister: noRegister, singleUser: o.singleUser,
+		noRegister: noRegister, singleUser: o.singleUser, allowRemoteAdmin: o.allowRemoteAdmin,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -521,6 +530,10 @@ func daemonize(cfg httpConfig) {
 	fmt.Fprintf(os.Stderr, "\n  microagency is up in the background (pid %d).\n\n", pid)
 	fmt.Fprintf(os.Stderr, "    MCP endpoint   http://%s/mcp   (in Claude Code: /mcp → Authenticate)\n", cfg.addr)
 	fmt.Fprintf(os.Stderr, "    Console        http://%s/console\n", consoleAddr(cfg))
+	if ra := remoteAdminAddr(cfg); ra != "" {
+		fmt.Fprintf(os.Stderr, "    WARNING        /admin + /console are reachable beyond loopback on %s (--allow-remote-admin)\n", ra)
+		fmt.Fprintln(os.Stderr, "                   cleartext HTTP, operator token only — front it with TLS, or bind loopback and use SSH forwarding")
+	}
 	if cfg.tunnel != "" {
 		if cfg.tunnelName != "" {
 			fmt.Fprintf(os.Stderr, "    Tunnel         %s (named tunnel %q, stable across restarts) — exposes /mcp only; the console stays loopback\n", cfg.tunnelURL, cfg.tunnelName)
@@ -811,6 +824,7 @@ type httpConfig struct {
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
 	noRegister                                       bool
 	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
+	allowRemoteAdmin                                 bool // explicit acknowledgment of a non-loopback operator surface
 }
 
 // defaultAdminAddr is where the operator surface (/admin + /console) binds when a
@@ -835,12 +849,72 @@ func effectiveAdminAddr(cfg httpConfig) string {
 	return ""
 }
 
+// remoteAdminAddr returns the address on which the operator surface (/admin +
+// /console) would be reachable beyond loopback, or "" while it stays local.
+// With no separate operator listener the agent bind serves the operator
+// surface too, so its host decides. An address that does not parse is left to
+// fail at bind time, exactly as it does today.
+func remoteAdminAddr(cfg httpConfig) string {
+	addr := effectiveAdminAddr(cfg)
+	if addr == "" {
+		addr = cfg.addr
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	if !loopbackHost(host) {
+		return addr
+	}
+	return ""
+}
+
+// validateRemoteAdminToken refuses an operator surface beyond loopback that
+// no credential could authenticate: an empty legacy token disables that
+// credential path (never auth itself), so with no named operator tokens
+// either, every /admin request would be refused — a misconfiguration to
+// surface at startup, not from remote 401s. The shipped CLI always mints the
+// legacy token, so this guards the invariant against regressions in how the
+// credentials are sourced.
+func validateRemoteAdminToken(cfg httpConfig, opAuth mcp.OperatorAuth) error {
+	ra := remoteAdminAddr(cfg)
+	if ra == "" || strings.TrimSpace(opAuth.LegacyToken) != "" {
+		return nil
+	}
+	if opAuth.Tokens != nil {
+		if named, err := opAuth.Tokens.List(); err == nil && len(named) > 0 {
+			return nil // named operator tokens still authenticate the surface
+		}
+	}
+	return fmt.Errorf("the operator surface on %s is reachable beyond loopback with no credential that could authenticate it (empty legacy token, no named operator tokens), so every /admin request would be refused.\n"+
+		"  Restore the legacy token file (~/.microagency/token), or create a named token: microagency token create <name> --role admin", ra)
+}
+
 func validateHTTPConfig(cfg httpConfig) error {
 	if cfg.tunnel == "" {
 		if cfg.singleUser {
 			return fmt.Errorf("--single-user only applies to a public tunnel; add --public or --tunnel, or drop the flag")
 		}
+		ra := remoteAdminAddr(cfg)
+		if ra != "" && !cfg.allowRemoteAdmin {
+			flag := "--http"
+			if effectiveAdminAddr(cfg) != "" {
+				flag = "--admin-addr"
+			}
+			// The operator surface holds credential custody and out-of-band data
+			// materialization behind one bearer compare, over cleartext HTTP.
+			// Leaving loopback with it must be chosen, not defaulted into.
+			return fmt.Errorf("refusing to serve /admin and /console beyond loopback: %s %s exposes the operator surface (credential custody, parked-data retrieval) over cleartext HTTP, gated only by the operator token.\n"+
+				"  Keeping it local: bind a loopback address (the default) and reach it over SSH port forwarding.\n"+
+				"  Exposing it deliberately: add --allow-remote-admin to accept that posture", flag, ra)
+		}
+		if cfg.allowRemoteAdmin && ra == "" {
+			return fmt.Errorf("--allow-remote-admin only applies when --http or --admin-addr binds the operator surface beyond loopback; drop the flag or change the bind")
+		}
 		return nil
+	}
+	if cfg.allowRemoteAdmin {
+		return fmt.Errorf("--allow-remote-admin does not apply with a public tunnel: the tunnel keeps the operator surface loopback-only; drop the flag")
 	}
 	if cfg.singleUser && cfg.issuer != "" {
 		return fmt.Errorf("--single-user and --issuer are mutually exclusive: --single-user acknowledges the single-user built-in OAuth server, --issuer replaces it with an external one; drop one of them")
@@ -1094,6 +1168,9 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
 	opAuth := mcp.OperatorAuth{LegacyToken: operatorToken, Tokens: optoken.NewStore(operatorTokensPath())}
+	if err := validateRemoteAdminToken(cfg, opAuth); err != nil {
+		fatal("refusing an unauthenticatable operator surface beyond loopback", "err", err)
+	}
 	mcpListener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		fatal("bind MCP listener", "addr", cfg.addr, "err", err)
@@ -1304,6 +1381,10 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 	if cfg.tunnel != "" && consoleAddr(cfg) != cfg.addr {
 		fmt.Fprintf(os.Stderr, "                 loopback-only — the tunnel exposes /mcp, never the operator surface\n")
 	}
+	if ra := remoteAdminAddr(cfg); ra != "" {
+		fmt.Fprintf(os.Stderr, "  WARNING        /admin + /console are reachable beyond loopback on %s (--allow-remote-admin)\n", ra)
+		fmt.Fprintln(os.Stderr, "                 cleartext HTTP, operator token only — front it with TLS, or bind loopback and use SSH forwarding")
+	}
 	if engines := srv.EngineNames(); len(engines) > 0 {
 		fmt.Fprintf(os.Stderr, "  Query engines  %s\n", strings.Join(engines, ", "))
 	} else {
@@ -1424,7 +1505,11 @@ type authPosture struct {
 	// across restarts (tokens survive); "quick" tunnels get a fresh one.
 	TunnelMode string `json:"tunnel_mode,omitempty"`
 	TunnelName string `json:"tunnel_name,omitempty"`
-	UpdatedAt  string `json:"updated_at"`
+	// RemoteAdmin records the non-loopback address serving /admin + /console
+	// when the operator lifted the loopback floor with --allow-remote-admin,
+	// so doctor can keep the exposure visible. Empty while the surface is local.
+	RemoteAdmin string `json:"remote_admin_addr,omitempty"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
@@ -1481,6 +1566,7 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 		posture.TunnelMode = tunnelMode(cfg)
 		posture.TunnelName = cfg.tunnelName
 	}
+	posture.RemoteAdmin = remoteAdminAddr(cfg)
 	b, err := json.Marshal(posture)
 	if err != nil {
 		return false, err

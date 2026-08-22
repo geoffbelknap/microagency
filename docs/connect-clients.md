@@ -28,7 +28,9 @@ tokens. Create named ones with
 `microagency token create <name> --role admin|auditor`; the original
 `~/.microagency/token` keeps working as a full-admin break-glass credential.
 See [operating the gateway](operations.md) for roles, expiry, rotation, and
-revocation.
+revocation. The operator surface refuses to bind beyond loopback unless `up`
+gets `--allow-remote-admin`; see
+[public mode](public-mode.md#non-loopback-binds).
 
 ## Where credentials live
 

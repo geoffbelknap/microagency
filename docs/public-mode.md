@@ -127,6 +127,25 @@ the tunnel process and ignores `Forwarded` and `X-Forwarded-*` request headers.
 If you use your own reverse proxy, set `--admin-addr` to a separate loopback
 port. Configure `--issuer` with the external authorization server in that mode.
 
+## Non-loopback binds
+
+Without a tunnel, `--http` and `--admin-addr` accept any bind address, but the
+operator surface never leaves loopback silently. A bind that would serve
+`/admin` and the console beyond loopback — a shared `--http 0.0.0.0:8765`, or
+a non-loopback `--admin-addr` — refuses to start unless you add
+`--allow-remote-admin`. The refusal names the flag that caused the exposure.
+
+The acknowledgment covers the operator surface only. Binding just `/mcp`
+beyond loopback, with `--admin-addr` on a loopback port, needs no flag: the
+agent plane is authenticated and carries no operator routes.
+
+With `--allow-remote-admin`, startup output and `microagency doctor` warn on
+every run: the operator surface is cleartext HTTP gated by operator tokens
+alone. Put TLS in front of it, or prefer the default — a loopback bind reached
+over SSH port forwarding. A non-loopback operator surface with no usable
+credential — an empty legacy token and no named operator tokens — is refused
+outright, since every `/admin` request would be a 401.
+
 ## Multi-user gateways
 
 On a multi-user gateway the audit log also minimizes what it keeps of each
