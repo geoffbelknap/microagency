@@ -45,7 +45,7 @@ func TestRankToolsOperatorOutputIsScopedAndMetadataFree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(s.AdminHandler("operator-token"))
+	server := httptest.NewServer(s.AdminHandler(OperatorAuth{LegacyToken: "operator-token"}))
 	defer server.Close()
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/admin/tools/rank?q=access+key&subject=bob", nil)
 	req.Header.Set("Authorization", "Bearer operator-token")

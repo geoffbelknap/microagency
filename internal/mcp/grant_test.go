@@ -439,7 +439,7 @@ func TestAdminGrantRouteIsStrictAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := s.AdminHandler("operator-token")
+	handler := s.AdminHandler(OperatorAuth{LegacyToken: "operator-token"})
 	if rec := adminReq(t, handler, "POST", "/admin/upstreams/u/grants", "operator-token", string(body)); rec.Code != 200 {
 		t.Fatalf("set grants: status=%d body=%s", rec.Code, rec.Body)
 	}

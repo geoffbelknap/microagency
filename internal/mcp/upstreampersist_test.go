@@ -54,7 +54,7 @@ func TestTokenlessDiscoveredUpstreamReloads(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	if code, out := addUpstream(t, admin.URL, "op", map[string]any{"name": "lc", "url": up.URL, "discover": true}); code != http.StatusCreated || out["state"] != "discovered" {
@@ -91,7 +91,7 @@ func TestStaticTokenUpstreamReloadsWithToken(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	if code, _ := addUpstream(t, admin.URL, "op", map[string]any{"name": "st", "url": up.URL, "token": wantTok}); code != http.StatusCreated {
@@ -121,7 +121,7 @@ func TestEnableFlipsPersistedDiscover(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	addUpstream(t, admin.URL, "op", map[string]any{"name": "lc", "url": up.URL, "discover": true})
@@ -148,7 +148,7 @@ func TestRemovedUpstreamStaysGone(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	addUpstream(t, admin.URL, "op", map[string]any{"name": "lc", "url": up.URL, "discover": true})
@@ -179,7 +179,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	if code, out := addUpstream(t, admin.URL, "op", map[string]any{"name": "alicedocs", "url": up.URL, "owner": pk("alice")}); code != http.StatusCreated || out["owner"] != pk("alice") {

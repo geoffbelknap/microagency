@@ -22,7 +22,7 @@ func adminGET(t *testing.T, h http.Handler, path, token string) *httptest.Respon
 
 func TestAdminTokenEnforced(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 	if rec := adminGET(t, h, "/admin/upstreams", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no token: status = %d, want 401", rec.Code)
 	}
@@ -33,7 +33,7 @@ func TestAdminTokenEnforced(t *testing.T) {
 
 func TestAdminUpstreamSSRFGuard(t *testing.T) {
 	s := newTestServer(t, fakeRunner{}) // default: SSRF-guarded upstream client
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 	// An upstream pointed at the cloud-metadata address must be refused, not
 	// fetched — the dial guard fires before any request leaves.
 	rec := adminReq(t, h, "POST", "/admin/upstreams", "tok",
@@ -49,7 +49,7 @@ func TestAdminMethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/runs", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer tok")
 	rec := httptest.NewRecorder()
-	s.AdminHandler("tok").ServeHTTP(rec, req)
+	s.AdminHandler(OperatorAuth{LegacyToken: "tok"}).ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /admin/runs status = %d, want 405", rec.Code)
 	}
@@ -76,7 +76,7 @@ func TestAdminUpstreamCRUD(t *testing.T) {
 	// The admin upstream-add path is SSRF-guarded by default; inject a plain
 	// client so the test's loopback mock is reachable.
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(ts.Client()))
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 	// The upstream tool is kept out of tools/list; it's discoverable via find_tools.
 	discoverable := func() bool {
 		out := call(t, s, "find_tools", map[string]any{"query": "search the corpus"})

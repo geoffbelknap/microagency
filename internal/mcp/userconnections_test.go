@@ -95,7 +95,7 @@ func newSelfServiceFixture(t *testing.T, maxPerUser int) *selfServiceFixture {
 	users.Start()
 	t.Cleanup(users.Close)
 
-	admin := server.AdminHandler("operator")
+	admin := server.AdminHandler(OperatorAuth{LegacyToken: "operator"})
 	template, _ := json.Marshal(map[string]any{
 		"id": "documents", "display_name": "Documents", "url": upstream.URL,
 		"allowed_scopes": []string{"mcp"}, "default_scopes": []string{"mcp"},
@@ -437,7 +437,7 @@ func TestConnectionTemplateValidationAndSecretCustody(t *testing.T) {
 	stateDir := t.TempDir()
 	store := openTestSecretStore(t, stateDir)
 	server := NewServer(fakeRunner{}, WithStateDir(stateDir), WithSecretStore(store))
-	admin := server.AdminHandler("operator")
+	admin := server.AdminHandler(OperatorAuth{LegacyToken: "operator"})
 	bad := adminReq(t, admin, http.MethodPost, "/admin/connection-templates", "operator", `{"id":"bad","url":"http://metadata.google.internal/mcp"}`)
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("insecure remote template accepted: %d", bad.Code)

@@ -737,7 +737,11 @@ function egressPill(r){
   return el("span",{class:"egress none mono"},"no egress");
 }
 async function materialize(ref){
-  try{var resp=await fetch("/admin/refs/"+encodeURIComponent(ref),{headers:{Authorization:"Bearer "+tok()}});if(!resp.ok){toast("materialize failed: "+resp.status);return}
+  var reason=prompt("Reason for materializing "+ref+" (recorded in the audit log):","");
+  if(reason===null)return;
+  reason=reason.trim();
+  if(!reason){toast("materialization needs a reason");return}
+  try{var resp=await fetch("/admin/refs/"+encodeURIComponent(ref)+"?reason="+encodeURIComponent(reason),{headers:{Authorization:"Bearer "+tok()}});if(!resp.ok){toast("materialize failed: "+resp.status);return}
     var blob=await resp.blob(),url=URL.createObjectURL(blob),a=el("a");a.href=url;a.download=ref.replace(/[<>]/g,"")+".txt";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast("Downloaded "+ref)}catch(e){toast(e.message)}
 }
 

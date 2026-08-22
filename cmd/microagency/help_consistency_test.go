@@ -55,6 +55,8 @@ func TestHelpIsOneContractEverywhere(t *testing.T) {
 		{"doctor", "--help"},
 		{"hook", "--help"},
 		{"mediation", "--help"},
+		{"token", "--help"},
+		{"token", "create", "--help"},
 	}
 	for _, argv := range commands {
 		t.Run(strings.Join(argv, " "), func(t *testing.T) {
@@ -91,7 +93,7 @@ func TestUpHelpIsUpsOwn(t *testing.T) {
 	}
 
 	stdout, _, _ = runHelpHelper(t, "help")
-	for _, cmd := range []string{"microagency up", "microagency down", "microagency doctor", "microagency hook", "microagency mediation"} {
+	for _, cmd := range []string{"microagency up", "microagency down", "microagency doctor", "microagency hook", "microagency mediation", "microagency token"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Errorf("global help lost %q:\n%s", cmd, stdout)
 		}
@@ -102,7 +104,7 @@ func TestUpHelpIsUpsOwn(t *testing.T) {
 // text with help (no arguments, unknown command) must keep the failure
 // contract, or the stream/exit distinction above means nothing.
 func TestMistakesStayOnStderrExitTwo(t *testing.T) {
-	for _, argv := range [][]string{{}, {"doctr"}, {"hook", "bogus"}} {
+	for _, argv := range [][]string{{}, {"doctr"}, {"hook", "bogus"}, {"token", "bogus"}} {
 		t.Run(strings.Join(argv, " "), func(t *testing.T) {
 			stdout, stderr, code := runHelpHelper(t, argv...)
 
