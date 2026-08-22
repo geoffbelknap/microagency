@@ -114,6 +114,12 @@ port. Configure `--issuer` with the external authorization server in that mode.
 
 ## Multi-user gateways
 
+On a multi-user gateway the audit log also minimizes what it keeps of each
+caller's tool arguments. Records carry argument structure and a SHA-256
+digest instead of the values, unless the operator opts a connection up to
+full capture. See [argument capture](audit.md#argument-capture). The opt-up
+is disclosed by `microagency doctor` and on the upstream list.
+
 Connections are operator-curated and shared by default: every authenticated
 user of the gateway can find and invoke them, against the one set of
 credentials the gateway holds. To restrict a connection to a single user,

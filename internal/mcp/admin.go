@@ -21,53 +21,59 @@ import (
 // RunInfo is an operator-facing view of one recorded run, including its egress
 // audit — the observability surface (what the agent reached, and what was denied).
 type RunInfo struct {
-	RunID                string   `json:"run_id"`
-	Kind                 string   `json:"kind,omitempty"`
-	TaskID               string   `json:"task_id,omitempty"`
-	ParentRunID          string   `json:"parent_run_id,omitempty"`
-	Delivery             string   `json:"delivery,omitempty"`
-	ProgramRequestID     string   `json:"program_request_id,omitempty"`
-	SourceID             string   `json:"source_id,omitempty"`
-	Upstream             string   `json:"upstream,omitempty"`
-	Tool                 string   `json:"tool,omitempty"`
-	Args                 string   `json:"args,omitempty"`
-	User                 string   `json:"user,omitempty"`
-	Campaign             string   `json:"campaign,omitempty"`
-	GrantID              string   `json:"grant_id,omitempty"`
-	GrantDigest          string   `json:"grant_digest,omitempty"`
-	Effect               string   `json:"effect,omitempty"`
-	ResourceIDs          []string `json:"resource_ids,omitempty"`
-	Session              string   `json:"session,omitempty"`
-	Substrate            string   `json:"substrate,omitempty"`
-	Engine               string   `json:"engine,omitempty"`
-	LatencyMs            int64    `json:"latency_ms"`
-	InputBytes           int      `json:"input_bytes"`
-	OutputBytes          int      `json:"output_bytes"`
-	RawBytes             int      `json:"raw_bytes,omitempty"`
-	ParkedBytes          int      `json:"parked_bytes,omitempty"`
-	MinimizedBytes       int      `json:"minimized_bytes,omitempty"`
-	ContextMeasured      bool     `json:"context_measured,omitempty"`
-	FullSchemaEntries    int      `json:"full_schema_entries,omitempty"`
-	SchemaDigestEntries  int      `json:"schema_digest_entries,omitempty"`
-	SummarizedEntries    int      `json:"summarized_entries,omitempty"`
-	OmittedEntries       int      `json:"omitted_entries,omitempty"`
-	ExactSchemaLookup    bool     `json:"exact_schema_lookup,omitempty"`
-	FusedInvocation      bool     `json:"fused_invocation,omitempty"`
-	TransformEngine      string   `json:"transform_engine,omitempty"`
-	TransformQuerySHA256 string   `json:"transform_query_sha256,omitempty"`
-	TransformInputBytes  int      `json:"transform_input_bytes,omitempty"`
-	TransformOutputBytes int      `json:"transform_output_bytes,omitempty"`
-	TransformLatencyMs   int64    `json:"transform_latency_ms,omitempty"`
-	TransformStatus      string   `json:"transform_status,omitempty"`
-	ProgramTools         []string `json:"program_tools,omitempty"`
-	ProgramCalls         int      `json:"program_calls,omitempty"`
-	ProgramBytes         int      `json:"program_bytes,omitempty"`
-	ProgramStatus        string   `json:"program_status,omitempty"`
-	Reffed               bool     `json:"reffed"`
-	Ref                  string   `json:"ref,omitempty"`
-	Bytes                int      `json:"bytes"`
-	Protected            int      `json:"protected,omitempty"` // sensitive field values minimized on this call
-	ExitCode             int      `json:"exit_code"`
+	RunID            string `json:"run_id"`
+	Kind             string `json:"kind,omitempty"`
+	TaskID           string `json:"task_id,omitempty"`
+	ParentRunID      string `json:"parent_run_id,omitempty"`
+	Delivery         string `json:"delivery,omitempty"`
+	ProgramRequestID string `json:"program_request_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	Upstream         string `json:"upstream,omitempty"`
+	Tool             string `json:"tool,omitempty"`
+	Args             string `json:"args,omitempty"`
+	// ArgsCapture/ArgsShape/ArgsSHA256 mirror the audit record's argument
+	// capture: on a multi-principal gateway, non-opted-up connections record
+	// structure + digest here instead of Args (see argcapture.go).
+	ArgsCapture          string          `json:"args_capture,omitempty"`
+	ArgsShape            json.RawMessage `json:"args_shape,omitempty"`
+	ArgsSHA256           string          `json:"args_sha256,omitempty"`
+	User                 string          `json:"user,omitempty"`
+	Campaign             string          `json:"campaign,omitempty"`
+	GrantID              string          `json:"grant_id,omitempty"`
+	GrantDigest          string          `json:"grant_digest,omitempty"`
+	Effect               string          `json:"effect,omitempty"`
+	ResourceIDs          []string        `json:"resource_ids,omitempty"`
+	Session              string          `json:"session,omitempty"`
+	Substrate            string          `json:"substrate,omitempty"`
+	Engine               string          `json:"engine,omitempty"`
+	LatencyMs            int64           `json:"latency_ms"`
+	InputBytes           int             `json:"input_bytes"`
+	OutputBytes          int             `json:"output_bytes"`
+	RawBytes             int             `json:"raw_bytes,omitempty"`
+	ParkedBytes          int             `json:"parked_bytes,omitempty"`
+	MinimizedBytes       int             `json:"minimized_bytes,omitempty"`
+	ContextMeasured      bool            `json:"context_measured,omitempty"`
+	FullSchemaEntries    int             `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries  int             `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries    int             `json:"summarized_entries,omitempty"`
+	OmittedEntries       int             `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup    bool            `json:"exact_schema_lookup,omitempty"`
+	FusedInvocation      bool            `json:"fused_invocation,omitempty"`
+	TransformEngine      string          `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string          `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int             `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int             `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64           `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string          `json:"transform_status,omitempty"`
+	ProgramTools         []string        `json:"program_tools,omitempty"`
+	ProgramCalls         int             `json:"program_calls,omitempty"`
+	ProgramBytes         int             `json:"program_bytes,omitempty"`
+	ProgramStatus        string          `json:"program_status,omitempty"`
+	Reffed               bool            `json:"reffed"`
+	Ref                  string          `json:"ref,omitempty"`
+	Bytes                int             `json:"bytes"`
+	Protected            int             `json:"protected,omitempty"` // sensitive field values minimized on this call
+	ExitCode             int             `json:"exit_code"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -91,6 +97,7 @@ func (s *Server) RunLog() []RunInfo {
 			RunID: id, Kind: rec.Kind, TaskID: rec.TaskID, ParentRunID: rec.ParentRunID,
 			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
+			ArgsCapture: rec.ArgsCapture, ArgsShape: rec.ArgsShape, ArgsSHA256: rec.ArgsSHA256,
 			User: rec.User, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
 			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
@@ -176,6 +183,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
+	mux.HandleFunc("POST /admin/upstreams/{name}/audit-capture", g(s.adminSetAuditCapture))
 	mux.HandleFunc("POST /admin/upstreams/{name}/grants", g(s.adminSetGrants))
 	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
 	mux.HandleFunc("POST /admin/upstreams/{name}/owner", g(s.adminSetOwner))
@@ -369,6 +377,28 @@ func (s *Server) adminSetReadOnly(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistReadOnly(name, in.ReadOnly)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "read_only": in.ReadOnly})
+}
+
+// adminSetAuditCapture opts a connection up to (or back down from) FULL
+// argument capture in the audit log on a multi-principal gateway, where the
+// default is structure + digest. Operator-plane: widening what the shared log
+// retains is a trust decision, so it lives behind the operator token. The
+// posture is disclosed in the upstream list and by `microagency doctor`.
+func (s *Server) adminSetAuditCapture(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		FullArgs bool `json:"full_args"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := s.SetUpstreamAuditFullArgs(name, in.FullArgs); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.persistAuditFullArgs(name, in.FullArgs)
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "audit_full_args": in.FullArgs})
 }
 
 func (s *Server) adminSetGrants(w http.ResponseWriter, r *http.Request) {
