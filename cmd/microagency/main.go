@@ -212,7 +212,13 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --tunnel-url <url>    the named tunnel's public https:// origin (required with --tunnel-name)")
 	fmt.Fprintln(w, "    --single-user         acknowledge that the public built-in OAuth serves ONE person:")
 	fmt.Fprintln(w, "                          every remote client authenticates as you (required with a tunnel")
-	fmt.Fprintln(w, "                          unless --issuer or --token selects another auth mode)")
+	fmt.Fprintln(w, "                          unless --issuer, --sso-issuer, or --token selects another auth mode)")
+	fmt.Fprintln(w, "    --sso-issuer <url>    federate built-in OAuth sign-in to an OIDC identity provider")
+	fmt.Fprintln(w, "                          (e.g. https://accounts.google.com); each person becomes a distinct principal")
+	fmt.Fprintln(w, "    --sso-client-id <id>  the OAuth client registered at the SSO provider for this gateway")
+	fmt.Fprintln(w, "    --sso-client-secret-file <path>  file holding that client's secret (or set")
+	fmt.Fprintln(w, "                          "+ssoClientSecretEnv+" once; stored in the secret store, never argv)")
+	fmt.Fprintln(w, "    --sso-hd <domain>     require the provider's hd (hosted domain) claim to equal <domain>")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
@@ -268,8 +274,14 @@ type upOptions struct {
 	// /console) on a non-loopback bind. Without it, such a bind refuses to
 	// start (see validateHTTPConfig).
 	allowRemoteAdmin bool
-	engineSpecs      []string
-	help             bool
+	// SSO federation: the built-in OAuth server stays the authorization server
+	// toward MCP clients, but sign-in is delegated to this OIDC provider, so
+	// each person is a distinct principal. The client secret never rides argv:
+	// it arrives via MICROAGENCY_SSO_CLIENT_SECRET or --sso-client-secret-file
+	// and lives in the secret store.
+	ssoIssuer, ssoClientID, ssoClientSecretFile, ssoHD string
+	engineSpecs                                        []string
+	help                                               bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -302,6 +314,18 @@ func parseUpOptions(args []string) (upOptions, error) {
 			i++
 		case args[i] == "--admin-addr" && i+1 < len(args):
 			o.adminAddr = args[i+1] // bind /admin + /console on their own listener
+			i++
+		case args[i] == "--sso-issuer" && i+1 < len(args):
+			o.ssoIssuer = args[i+1]
+			i++
+		case args[i] == "--sso-client-id" && i+1 < len(args):
+			o.ssoClientID = args[i+1]
+			i++
+		case args[i] == "--sso-client-secret-file" && i+1 < len(args):
+			o.ssoClientSecretFile = args[i+1]
+			i++
+		case args[i] == "--sso-hd" && i+1 < len(args):
+			o.ssoHD = args[i+1]
 			i++
 		case args[i] == "--engine" && i+1 < len(args):
 			o.engineSpecs = append(o.engineSpecs, args[i+1]) // name=path; repeatable
@@ -347,6 +371,21 @@ func parseUpOptions(args []string) (upOptions, error) {
 	}
 	if o.highAssuranceMultiUser && o.issuer == "" {
 		return o, fmt.Errorf("--high-assurance-multi-user requires --issuer with a signed campaign or campaign_id claim")
+	}
+	// SSO federation is one contract: the issuer names the provider and the
+	// client id names this gateway's registration there. The secret-file and
+	// hosted-domain flags refine that contract and mean nothing without it.
+	if o.ssoIssuer == "" {
+		switch {
+		case o.ssoClientID != "":
+			return o, fmt.Errorf("--sso-client-id requires --sso-issuer (the OIDC provider it registers with)")
+		case o.ssoClientSecretFile != "":
+			return o, fmt.Errorf("--sso-client-secret-file requires --sso-issuer (the OIDC provider the secret belongs to)")
+		case o.ssoHD != "":
+			return o, fmt.Errorf("--sso-hd requires --sso-issuer (the OIDC provider that asserts the hd claim)")
+		}
+	} else if o.ssoClientID == "" {
+		return o, fmt.Errorf("--sso-issuer requires --sso-client-id (the OAuth client registered at the provider)")
 	}
 	// A named tunnel is one contract with two halves: the tunnel to run and the
 	// stable origin it serves. Half a contract fails closed with both named.
@@ -412,6 +451,8 @@ func run(args []string) {
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
 		noRegister: noRegister, singleUser: o.singleUser, allowRemoteAdmin: o.allowRemoteAdmin,
+		ssoIssuer: o.ssoIssuer, ssoClientID: o.ssoClientID,
+		ssoClientSecretFile: o.ssoClientSecretFile, ssoHD: o.ssoHD,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -545,6 +586,13 @@ func daemonize(cfg httpConfig) {
 			fmt.Fprintf(os.Stderr, "    Public auth    external OAuth (%s)\n", cfg.issuer)
 		case cfg.token != "":
 			fmt.Fprintln(os.Stderr, "    Public auth    explicit static bearer")
+		case cfg.ssoIssuer != "":
+			fmt.Fprintf(os.Stderr, "    Public auth    built-in OAuth, sign-in federated to %s\n", cfg.ssoIssuer)
+			if cfg.ssoHD != "" {
+				fmt.Fprintf(os.Stderr, "                   accounts must carry hd=%s; each person is a distinct principal\n", cfg.ssoHD)
+			} else {
+				fmt.Fprintln(os.Stderr, "                   each person signs in at the provider and is a distinct principal")
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "    Public auth    built-in OAuth, single-user — every remote client authenticates as %q\n", localSubject())
 			fmt.Fprintln(os.Stderr, "                   consent stays on the loopback operator listener")
@@ -822,6 +870,10 @@ type httpConfig struct {
 	publicURL                                        string // scraped from a quick tunnel or declared via --tunnel-url, never from request headers
 	authDir                                          string // test-only override; production uses ~/.microagency
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
+	ssoIssuer                                        string // federate built-in OAuth sign-in to this OIDC provider
+	ssoClientID                                      string // the gateway's OAuth client at the SSO provider
+	ssoClientSecretFile                              string // file holding that client's secret (stored in the secret store)
+	ssoHD                                            string // required hd (hosted domain) claim, enforced server-side
 	noRegister                                       bool
 	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
 	allowRemoteAdmin                                 bool // explicit acknowledgment of a non-loopback operator surface
@@ -891,6 +943,17 @@ func validateRemoteAdminToken(cfg httpConfig, opAuth mcp.OperatorAuth) error {
 }
 
 func validateHTTPConfig(cfg httpConfig) error {
+	// SSO federation keeps the built-in OAuth server; --issuer replaces it and
+	// --token bypasses OAuth entirely, so combining them cannot mean anything.
+	if cfg.ssoIssuer != "" && cfg.issuer != "" {
+		return fmt.Errorf("--sso-issuer and --issuer are mutually exclusive: --sso-issuer federates the built-in OAuth server's sign-in, --issuer replaces the built-in server with an external one; drop one of them")
+	}
+	if cfg.ssoIssuer != "" && cfg.token != "" {
+		return fmt.Errorf("--sso-issuer and --token are mutually exclusive: --token selects static bearer mode, which does not use the built-in OAuth server; drop one of them")
+	}
+	if cfg.ssoIssuer != "" && cfg.singleUser {
+		return fmt.Errorf("--sso-issuer and --single-user are mutually exclusive: federated sign-in makes each person a distinct principal, which is exactly what --single-user disclaims; drop one of them")
+	}
 	if cfg.tunnel == "" {
 		if cfg.singleUser {
 			return fmt.Errorf("--single-user only applies to a public tunnel; add --public or --tunnel, or drop the flag")
@@ -934,15 +997,19 @@ func validateHTTPConfig(cfg httpConfig) error {
 	if canonicalListenAddr(adminAddr) == canonicalListenAddr(cfg.addr) {
 		return fmt.Errorf("a public tunnel requires a separate operator listener; --admin-addr cannot equal --http")
 	}
-	// Public exposure of the built-in OAuth server is never silent. The built-in
-	// server identifies exactly one person — every token it issues carries the
-	// local operator's identity — so several humans connecting through the tunnel
-	// would merge into one caller: shared connections, shared credentials, shared
-	// parked data. That posture must be chosen, not defaulted into.
-	if cfg.issuer == "" && cfg.token == "" && !cfg.singleUser {
+	// Public exposure of the built-in OAuth server is never silent. Without
+	// federation the built-in server identifies exactly one person — every token
+	// it issues carries the local operator's identity — so several humans
+	// connecting through the tunnel would merge into one caller: shared
+	// connections, shared credentials, shared parked data. That posture must be
+	// chosen, not defaulted into. Federated sign-in (--sso-issuer) is the
+	// multi-user remedy: each person authenticates at the identity provider and
+	// becomes a distinct principal, so no acknowledgment is needed.
+	if cfg.issuer == "" && cfg.token == "" && cfg.ssoIssuer == "" && !cfg.singleUser {
 		return fmt.Errorf("a public tunnel with built-in OAuth is single-user: every token it issues authenticates as %q, so different people connecting would be indistinguishable and would share connections, credentials, and parked data.\n"+
 			"  Serving only yourself: add --single-user to accept that posture.\n"+
-			"  Serving several people: validate an external identity provider's tokens with --issuer <url>", localSubject())
+			"  Serving several people: federate sign-in to an identity provider with --sso-issuer <url>,\n"+
+			"  or validate an external authorization server's tokens with --issuer <url>", localSubject())
 	}
 	return nil
 }
@@ -1067,6 +1134,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		if err := builtInAS.ConfigurePublicFlow(publicResource, approvalBase); err != nil {
 			return nil, nil, "", "", err
 		}
+		federated, err := configureBuiltInFederation(builtInAS, srv, cfg)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir))
 		builtInAS.Register(mcpMux)
 		rs := &auth.ResourceServer{
@@ -1074,8 +1145,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 			Revocations: revocations, RequireTokenID: true,
 		}
 		metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-		// The built-in AS mints tokens for the one local operator subject.
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
+		// Without federation the built-in AS mints tokens for the one local
+		// operator subject; federated sign-in makes each provider account a
+		// distinct principal.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", federated)
 		connectionBase, connectionMetadata = publicIssuer, metadataURL
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 		mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(publicResource, publicIssuer))
@@ -1099,7 +1172,11 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		// POST /oauth/revoke takes effect on /mcp immediately and consumed refresh
 		// tokens stay refused across restarts — same wiring as the tunnel mode.
 		builtInAS = auth.NewAuthServer(signer, issuer, audience, 2*time.Hour, revocations)
-		builtInAS.Subject = localSubject()                      // attribute runs to the real OS user, not a generic "operator"
+		builtInAS.Subject = localSubject() // attribute runs to the real OS user, not a generic "operator"
+		federated, err := configureBuiltInFederation(builtInAS, srv, cfg)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir)) // remember DCR client_ids across restarts (no re-auth)
 		builtInAS.Register(mcpMux)
 		rs := &auth.ResourceServer{
@@ -1107,9 +1184,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 			Revocations: revocations, RequireTokenID: true,
 		}
 		// The built-in AS always grants "mcp", so requiring it costs nothing and
-		// makes scope enforcement real instead of decorative. Single-principal:
-		// it mints tokens for the one local operator subject.
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
+		// makes scope enforcement real instead of decorative. Single-principal
+		// unless federated: with --sso-issuer each provider account is a
+		// distinct principal.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", federated)
 		connectionBase, connectionMetadata = issuer, "/.well-known/oauth-protected-resource"
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, issuer))
@@ -1370,9 +1448,17 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 			if cfg.publicURL != "" {
 				fmt.Fprintf(os.Stderr, "  Audience       %s (advertised as the protected-resource identifier)\n", firstNonEmpty(cfg.audience, endpoint))
 			}
+		case "oauth-local":
+			if cfg.ssoIssuer != "" {
+				printSSOPosture(cfg)
+			}
 		case "oauth-tunnel":
-			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
-			fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --issuer)\n", localSubject())
+			if cfg.ssoIssuer != "" {
+				printSSOPosture(cfg)
+			} else {
+				fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
+				fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --sso-issuer or --issuer)\n", localSubject())
+			}
 			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
 			switch {
 			case changedOrigin:
@@ -1410,6 +1496,17 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 // without printing the bearer value.
 func printManualConnect(url string) {
 	fmt.Fprintf(os.Stderr, "  Connect        point your client at %s with header Authorization: Bearer <token>\n", url)
+}
+
+// printSSOPosture describes federated built-in OAuth: where people sign in,
+// and that each provider account is its own principal.
+func printSSOPosture(cfg httpConfig) {
+	fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth; sign-in federated to %s\n", cfg.ssoIssuer)
+	if cfg.ssoHD != "" {
+		fmt.Fprintf(os.Stderr, "  Posture        multi-user — each provider account is a distinct principal (hd=%s required)\n", cfg.ssoHD)
+	} else {
+		fmt.Fprintln(os.Stderr, "  Posture        multi-user — each provider account is a distinct principal")
+	}
 }
 
 func claudeAvailable() bool {
@@ -1522,7 +1619,12 @@ type authPosture struct {
 	// when the operator lifted the loopback floor with --allow-remote-admin,
 	// so doctor can keep the exposure visible. Empty while the surface is local.
 	RemoteAdmin string `json:"remote_admin_addr,omitempty"`
-	UpdatedAt   string `json:"updated_at"`
+	// SSOIssuer records federated sign-in: the built-in server still mints the
+	// tokens (Issuer above), but people authenticate at this OIDC provider and
+	// each provider account is a distinct principal.
+	SSOIssuer       string `json:"sso_issuer,omitempty"`
+	SSOHostedDomain string `json:"sso_hosted_domain,omitempty"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
@@ -1575,6 +1677,7 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 	}
 	posture := authPosture{
 		Mode: mode, Issuer: issuer, Resource: resource, Audience: audience, Tunnel: cfg.tunnel,
+		SSOIssuer: cfg.ssoIssuer, SSOHostedDomain: cfg.ssoHD,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if cfg.tunnel != "" {
