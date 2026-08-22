@@ -77,9 +77,9 @@ func (s *Server) minimizeActive(upstream string) bool {
 // fields. It resolves ONLY bindings scoped to this caller (principal) AND this
 // destination upstream: a placeholder minted from upstream X for principal P is
 // inert on a call to any other upstream or by any other principal, so a model can't
-// replay a secret it saw from X by handing the placeholder to upstream Y. The audit
-// records the resolved args (audit means audit); the model only authored the
-// placeholder.
+// replay a secret it saw from X by handing the placeholder to upstream Y. Where the
+// audit record captures argument values (see argcapture.go), it records the
+// RESOLVED args; the model only authored the placeholder.
 func (s *Server) resolveOutbound(ctx context.Context, upstream string, args json.RawMessage) json.RawMessage {
 	if s.tokens == nil || len(args) == 0 {
 		return args
