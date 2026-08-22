@@ -993,9 +993,15 @@ func consoleAddr(cfg httpConfig) string {
 // surface at all; otherwise both share one mux. mode and bearer feed the
 // connect banner.
 func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
+	// The default audience over a tunnel is the public /mcp URL for every OAuth
+	// mode, external issuer included. The advertised RFC 9728 resource and the
+	// validated audience must be the same value: a client follows the metadata,
+	// requests a token for that resource indicator (RFC 8707), and presents it
+	// here — advertising one identifier while validating another guarantees a
+	// 401 for every client that does discovery correctly.
 	audience := cfg.audience
 	if audience == "" {
-		if cfg.tunnel != "" && cfg.issuer == "" && cfg.token == "" {
+		if cfg.tunnel != "" && cfg.token == "" {
 			audience = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
 		} else {
 			audience = "microagency"
@@ -1019,7 +1025,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 			if err != nil {
 				return nil, nil, "", "", err
 			}
-			resource := publicIssuer + "/mcp"
+			// Advertise exactly what the resource server validates. The default
+			// audience is this tunnel's /mcp URL; an explicit --audience changes
+			// the advertised resource with it, like the non-tunnel branch below.
+			resource := audience
 			metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
 			// An external issuer attests arbitrary subjects — a multi-principal surface.
 			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope, true)
@@ -1044,9 +1053,6 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 			return nil, nil, "", "", err
 		}
 		publicResource := publicIssuer + "/mcp"
-		if cfg.audience == "" {
-			audience = publicResource
-		}
 		signer, err := auth.LoadOrCreateSigner(oauthKeyPathFor(cfg.authDir))
 		if err != nil {
 			return nil, nil, "", "", fmt.Errorf("load OAuth key: %w", err)
@@ -1262,9 +1268,13 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	}
 
 	if cfg.publicURL != "" {
-		resource := strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
-		audience := firstNonEmpty(cfg.audience, resource)
-		slog.Info("public MCP endpoint ready", "url", resource, "auth", mode, "resource", resource, "audience", audience, "operator_addr", consoleAddr(cfg), "issuer_changed", changedOrigin)
+		endpoint := strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		audience := firstNonEmpty(cfg.audience, endpoint)
+		resource := endpoint
+		if mode == "oauth-external" {
+			resource = audience // the metadata advertises exactly what is validated
+		}
+		slog.Info("public MCP endpoint ready", "url", endpoint, "auth", mode, "resource", resource, "audience", audience, "operator_addr", consoleAddr(cfg), "issuer_changed", changedOrigin)
 	}
 	announce(srv, cfg, mode, bearer, opTokenFile, changedOrigin)
 
@@ -1357,6 +1367,9 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 		switch mode {
 		case "oauth-external":
 			fmt.Fprintf(os.Stderr, "  Auth           OAuth (issuer %s)\n", cfg.issuer)
+			if cfg.publicURL != "" {
+				fmt.Fprintf(os.Stderr, "  Audience       %s (advertised as the protected-resource identifier)\n", firstNonEmpty(cfg.audience, endpoint))
+			}
 		case "oauth-tunnel":
 			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
 			fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --issuer)\n", localSubject())
@@ -1549,10 +1562,12 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 			audience = "microagency"
 		}
 	} else if mode == "oauth-external" && cfg.publicURL != "" {
-		resource = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
+		// The advertised resource is the validated audience (default: the public
+		// /mcp URL), so doctor shows the identifier clients actually request.
 		if audience == "" {
-			audience = "microagency"
+			audience = strings.TrimSuffix(cfg.publicURL, "/") + "/mcp"
 		}
+		resource = audience
 	}
 	var previous authPosture
 	if b, err := os.ReadFile(path); err == nil {

@@ -83,9 +83,15 @@ microagency watches the tunnel process instead of assuming it stays up. If
 Use an external issuer for a shared deployment or an existing identity system:
 
 ```sh
-microagency up --tunnel cloudflare \
-  --issuer https://your-as.example.com --audience microagency
+microagency up --tunnel cloudflare --issuer https://your-as.example.com
 ```
+
+Without `--audience`, accepted tokens must carry the public `/mcp` URL as
+their audience. The discovery metadata advertises that same value as the
+resource, so a client following discovery requests exactly the token the
+gateway accepts. Quick-tunnel URLs change on restart; if your authorization
+server pins audiences, set `--audience` to a stable identifier. The gateway
+then validates and advertises that value instead.
 
 Add `--require-scope <scope>` to require a scope from that issuer. External
 issuer mode does not mount the built-in authorization endpoints.

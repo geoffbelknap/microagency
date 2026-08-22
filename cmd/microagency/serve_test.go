@@ -203,7 +203,9 @@ func TestTunnelExternalIssuerRemainsDistinctFromBuiltInOAuth(t *testing.T) {
 	if err := json.Unmarshal(metadataRec.Body.Bytes(), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Resource != "https://gateway.example/mcp" || len(metadata.AuthorizationServers) != 1 || metadata.AuthorizationServers[0] != issuer.URL {
+	// The advertised resource is the validated audience — here the explicit
+	// --audience value — never an identifier the resource server would reject.
+	if metadata.Resource != "gateway-audience" || len(metadata.AuthorizationServers) != 1 || metadata.AuthorizationServers[0] != issuer.URL {
 		t.Fatalf("external protected resource metadata = %+v", metadata)
 	}
 	for _, path := range []string{"/.well-known/oauth-authorization-server", "/oauth/register", "/oauth/authorize", "/oauth/token", "/oauth/revoke", "/oauth/jwks"} {
