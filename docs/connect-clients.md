@@ -92,7 +92,9 @@ microagency up
 For a shared deployment, `up --issuer <url>` validates tokens from an
 external authorization server. Clients log in through that issuer.
 
-Built-in OAuth also works over Cloudflare and ngrok tunnels. Consent stays on
+Built-in OAuth also works over Cloudflare and ngrok tunnels, and stays
+single-user there: pass `--single-user` to acknowledge that every remote
+client authenticates as you, or `up` refuses to start. Consent stays on
 the loopback operator listener. See [public mode](public-mode.md) for the
 endpoints, restart behavior, and external issuer option.
 

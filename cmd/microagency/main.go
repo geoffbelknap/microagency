@@ -206,6 +206,9 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --tunnel <provider>   tunnel provider: cloudflare (default with --public) or ngrok")
 	fmt.Fprintln(w, "    --tunnel-name <name>  run a named Cloudflare tunnel you created (stable URL; tokens survive restarts)")
 	fmt.Fprintln(w, "    --tunnel-url <url>    the named tunnel's public https:// origin (required with --tunnel-name)")
+	fmt.Fprintln(w, "    --single-user         acknowledge that the public built-in OAuth serves ONE person:")
+	fmt.Fprintln(w, "                          every remote client authenticates as you (required with a tunnel")
+	fmt.Fprintln(w, "                          unless --issuer or --token selects another auth mode)")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
@@ -250,8 +253,12 @@ type upOptions struct {
 	// itself running inside a microVM.
 	reduceEnginesOnly      bool
 	highAssuranceMultiUser bool
-	engineSpecs            []string
-	help                   bool
+	// singleUser acknowledges that a public tunnel in front of the built-in
+	// OAuth server serves exactly one person — the local operator. Without it,
+	// a tunnel with built-in OAuth refuses to start (see validateHTTPConfig).
+	singleUser  bool
+	engineSpecs []string
+	help        bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -312,6 +319,8 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.reduceEnginesOnly = true
 		case args[i] == "--high-assurance-multi-user":
 			o.highAssuranceMultiUser = true
+		case args[i] == "--single-user":
+			o.singleUser = true
 		case args[i] == "--no-register":
 			o.noRegister = true
 		case args[i] == "--foreground":
@@ -389,7 +398,7 @@ func run(args []string) {
 		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
-		noRegister: noRegister,
+		noRegister: noRegister, singleUser: o.singleUser,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -520,7 +529,8 @@ func daemonize(cfg httpConfig) {
 		case cfg.token != "":
 			fmt.Fprintln(os.Stderr, "    Public auth    explicit static bearer")
 		default:
-			fmt.Fprintln(os.Stderr, "    Public auth    built-in OAuth; consent stays on the loopback operator listener")
+			fmt.Fprintf(os.Stderr, "    Public auth    built-in OAuth, single-user — every remote client authenticates as %q\n", localSubject())
+			fmt.Fprintln(os.Stderr, "                   consent stays on the loopback operator listener")
 		}
 	}
 	fmt.Fprintf(os.Stderr, "    Logs           %s\n", logPath)
@@ -796,6 +806,7 @@ type httpConfig struct {
 	authDir                                          string // test-only override; production uses ~/.microagency
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
 	noRegister                                       bool
+	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
 }
 
 // defaultAdminAddr is where the operator surface (/admin + /console) binds when a
@@ -822,7 +833,16 @@ func effectiveAdminAddr(cfg httpConfig) string {
 
 func validateHTTPConfig(cfg httpConfig) error {
 	if cfg.tunnel == "" {
+		if cfg.singleUser {
+			return fmt.Errorf("--single-user only applies to a public tunnel; add --public or --tunnel, or drop the flag")
+		}
 		return nil
+	}
+	if cfg.singleUser && cfg.issuer != "" {
+		return fmt.Errorf("--single-user and --issuer are mutually exclusive: --single-user acknowledges the single-user built-in OAuth server, --issuer replaces it with an external one; drop one of them")
+	}
+	if cfg.singleUser && cfg.token != "" {
+		return fmt.Errorf("--single-user and --token are mutually exclusive: --token selects static bearer mode, which does not use the built-in OAuth server; drop one of them")
 	}
 	agentHost, _, err := net.SplitHostPort(cfg.addr)
 	if err != nil || !loopbackHost(agentHost) {
@@ -835,6 +855,16 @@ func validateHTTPConfig(cfg httpConfig) error {
 	}
 	if canonicalListenAddr(adminAddr) == canonicalListenAddr(cfg.addr) {
 		return fmt.Errorf("a public tunnel requires a separate operator listener; --admin-addr cannot equal --http")
+	}
+	// Public exposure of the built-in OAuth server is never silent. The built-in
+	// server identifies exactly one person — every token it issues carries the
+	// local operator's identity — so several humans connecting through the tunnel
+	// would merge into one caller: shared connections, shared credentials, shared
+	// parked data. That posture must be chosen, not defaulted into.
+	if cfg.issuer == "" && cfg.token == "" && !cfg.singleUser {
+		return fmt.Errorf("a public tunnel with built-in OAuth is single-user: every token it issues authenticates as %q, so different people connecting would be indistinguishable and would share connections, credentials, and parked data.\n"+
+			"  Serving only yourself: add --single-user to accept that posture.\n"+
+			"  Serving several people: validate an external identity provider's tokens with --issuer <url>", localSubject())
 	}
 	return nil
 }
@@ -1245,6 +1275,7 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 			fmt.Fprintf(os.Stderr, "  Auth           OAuth (issuer %s)\n", cfg.issuer)
 		case "oauth-tunnel":
 			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
+			fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --issuer)\n", localSubject())
 			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
 			switch {
 			case changedOrigin:

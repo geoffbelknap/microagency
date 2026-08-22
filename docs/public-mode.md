@@ -11,12 +11,22 @@ _Last updated: 2026-08-22_
 To use microagency from a web app, start its built-in tunnel mode:
 
 ```sh
-microagency up --public
+microagency up --public --single-user
 ```
 
 `--public` uses your installed `cloudflared` command. Use
 `--tunnel ngrok` to select ngrok instead. microagency runs the command and
 uses its assigned HTTPS URL as the OAuth issuer.
+
+The built-in OAuth server identifies exactly one person: you. Every token it
+issues authenticates as your local user, so several people connecting through
+the tunnel would be indistinguishable and would share connections, credentials,
+and parked data. `--single-user` is the required acknowledgment of that
+posture. Without it — and without `--issuer` or `--token` selecting another
+auth mode — `up` refuses to start. Startup output and `microagency doctor`
+both report the single-user posture while it is active. To serve several
+people, use an [external authorization server](#external-authorization-server)
+instead.
 
 Paste the printed `/mcp` URL into the remote MCP client. The client discovers
 the authorization server, registers, and opens a consent request. The consent
@@ -46,8 +56,13 @@ cloudflared tunnel route dns microagency mcp.example.com
 Then start microagency with the tunnel's name and its public URL:
 
 ```sh
-microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com
+microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com \
+  --single-user
 ```
+
+A named tunnel changes URL stability, not the auth posture: built-in OAuth
+still serves one person, so `--single-user` (or `--issuer`/`--token`) is
+still required.
 
 microagency runs `cloudflared tunnel run` pointed at the local MCP listener,
 overriding any ingress rules in your cloudflared config. The URL you supply

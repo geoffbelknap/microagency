@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,24 +54,46 @@ func registerClient(t *testing.T, ts *httptest.Server, c *http.Client) string {
 	return reg.ClientID
 }
 
-// approve runs GET+POST /authorize for the given client/challenge and returns the
-// issued auth code from the redirect.
+// consentRequestRE extracts the single-use request ID that binds the consent
+// POST to the pending grant the rendered page belongs to.
+var consentRequestRE = regexp.MustCompile(`name="request" value="([^"]+)"`)
+
+// browserConsent does what a real browser does: GET the consent page, read the
+// request ID out of the form, and POST the decision bound to it.
+func browserConsent(c *http.Client, authURL, decision string) (*http.Response, error) {
+	page, err := c.Get(authURL)
+	if err != nil {
+		return nil, err
+	}
+	body, err := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if page.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("consent GET status %d", page.StatusCode)
+	}
+	m := consentRequestRE.FindSubmatch(body)
+	if m == nil {
+		return nil, fmt.Errorf("consent page has no request binding")
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return nil, err
+	}
+	return c.PostForm(u.Scheme+"://"+u.Host+u.Path,
+		url.Values{"request": {string(m[1])}, "approve": {decision}})
+}
+
+// approve runs the browser consent flow for the given client/challenge and
+// returns the issued auth code from the redirect.
 func approve(t *testing.T, ts *httptest.Server, c *http.Client, clientID, challenge string) string {
 	t.Helper()
 	q := url.Values{
 		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"xyz"}, "scope": {"mcp"},
 	}
-	gr, err := c.Get(ts.URL + "/oauth/authorize?" + q.Encode())
-	if err != nil || gr.StatusCode != http.StatusOK {
-		t.Fatalf("consent GET: %v status=%v", err, gr.StatusCode)
-	}
-	form := url.Values{}
-	for k, v := range q {
-		form[k] = v
-	}
-	form.Set("approve", "yes")
-	pr, err := c.PostForm(ts.URL+"/oauth/authorize", form)
+	pr, err := browserConsent(c, ts.URL+"/oauth/authorize?"+q.Encode(), "yes")
 	if err != nil || pr.StatusCode != http.StatusFound {
 		t.Fatalf("approve POST: %v status=%v", err, pr.StatusCode)
 	}
@@ -253,6 +279,94 @@ func TestAuthServerRejectsUnknownClient(t *testing.T) {
 		url.QueryEscape(testRedirect) + "&code_challenge=x&code_challenge_method=S256")
 	if r.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unknown client = %d, want 400", r.StatusCode)
+	}
+}
+
+// A page in the operator's browser can register a client (open DCR) and fire a
+// form POST at the loopback listener. Consent must refuse anything a browser
+// labels cross-site, and must never accept authorize parameters over POST.
+func TestLocalConsentRefusesCrossSiteForgery(t *testing.T) {
+	ts, c, _ := newTestAS(t)
+	clientID := registerClient(t, ts, c)
+	challenge := pkceS256("a-sufficiently-long-pkce-code-verifier-1234567890")
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
+		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"xyz"}, "scope": {"mcp"},
+	}
+
+	// The old CSRF shape: POST the authorize parameters with approve=yes.
+	// It must not mint a code.
+	form := url.Values{}
+	for k, v := range q {
+		form[k] = v
+	}
+	form.Set("approve", "yes")
+	old, err := c.PostForm(ts.URL+"/oauth/authorize", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = old.Body.Close()
+	if old.StatusCode == http.StatusFound || old.Header.Get("Location") != "" {
+		t.Fatalf("parameter-carrying consent POST minted a code: %d %q", old.StatusCode, old.Header.Get("Location"))
+	}
+
+	// Get a REAL pending request ID, then forge the approval the way a browser
+	// fires it from another site. Every labeled-cross-site shape is refused.
+	page, err := c.Get(ts.URL + "/oauth/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	m := consentRequestRE.FindSubmatch(body)
+	if m == nil {
+		t.Fatal("consent page has no request binding")
+	}
+	decision := url.Values{"request": {string(m[1])}, "approve": {"yes"}}
+	postDecision := func(headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/oauth/authorize", strings.NewReader(decision.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp
+	}
+	for _, forged := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "https://attacker.example"},
+		{"Origin": "null"},
+		{"Sec-Fetch-Site": "cross-site", "Origin": "https://attacker.example"},
+	} {
+		if resp := postDecision(forged); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("forged consent POST %v = %d, want 403", forged, resp.StatusCode)
+		}
+	}
+
+	// The refusals fire before the pending lookup, so the legitimate
+	// same-origin approval with the same request ID still succeeds.
+	sameOrigin := map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": ts.URL}
+	approved := postDecision(sameOrigin)
+	if approved.StatusCode != http.StatusFound {
+		t.Fatalf("legitimate same-origin approval = %d, want 302", approved.StatusCode)
+	}
+	loc, _ := url.Parse(approved.Header.Get("Location"))
+	if loc.Query().Get("code") == "" {
+		t.Fatal("no code after legitimate approval")
+	}
+
+	// The request ID is single-use: replaying the approval mints nothing.
+	if replay := postDecision(sameOrigin); replay.StatusCode == http.StatusFound {
+		t.Fatal("request ID replay minted a second code")
 	}
 }
 
