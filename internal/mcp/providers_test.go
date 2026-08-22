@@ -170,7 +170,7 @@ func TestScopedURL_NoValuesUntouched(t *testing.T) {
 
 func TestAdminProviderParamsEndpoint(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 
 	// Known provider → its curated knobs.
 	rec := adminReq(t, h, "GET", "/admin/provider-params?url="+url.QueryEscape("https://mcp.supabase.com/mcp"), "tok", "")
@@ -236,7 +236,7 @@ func TestAdminAddUpstreamAppliesScopeParams(t *testing.T) {
 	t.Cleanup(func() { providerCatalog = restore })
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(ts.Client()))
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 
 	body := `{"name":"scoped","url":"` + ts.URL + `","scope_params":{"project_ref":"proj123","read_only":"true"}}`
 	if rec := adminReq(t, h, "POST", "/admin/upstreams", "tok", body); rec.Code != http.StatusCreated {
@@ -278,7 +278,7 @@ func TestAdminAddUpstreamRejectsBadScopeParam(t *testing.T) {
 	t.Cleanup(func() { providerCatalog = restore })
 
 	s := newTestServer(t, fakeRunner{}, WithUpstreamClient(ts.Client()))
-	h := s.AdminHandler("tok")
+	h := s.AdminHandler(OperatorAuth{LegacyToken: "tok"})
 	body := `{"name":"bad","url":"` + ts.URL + `","scope_params":{"read_only":"maybe"}}`
 	if rec := adminReq(t, h, "POST", "/admin/upstreams", "tok", body); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad scope param: %d, want 400 (%s)", rec.Code, rec.Body)

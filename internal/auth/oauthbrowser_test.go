@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,7 +20,7 @@ func TestAcquireInteractive(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()
@@ -29,13 +28,11 @@ func TestAcquireInteractive(t *testing.T) {
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-	// The "browser": approve the consent, then follow the 302 to the loopback
-	// callback (which microagency's listener is waiting on).
+	// The "browser": load the consent page, approve the request it is bound
+	// to, then follow the 302 to the loopback callback (which microagency's
+	// listener is waiting on).
 	browser := func(authURL string) error {
-		u, _ := url.Parse(authURL)
-		form := u.Query()
-		form.Set("approve", "yes")
-		r, err := noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, form)
+		r, err := browserConsent(noRedirect, authURL, "yes")
 		if err != nil {
 			return err
 		}
@@ -69,7 +66,7 @@ func TestAcquireInteractiveDenied(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()
@@ -77,10 +74,7 @@ func TestAcquireInteractiveDenied(t *testing.T) {
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	deny := func(authURL string) error {
-		u, _ := url.Parse(authURL)
-		form := u.Query()
-		form.Set("approve", "no")
-		r, err := noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, form)
+		r, err := browserConsent(noRedirect, authURL, "no")
 		if err != nil {
 			return err
 		}

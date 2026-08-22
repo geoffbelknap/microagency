@@ -640,7 +640,7 @@ func (s *Server) adminRevokeUpstream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential revocation failed: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	s.recordConnectionEvent("operator", name, "revoked")
+	s.recordConnectionEvent(operatorActor(r), name, "revoked")
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "revoked"})
 }
 

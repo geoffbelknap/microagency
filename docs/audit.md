@@ -4,7 +4,7 @@ description: The signed, hash-chained log every call lands in, and how to verify
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-22_
 
 Every discovery, proxied call, and reduction is written to an append-only
 audit log. Each line is hash-chained to its predecessor and **signed** (ES256)
@@ -20,6 +20,42 @@ The log is also verifiable offline by anyone holding only the public key.
 Verify from the console, under Activity → verify audit chain, or with
 `GET /admin/audit/verify`. It reports lines checked, how many were chained
 and signed, and the first break.
+
+## Argument capture
+
+Every proxied call records the upstream, tool, caller, byte counts, latency,
+and outcome. What the record keeps of the tool **arguments** depends on how
+the gateway authenticates its callers.
+
+A single-user gateway — the default local OAuth, stdio, or static bearer —
+records the full arguments. The operator reading the log is the same person
+whose calls produced it.
+
+A multi-user gateway (an external `--issuer`) serves many authenticated
+users, so full capture would concentrate every caller's raw arguments in one
+operator-readable file. There, each record instead carries the argument
+**structure** — keys, value types, string byte counts — and a SHA-256 digest
+of the canonicalized arguments, never the values. Such records are marked
+`"args_capture": "structure"`.
+
+The digest keeps records provable without retaining values. To verify a
+claimed argument set, canonicalize it — object keys sorted, no insignificant
+whitespace, number literals preserved as sent, no HTML escaping — then
+compare its SHA-256 against the record's `args_sha256` in the signed chain.
+
+An operator can opt one connection back up to full capture:
+
+```sh
+curl -fsS http://127.0.0.1:8766/admin/upstreams/github/audit-capture \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"full_args": true}'
+```
+
+Records from an opted-up connection carry `"args_capture": "full"`. The
+opt-up is visible in the upstream list (`audit_full_args`) and disclosed by
+`microagency doctor` as part of the auth posture. Calls authorized by an
+operation grant keep their existing record shape regardless: no raw
+arguments, opaque resource IDs (see the decision ledger below).
 
 ## Governed decision ledger
 

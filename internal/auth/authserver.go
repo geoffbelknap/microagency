@@ -43,7 +43,7 @@ type AuthServer struct {
 	mu          sync.Mutex
 	clients     map[string]clientReg // client_id -> registration
 	codes       map[string]authCode  // auth code -> pending grant (single-use, short TTL)
-	pending     map[string]authCode  // public flow waiting for approval on the loopback listener
+	pending     map[string]authCode  // request-ID-bound grants awaiting the consent decision
 	clientsPath string               // if set, client registrations persist here across restarts
 
 	resource        string
@@ -76,12 +76,18 @@ type authCode struct {
 }
 
 // NewAuthServer builds an AS that issues for audience, identified by issuer (our
-// own URL). accessTTL defaults to 1h.
-func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Duration) *AuthServer {
+// own URL). accessTTL defaults to 1h. revocations is the single denylist that
+// /oauth/revoke writes and refresh rotation consumes; the caller hands the SAME
+// list to its ResourceServer so a revoked token stops validating immediately,
+// and passes a file-backed list so rotation state survives restarts. A nil
+// revocations falls back to an ephemeral in-memory list for tests.
+func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Duration, revocations *RevocationList) *AuthServer {
 	if accessTTL <= 0 {
 		accessTTL = time.Hour
 	}
-	revocations, _ := NewRevocationList("")
+	if revocations == nil {
+		revocations, _ = NewRevocationList("")
+	}
 	return &AuthServer{
 		signer: signer, issuer: issuer, audience: audience, accessTTL: accessTTL,
 		clients: map[string]clientReg{}, codes: map[string]authCode{}, pending: map[string]authCode{},
@@ -94,7 +100,7 @@ func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Durat
 // human consent decision to approvalBase, which must be an HTTP loopback origin
 // served by the separate operator listener. The operator credential therefore
 // never crosses the public tunnel.
-func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string, revocations *RevocationList) error {
+func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string) error {
 	u, err := url.Parse(approvalBase)
 	if err != nil || u.Scheme != "http" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("public OAuth approval URL must be a loopback HTTP origin")
@@ -102,12 +108,8 @@ func (s *AuthServer) ConfigurePublicFlow(resource, approvalBase string, revocati
 	if strings.TrimSpace(resource) == "" {
 		return fmt.Errorf("public OAuth resource must be non-empty")
 	}
-	if revocations == nil {
-		return fmt.Errorf("public OAuth revocation list is required")
-	}
 	s.resource = resource
 	s.approvalBase = strings.TrimSuffix(approvalBase, "/")
-	s.revocations = revocations
 	s.requireState = true
 	s.requireResource = true
 	return nil
@@ -212,23 +214,26 @@ func (s *AuthServer) register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorize renders the one-click consent page (GET) and issues an auth code on
-// approval (POST). An unregistered client or mismatched redirect_uri is a hard 400
-// — we never redirect to an unvetted URI.
+// authorize renders the one-click consent page (GET), bound to a pending grant
+// under an unguessable request ID. The consent decision arrives as a POST that
+// carries only that ID (localConsent); authorization parameters are never
+// accepted over POST. An unregistered client or mismatched redirect_uri is a
+// hard 400 — we never redirect to an unvetted URI.
 func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPost:
+		if s.approvalBase != "" {
+			http.Error(w, "public consent is decided on the operator listener", http.StatusMethodNotAllowed)
+			return
+		}
+		s.localConsent(w, r)
+		return
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	q := r.URL.Query()
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid authorization request", http.StatusBadRequest)
-			return
-		}
-		q = r.Form
-	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 	challenge := q.Get("code_challenge")
@@ -248,45 +253,103 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectErr(w, r, redirectURI, state, "invalid_request")
 		return
 	}
+	requestID, ok := s.storePending(authCode{
+		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
+		scope: scope, state: state, resource: resource,
+	})
+	if !ok {
+		http.Error(w, "too many pending authorization requests", http.StatusTooManyRequests)
+		return
+	}
 	if s.approvalBase != "" {
-		if r.Method != http.MethodGet {
-			http.Error(w, "public consent is decided on the operator listener", http.StatusMethodNotAllowed)
-			return
-		}
-		requestID := randToken(24)
-		s.mu.Lock()
-		s.prunePendingLocked(time.Now())
-		s.pending[requestID] = authCode{
-			clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
-			subject: s.currentSubjectLocked(), scope: scope, state: state,
-			resource: resource, expiry: time.Now().Add(5 * time.Minute),
-		}
-		s.mu.Unlock()
 		u := s.approvalBase + "/oauth/consent?request=" + url.QueryEscape(requestID)
 		http.Redirect(w, r, u, http.StatusSeeOther)
 		return
 	}
+	authui.WriteConsent(w, client.name, redirectURI, map[string]string{"request": requestID})
+}
 
-	if r.Method == http.MethodGet {
-		authui.WriteConsent(w, client.name, redirectURI, map[string]string{
-			"response_type": "code", "client_id": clientID, "redirect_uri": redirectURI,
-			"code_challenge": challenge, "code_challenge_method": "S256", "state": state, "scope": scope,
-		})
+// storePending records a pending grant under a fresh unguessable request ID,
+// stamping the current subject and a 5-minute expiry. It refuses when the
+// pending table is full, so an unauthenticated flood cannot grow memory
+// without bound.
+func (s *AuthServer) storePending(pending authCode) (string, bool) {
+	requestID := randToken(24)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prunePendingLocked(time.Now())
+	if len(s.pending) >= 4096 {
+		return "", false
+	}
+	pending.subject = s.currentSubjectLocked()
+	pending.expiry = time.Now().Add(5 * time.Minute)
+	s.pending[requestID] = pending
+	return requestID, true
+}
+
+// localConsent decides a pending local-mode authorization. Cross-site request
+// forgery is the live threat: any web page in the operator's browser can fire
+// a form POST at the loopback listener, and open client registration means the
+// attacker controls a registered redirect_uri. Two independent defenses: the
+// POST must carry the unguessable single-use request ID that only the consent
+// page this server rendered contains, and a request the browser labels
+// cross-site (Sec-Fetch-Site, Origin) is refused outright.
+func (s *AuthServer) localConsent(w http.ResponseWriter, r *http.Request) {
+	if reason := crossSiteReason(r); reason != "" {
+		http.Error(w, "cross-site consent refused ("+reason+")", http.StatusForbidden)
 		return
 	}
-	// POST = the consent decision.
-	if q.Get("approve") != "yes" {
-		s.redirectErr(w, r, redirectURI, state, "access_denied")
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid consent", http.StatusBadRequest)
+		return
+	}
+	requestID := r.Form.Get("request")
+	s.mu.Lock()
+	s.prunePendingLocked(time.Now())
+	pending, ok := s.pending[requestID]
+	if ok {
+		delete(s.pending, requestID) // single-use, even on deny
+	}
+	s.mu.Unlock()
+	if !ok || requestID == "" {
+		authui.WriteMessage(w, "This authorization request is missing, expired, or was already used.")
+		return
+	}
+	if r.Form.Get("approve") != "yes" {
+		s.redirectErr(w, r, pending.redirectURI, pending.state, "access_denied")
 		return
 	}
 	code := randToken(24)
+	pending.expiry = time.Now().Add(60 * time.Second)
 	s.mu.Lock()
-	s.codes[code] = authCode{
-		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
-		subject: s.currentSubjectLocked(), scope: scope, resource: resource, expiry: time.Now().Add(60 * time.Second),
-	}
+	s.codes[code] = pending
 	s.mu.Unlock()
-	s.redirectAuthorizationResult(w, r, redirectURI, state, "code", code)
+	s.redirectAuthorizationResult(w, r, pending.redirectURI, pending.state, "code", code)
+}
+
+// crossSiteReason reports why r must be refused as a cross-site browser
+// request, or "" when it is acceptable. Browsers label every request with
+// Sec-Fetch-Site and attach Origin to cross-origin POSTs: only same-origin
+// requests and user-initiated navigations ("none") pass, and a present Origin
+// must match the host being served. A client that sends neither header (curl,
+// tests) passes — forging consent still requires the unguessable request ID.
+func crossSiteReason(r *http.Request) string {
+	site := r.Header.Get("Sec-Fetch-Site")
+	switch strings.ToLower(site) {
+	case "", "same-origin", "none":
+	default:
+		return "Sec-Fetch-Site " + site
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
+		return "Origin " + origin
+	}
+	return ""
 }
 
 // operatorConsent is deliberately reachable only on the separate loopback
@@ -304,6 +367,10 @@ func (s *AuthServer) operatorConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := r.URL.Query().Get("request")
 	if r.Method == http.MethodPost {
+		if reason := crossSiteReason(r); reason != "" {
+			http.Error(w, "cross-site consent refused ("+reason+")", http.StatusForbidden)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "invalid consent", http.StatusBadRequest)
@@ -396,40 +463,43 @@ func (s *AuthServer) grantCode(w http.ResponseWriter, f url.Values) {
 }
 
 func (s *AuthServer) grantRefresh(w http.ResponseWriter, f url.Values) {
-	_, scope, clientID, tokenID, expiry, ok := s.parseRefreshGrant(f.Get("refresh_token"))
+	subject, scope, clientID, tokenID, expiry, ok := s.parseRefreshGrant(f.Get("refresh_token"))
 	requestedClientID := f.Get("client_id")
-	if clientID == "" && !s.requireResource {
-		// Upgrade path for refresh tokens minted before client binding and jti
-		// were added. A successful refresh replaces the legacy token with a
-		// bound, rotating token. Public OAuth never accepts this legacy form.
-		clientID = requestedClientID
-	}
-	if !ok || clientID == "" || clientID != requestedClientID || (s.requireResource && tokenID == "") {
+	// Every token this server mints carries a client_id and a jti, so requiring
+	// both accepts nothing legitimate. It drops only refresh tokens minted
+	// before client binding and jti existed: unrotatable and, with no jti, not
+	// revocable — a 30-day credential we cannot cut off. Pre-production, so
+	// there is no compatibility to preserve.
+	if !ok || clientID == "" || tokenID == "" || clientID != requestedClientID {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	if tokenID != "" {
-		consumed, err := s.revocations.Consume(tokenID, expiry)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-			return
-		}
-		if !consumed {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
-			return
-		}
-	}
-	// Single-user AS: the identity is always the current local principal, not the
-	// subject baked into an older refresh token. Re-stamp s.Subject so an upgraded
-	// binary (e.g. one that now attributes to the real OS user instead of the
-	// legacy "operator") corrects the attribution WITHOUT forcing re-consent. The
-	// refresh token still had to be one we signed — it proves the session, the
-	// identity is ours to set. This changes when microagency grows multi-principal.
+	// Honor the subject baked into the refresh token, not the server's current
+	// one. If the local principal has changed since this token was issued (an
+	// upgraded binary now attributing to a different OS user, or a reconfigured
+	// Subject), the session no longer belongs to that identity: refuse so the
+	// client re-consents rather than silently rebinding the session across the
+	// identity change. This changes when microagency grows multi-principal.
 	s.mu.Lock()
-	subject := s.Subject
+	current := s.Subject
 	s.mu.Unlock()
-	if subject == "" {
-		subject = "operator"
+	if current == "" {
+		current = "operator"
+	}
+	if subject != current {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	// Consume the rotating token's jti only after every other check passes, so a
+	// request we are going to refuse never burns the token.
+	consumed, err := s.revocations.Consume(tokenID, expiry)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+	if !consumed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		return
 	}
 	s.issueTokens(w, subject, scope, clientID)
 }

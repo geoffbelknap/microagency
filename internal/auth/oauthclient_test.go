@@ -160,14 +160,11 @@ func TestAuthorizeURLResourceIndicator(t *testing.T) {
 	}
 }
 
-// approveAndCode POSTs the authorize params with approve=yes (simulating the
-// operator clicking Approve) and returns the issued auth code from the redirect.
+// approveAndCode runs the browser consent flow (simulating the operator
+// clicking Approve) and returns the issued auth code from the redirect.
 func approveAndCode(t *testing.T, c *http.Client, authURL string) string {
 	t.Helper()
-	u, _ := url.Parse(authURL)
-	form := u.Query()
-	form.Set("approve", "yes")
-	r, err := c.PostForm(u.Scheme+"://"+u.Host+u.Path, form)
+	r, err := browserConsent(c, authURL, "yes")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +191,7 @@ func TestOAuthClientFullFlowAgainstOwnAS(t *testing.T) {
 	ts := httptest.NewUnstartedServer(nil)
 	issuer := "http://" + ts.Listener.Addr().String()
 	mux := http.NewServeMux()
-	NewAuthServer(signer, issuer, "microagency", time.Hour).Register(mux)
+	NewAuthServer(signer, issuer, "microagency", time.Hour, nil).Register(mux)
 	mux.Handle("/.well-known/oauth-protected-resource", ProtectedResourceMetadata("microagency", issuer))
 	ts.Config.Handler = mux
 	ts.Start()
@@ -262,7 +259,7 @@ func TestRefreshTokenSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a restart: a brand-new AuthServer (empty maps) with the SAME signer.
-	as2 := NewAuthServer(signer, issuer, aud, time.Hour)
+	as2 := NewAuthServer(signer, issuer, aud, time.Hour, nil)
 	sub, scope, ok := as2.parseRefresh(rt)
 	if !ok {
 		t.Fatal("refresh token rejected after restart — the session would force re-auth")

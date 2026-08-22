@@ -25,6 +25,8 @@ import (
 
 type bearerSubjectAuth struct{}
 
+func (bearerSubjectAuth) MultiPrincipal() bool { return true } // any bearer becomes its own subject
+
 func (bearerSubjectAuth) Authenticate(r *http.Request) (*auth.Principal, error) {
 	subject := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if subject == "" || subject == r.Header.Get("Authorization") {
@@ -52,7 +54,7 @@ func newSelfServiceFixture(t *testing.T, maxPerUser int) *selfServiceFixture {
 	as := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + as.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "upstream", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "upstream", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"resource": upstreamResource, "authorization_servers": []string{asURL}})
@@ -93,7 +95,7 @@ func newSelfServiceFixture(t *testing.T, maxPerUser int) *selfServiceFixture {
 	users.Start()
 	t.Cleanup(users.Close)
 
-	admin := server.AdminHandler("operator")
+	admin := server.AdminHandler(OperatorAuth{LegacyToken: "operator"})
 	template, _ := json.Marshal(map[string]any{
 		"id": "documents", "display_name": "Documents", "url": upstream.URL,
 		"allowed_scopes": []string{"mcp"}, "default_scopes": []string{"mcp"},
@@ -151,18 +153,8 @@ func authorizeSelfServiceConnection(t *testing.T, fixture *selfServiceFixture, s
 	if started.Name == "" || started.AuthorizeURL == "" {
 		t.Fatalf("incomplete authorization response: %+v", started)
 	}
-	authorize, err := url.Parse(started.AuthorizeURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	form := authorize.Query()
-	form.Set("approve", "yes")
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	approved, err := noRedirect.PostForm(authorize.Scheme+"://"+authorize.Host+authorize.Path, form)
-	if err != nil {
-		t.Fatal(err)
-	}
-	approved.Body.Close()
+	approved := approveAtAS(t, noRedirect, started.AuthorizeURL)
 	if approved.StatusCode != http.StatusFound {
 		t.Fatalf("approve = %d, want 302", approved.StatusCode)
 	}
@@ -445,7 +437,7 @@ func TestConnectionTemplateValidationAndSecretCustody(t *testing.T) {
 	stateDir := t.TempDir()
 	store := openTestSecretStore(t, stateDir)
 	server := NewServer(fakeRunner{}, WithStateDir(stateDir), WithSecretStore(store))
-	admin := server.AdminHandler("operator")
+	admin := server.AdminHandler(OperatorAuth{LegacyToken: "operator"})
 	bad := adminReq(t, admin, http.MethodPost, "/admin/connection-templates", "operator", `{"id":"bad","url":"http://metadata.google.internal/mcp"}`)
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("insecure remote template accepted: %d", bad.Code)

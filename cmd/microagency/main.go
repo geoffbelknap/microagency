@@ -34,6 +34,7 @@ import (
 	"microagency/internal/console"
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
+	"microagency/internal/optoken"
 	"microagency/internal/tunnel"
 )
 
@@ -96,6 +97,8 @@ func main() {
 		runHook(args[1:])
 	case "mediation":
 		runMediation(args[1:])
+	case "token":
+		runToken(args[1:])
 	default:
 		// The usage dump never named the input, so "doctr" got 20 lines with
 		// zero occurrences of "doctr" and no suggestion — while an unknown
@@ -113,7 +116,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation", "token"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -184,6 +187,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
+	fmt.Fprintln(w, "  microagency token         manage named operator tokens for /admin and the console")
 	fmt.Fprintln(w, "")
 	upFlags(w)
 }
@@ -206,6 +210,9 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --tunnel <provider>   tunnel provider: cloudflare (default with --public) or ngrok")
 	fmt.Fprintln(w, "    --tunnel-name <name>  run a named Cloudflare tunnel you created (stable URL; tokens survive restarts)")
 	fmt.Fprintln(w, "    --tunnel-url <url>    the named tunnel's public https:// origin (required with --tunnel-name)")
+	fmt.Fprintln(w, "    --single-user         acknowledge that the public built-in OAuth serves ONE person:")
+	fmt.Fprintln(w, "                          every remote client authenticates as you (required with a tunnel")
+	fmt.Fprintln(w, "                          unless --issuer or --token selects another auth mode)")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
@@ -250,8 +257,12 @@ type upOptions struct {
 	// itself running inside a microVM.
 	reduceEnginesOnly      bool
 	highAssuranceMultiUser bool
-	engineSpecs            []string
-	help                   bool
+	// singleUser acknowledges that a public tunnel in front of the built-in
+	// OAuth server serves exactly one person — the local operator. Without it,
+	// a tunnel with built-in OAuth refuses to start (see validateHTTPConfig).
+	singleUser  bool
+	engineSpecs []string
+	help        bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -312,6 +323,8 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.reduceEnginesOnly = true
 		case args[i] == "--high-assurance-multi-user":
 			o.highAssuranceMultiUser = true
+		case args[i] == "--single-user":
+			o.singleUser = true
 		case args[i] == "--no-register":
 			o.noRegister = true
 		case args[i] == "--foreground":
@@ -389,7 +402,7 @@ func run(args []string) {
 		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
-		noRegister: noRegister,
+		noRegister: noRegister, singleUser: o.singleUser,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -520,7 +533,8 @@ func daemonize(cfg httpConfig) {
 		case cfg.token != "":
 			fmt.Fprintln(os.Stderr, "    Public auth    explicit static bearer")
 		default:
-			fmt.Fprintln(os.Stderr, "    Public auth    built-in OAuth; consent stays on the loopback operator listener")
+			fmt.Fprintf(os.Stderr, "    Public auth    built-in OAuth, single-user — every remote client authenticates as %q\n", localSubject())
+			fmt.Fprintln(os.Stderr, "                   consent stays on the loopback operator listener")
 		}
 	}
 	fmt.Fprintf(os.Stderr, "    Logs           %s\n", logPath)
@@ -796,6 +810,7 @@ type httpConfig struct {
 	authDir                                          string // test-only override; production uses ~/.microagency
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
 	noRegister                                       bool
+	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
 }
 
 // defaultAdminAddr is where the operator surface (/admin + /console) binds when a
@@ -822,7 +837,16 @@ func effectiveAdminAddr(cfg httpConfig) string {
 
 func validateHTTPConfig(cfg httpConfig) error {
 	if cfg.tunnel == "" {
+		if cfg.singleUser {
+			return fmt.Errorf("--single-user only applies to a public tunnel; add --public or --tunnel, or drop the flag")
+		}
 		return nil
+	}
+	if cfg.singleUser && cfg.issuer != "" {
+		return fmt.Errorf("--single-user and --issuer are mutually exclusive: --single-user acknowledges the single-user built-in OAuth server, --issuer replaces it with an external one; drop one of them")
+	}
+	if cfg.singleUser && cfg.token != "" {
+		return fmt.Errorf("--single-user and --token are mutually exclusive: --token selects static bearer mode, which does not use the built-in OAuth server; drop one of them")
 	}
 	agentHost, _, err := net.SplitHostPort(cfg.addr)
 	if err != nil || !loopbackHost(agentHost) {
@@ -835,6 +859,16 @@ func validateHTTPConfig(cfg httpConfig) error {
 	}
 	if canonicalListenAddr(adminAddr) == canonicalListenAddr(cfg.addr) {
 		return fmt.Errorf("a public tunnel requires a separate operator listener; --admin-addr cannot equal --http")
+	}
+	// Public exposure of the built-in OAuth server is never silent. The built-in
+	// server identifies exactly one person — every token it issues carries the
+	// local operator's identity — so several humans connecting through the tunnel
+	// would merge into one caller: shared connections, shared credentials, shared
+	// parked data. That posture must be chosen, not defaulted into.
+	if cfg.issuer == "" && cfg.token == "" && !cfg.singleUser {
+		return fmt.Errorf("a public tunnel with built-in OAuth is single-user: every token it issues authenticates as %q, so different people connecting would be indistinguishable and would share connections, credentials, and parked data.\n"+
+			"  Serving only yourself: add --single-user to accept that posture.\n"+
+			"  Serving several people: validate an external identity provider's tokens with --issuer <url>", localSubject())
 	}
 	return nil
 }
@@ -884,7 +918,7 @@ func consoleAddr(cfg httpConfig) string {
 // two muxes are distinct and the agent plane cannot route to the operator
 // surface at all; otherwise both share one mux. mode and bearer feed the
 // connect banner.
-func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
+func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMux, adminMux *http.ServeMux, mode, bearer string, err error) {
 	audience := cfg.audience
 	if audience == "" {
 		if cfg.tunnel != "" && cfg.issuer == "" && cfg.token == "" {
@@ -913,12 +947,13 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			}
 			resource := publicIssuer + "/mcp"
 			metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			// An external issuer attests arbitrary subjects — a multi-principal surface.
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope, true)
 			connectionBase, connectionMetadata = publicIssuer, metadataURL
 			mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 			mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(resource, cfg.issuer))
 		} else {
-			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope)
+			connectionAuth = mcp.OAuthAuthenticator(rs, cfg.requireScope, true)
 			connectionBase, connectionMetadata = "http://"+cfg.addr, "/.well-known/oauth-protected-resource"
 			mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 			mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, cfg.issuer))
@@ -946,10 +981,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 		if err != nil {
 			return nil, nil, "", "", err
 		}
-		builtInAS = auth.NewAuthServer(signer, publicIssuer, audience, 2*time.Hour)
+		builtInAS = auth.NewAuthServer(signer, publicIssuer, audience, 2*time.Hour, revocations)
 		builtInAS.Subject = localSubject()
 		approvalBase := "http://" + effectiveAdminAddr(cfg)
-		if err := builtInAS.ConfigurePublicFlow(publicResource, approvalBase, revocations); err != nil {
+		if err := builtInAS.ConfigurePublicFlow(publicResource, approvalBase); err != nil {
 			return nil, nil, "", "", err
 		}
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir))
@@ -959,7 +994,8 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 			Revocations: revocations, RequireTokenID: true,
 		}
 		metadataURL := publicIssuer + "/.well-known/oauth-protected-resource/mcp"
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		// The built-in AS mints tokens for the one local operator subject.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
 		connectionBase, connectionMetadata = publicIssuer, metadataURL
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuthMetadata(connectionAuth, metadataURL))
 		mcpMux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadata(publicResource, publicIssuer))
@@ -979,23 +1015,31 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 		// 2h access tokens: long enough that a working session never re-auths
 		// interactively (refresh is silent), short enough that a leaked bearer has a
 		// bounded life. (Was 12h — a long-lived bearer with no revocation path.)
-		builtInAS = auth.NewAuthServer(signer, issuer, audience, 2*time.Hour)
+		// The AS and the resource server share ONE file-backed revocation list, so
+		// POST /oauth/revoke takes effect on /mcp immediately and consumed refresh
+		// tokens stay refused across restarts — same wiring as the tunnel mode.
+		builtInAS = auth.NewAuthServer(signer, issuer, audience, 2*time.Hour, revocations)
 		builtInAS.Subject = localSubject()                      // attribute runs to the real OS user, not a generic "operator"
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir)) // remember DCR client_ids across restarts (no re-auth)
 		builtInAS.Register(mcpMux)
 		rs := &auth.ResourceServer{
 			Issuer: issuer, Audience: audience, Keys: signer.KeySet(),
-			Revocations: revocations,
+			Revocations: revocations, RequireTokenID: true,
 		}
 		// The built-in AS always grants "mcp", so requiring it costs nothing and
-		// makes scope enforcement real instead of decorative.
-		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp")
+		// makes scope enforcement real instead of decorative. Single-principal:
+		// it mints tokens for the one local operator subject.
+		connectionAuth = mcp.OAuthAuthenticator(rs, "mcp", false)
 		connectionBase, connectionMetadata = issuer, "/.well-known/oauth-protected-resource"
 		mcpMux.Handle("/mcp", srv.HTTPHandlerAuth(connectionAuth))
 		mcpMux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadata(audience, issuer))
 		mode = "oauth-local"
 	}
 	if connectionAuth != nil {
+		// Copy the authenticator's declared capability onto the server: it selects
+		// audit argument capture (structure + digest when multi-principal). Static
+		// bearer and stdio never reach here and keep the single-principal default.
+		srv.SetMultiPrincipalAuth(connectionAuth.MultiPrincipal())
 		connections, err := srv.UserConnectionsHandler(connectionAuth, connectionBase, connectionMetadata)
 		if err != nil {
 			return nil, nil, "", "", err
@@ -1014,8 +1058,10 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, operatorToken string) (mcpMux, 
 	if builtInAS != nil && mode == "oauth-tunnel" {
 		builtInAS.RegisterOperator(adminMux)
 	}
-	adminMux.Handle("/admin/", srv.AdminHandler(operatorToken))
-	adminMux.Handle("/console", console.Handler(operatorToken))
+	adminMux.Handle("/admin/", srv.AdminHandler(opAuth))
+	// The console self-authenticates on loopback with the legacy operator token
+	// (full admin — the console is a management UI).
+	adminMux.Handle("/console", console.Handler(opAuth.LegacyToken))
 	return mcpMux, adminMux, mode, bearer, nil
 }
 
@@ -1047,6 +1093,7 @@ func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persist
 
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	operatorToken, opTokenFile := persistentToken()
+	opAuth := mcp.OperatorAuth{LegacyToken: operatorToken, Tokens: optoken.NewStore(operatorTokensPath())}
 	mcpListener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		fatal("bind MCP listener", "addr", cfg.addr, "err", err)
@@ -1109,7 +1156,7 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		_ = os.Remove(tunnelStatePath())
 	}
 
-	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, operatorToken)
+	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, opAuth)
 	if err != nil {
 		if tun != nil {
 			_ = tun.Close()
@@ -1235,6 +1282,7 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 			fmt.Fprintf(os.Stderr, "  Auth           OAuth (issuer %s)\n", cfg.issuer)
 		case "oauth-tunnel":
 			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
+			fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --issuer)\n", localSubject())
 			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
 			switch {
 			case changedOrigin:
@@ -1459,8 +1507,12 @@ func firstNonEmpty(values ...string) string {
 // persistentToken reads-or-mints a stable bearer token at ~/.microagency/token
 // (0600), so the client config and any auto-registration survive restarts. file is
 // "" only when there is no home directory.
-// persistentToken is the OPERATOR token: it gates /admin + /console. It never
-// authenticates the agent-facing /mcp surface.
+// persistentToken is the LEGACY operator token: a full-admin break-glass
+// credential gating /admin + /console, and the value the loopback console
+// self-authenticates with. Named tokens (`microagency token`) are the managed
+// alternative with roles and expiry; admin actions with this one audit under
+// the fixed name optoken.LegacyName. It never authenticates the agent-facing
+// /mcp surface.
 func persistentToken() (token, file string) { return persistentTokenAt("token") }
 
 // persistentTokenAt reads (or mints and 0600-persists) a random token in

@@ -116,6 +116,13 @@ type Server struct {
 	decisionLoadErr  string
 	highAssurance    bool
 
+	// multiPrincipal records whether the agent-facing surface authenticates more
+	// than one distinct principal (an external issuer today). On a multi-principal
+	// gateway, non-governed proxy audit records capture argument structure and a
+	// digest instead of values (see argcapture.go), unless a connection is opted
+	// up to full capture. Set once at wiring time, before the server serves.
+	multiPrincipal bool
+
 	// Three concern-scoped stores, each with its OWN mutex — previously one shared
 	// mutex guarded runs, upstreams, tool usage, OAuth flows, and minimize policies
 	// alike. Splitting them cuts the blast radius (a change to run tracking can't
@@ -173,20 +180,36 @@ type runRecord struct {
 	// ParentRunID correlates a discovery/invocation performed inside a governed
 	// reduce program to the outer microVM run. Delivery="program" means the
 	// response went to that sandbox, not directly into model context.
-	ParentRunID      string   `json:"parent_run_id,omitempty"`
-	Delivery         string   `json:"delivery,omitempty"`
-	ProgramRequestID string   `json:"program_request_id,omitempty"`
-	SourceID         string   `json:"source_id,omitempty"`
-	Upstream         string   `json:"upstream,omitempty"` // proxy: the aggregated MCP name
-	Tool             string   `json:"tool,omitempty"`     // proxy: the upstream tool name
-	Args             string   `json:"args,omitempty"`     // proxy: the full call arguments (no redaction — audit means audit)
-	User             string   `json:"user,omitempty"`     // the OAuth sub that ran it
-	Campaign         string   `json:"campaign,omitempty"` // signed caller campaign claim
-	GrantID          string   `json:"grant_id,omitempty"`
-	GrantDigest      string   `json:"grant_digest,omitempty"`
-	Effect           string   `json:"effect,omitempty"`
-	ResourceIDs      []string `json:"resource_ids,omitempty"`
-	Session          string   `json:"session,omitempty"` // per-run SPIFFE identity
+	ParentRunID      string `json:"parent_run_id,omitempty"`
+	Delivery         string `json:"delivery,omitempty"`
+	ProgramRequestID string `json:"program_request_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	Upstream         string `json:"upstream,omitempty"` // proxy: the aggregated MCP name
+	Tool             string `json:"tool,omitempty"`     // proxy: the upstream tool name
+	// Args is the full call arguments. Captured verbatim on single-principal
+	// gateways (the operator reading the log made the calls); on a
+	// multi-principal gateway it is captured only for connections explicitly
+	// opted up — everything else records ArgsShape/ArgsSHA256 instead, so one
+	// operator-readable file doesn't concentrate every caller's raw arguments.
+	Args string `json:"args,omitempty"`
+	// ArgsCapture marks how arguments were captured: "" (full capture, or a
+	// governed record's deliberate blank), "structure" (shape + digest, no
+	// values), or "full" (multi-principal connection explicitly opted up).
+	ArgsCapture string `json:"args_capture,omitempty"`
+	// ArgsShape is the values-free structural mirror of the arguments (keys,
+	// types, string byte counts); ArgsSHA256 is the hex SHA-256 of the
+	// canonicalized arguments, so a claimed argument set stays verifiable
+	// against the signed chain. Both set only under "structure" capture.
+	ArgsShape   json.RawMessage `json:"args_shape,omitempty"`
+	ArgsSHA256  string          `json:"args_sha256,omitempty"`
+	User        string          `json:"user,omitempty"`     // the OAuth sub that ran it; admin-plane records carry the acting operator token's name
+	Reason      string          `json:"reason,omitempty"`   // operator-supplied justification (required for ref materialization)
+	Campaign    string          `json:"campaign,omitempty"` // signed caller campaign claim
+	GrantID     string          `json:"grant_id,omitempty"`
+	GrantDigest string          `json:"grant_digest,omitempty"`
+	Effect      string          `json:"effect,omitempty"`
+	ResourceIDs []string        `json:"resource_ids,omitempty"`
+	Session     string          `json:"session,omitempty"` // per-run SPIFFE identity
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.
@@ -279,6 +302,19 @@ func NewServer(r Runner, opts ...Option) *Server {
 func WithHighAssuranceMultiUser(enabled bool) Option {
 	return func(s *Server) { s.highAssurance = enabled }
 }
+
+// SetMultiPrincipalAuth records whether the agent-facing surface authenticates
+// more than one distinct principal, from the wired Authenticator's declared
+// capability (Authenticator.MultiPrincipal) — never from comparing mode
+// strings. Call at wiring time, before the server serves requests. It selects
+// audit argument capture: multi-principal deployments record structure + digest
+// for non-opted-up connections (see argcapture.go).
+func (s *Server) SetMultiPrincipalAuth(on bool) { s.multiPrincipal = on }
+
+// multiPrincipalAudit reports whether audit records must default to
+// structure-only argument capture. High-assurance mode implies a shared
+// multi-principal deployment even if a custom embedder forgot the wiring call.
+func (s *Server) multiPrincipalAudit() bool { return s.multiPrincipal || s.highAssurance }
 
 // withDecisionLedgerAppender is a narrow test seam for induced durable-write
 // failures. Production always uses an append+fsync implementation.

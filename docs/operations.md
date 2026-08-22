@@ -17,6 +17,7 @@ microagency doctor         # check runtime + engine health
 microagency openbao        # inspect or migrate managed OpenBao custody
 microagency hook install   # print the Claude Code egress-guard hook setup
 microagency mediation      # configure or inspect enforced workspace mediation
+microagency token          # manage named operator tokens for /admin + console
 ```
 
 Every command answers `--help` with its own usage; `microagency help`
@@ -25,13 +26,50 @@ the background and returns your terminal; `--foreground` keeps it attached
 for debugging, and `--stdio` serves a spawning client over stdin/stdout
 instead of HTTP.
 
+## Operator tokens
+
+Everything under `/admin`, and the console's data API, requires an operator
+token. Two credential kinds exist:
+
+- **Named tokens**, managed with `microagency token`. Each has a name, a
+  role, and an optional expiry. Only a SHA-256 hash is stored; the value is
+  printed once at creation.
+- **The legacy token** at `~/.microagency/token`: the original single
+  credential. It keeps working as a full-admin break-glass bearer and is what
+  the loopback console self-authenticates with. Its admin actions audit under
+  the fixed name `legacy-operator-token`.
+
+```sh
+microagency token create ops-alice --role admin          # full operator surface
+microagency token create ci-check --role auditor --expires 30d
+microagency token list                                   # names/roles/expiry, never values
+microagency token rotate ops-alice                       # re-mint; old value dies
+microagency token revoke ci-check                        # remove immediately
+```
+
+The `admin` role covers the whole operator surface. The `auditor` role is
+read-only observability: run listing, metrics, and audit/decision-ledger
+verification. Auditor tokens cannot mutate anything and cannot materialize
+parked data.
+
+The running gateway re-reads the token store on every request, so create,
+rotate, revoke, and expiry all take effect immediately — no restart. A
+request with no valid token is always refused; there is no unauthenticated
+operator mode.
+
+Admin-plane actions are audited under the acting token's name. Materializing
+a parked reference (`GET /admin/refs/{ref}`) additionally requires an
+explicit `?reason=` parameter, and both the actor and the reason land in the
+audit record.
+
 ## State files
 
 Everything lives under `~/.microagency`:
 
 | path | what it is |
 |---|---|
-| `token` | the operator token gating `/admin` and the console (0600) |
+| `token` | the legacy full-admin operator token; break-glass + console self-auth (0600) |
+| `operator-tokens.json` | named operator tokens: name, role, expiry, and value hash — never the value (0600) |
 | `oauth-key` | the built-in OAuth server's signing key |
 | `oauth-clients.json` | dynamic client registrations, bound to their issuer |
 | `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
@@ -61,12 +99,12 @@ deleted by `purge --full`.
 `purge` has two tiers, and both confirm before acting:
 
 - **Default**: deletes parked data (refs) and run/audit history. Connections,
-  connection templates, credentials, and the operator token are kept — no
-  re-auth.
+  connection templates, credentials, and the operator tokens (legacy and
+  named) are kept — no re-auth.
 - **`--full`**: deletes everything under `~/.microagency` — parked data,
   history, stored upstream credentials (you will re-authenticate every
-  connection), the operator token, and the local OAuth keys (Claude Code
-  will re-consent). With protected OpenBao custody, it deletes the external
+  connection), the operator tokens (legacy and named), and the local OAuth
+  keys (Claude Code will re-consent). With protected OpenBao custody, it deletes the external
   bootstrap record first and keeps the state directory if that deletion fails.
 
 `--yes`/`-y` skips the confirmation for scripted use.
@@ -97,6 +135,6 @@ contract, fail-closed mutation behavior, and structured denial evidence.
 
 The console's impact view separates tool-schema context from invocation and
 reduction responses. Read the same aggregate data from `GET /admin/metrics`,
-or scrape `GET /admin/metrics/prometheus`; both endpoints require the operator
-token. See [Measuring context cost](context-metrics.md) for exact byte
+or scrape `GET /admin/metrics/prometheus`; both endpoints accept any operator
+token, including read-only auditor tokens. See [Measuring context cost](context-metrics.md) for exact byte
 semantics, task correlation, privacy boundaries, and the offline baseline.

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,36 @@ import (
 	"microagency/internal/auth"
 	"microagency/internal/gateway"
 )
+
+// approveAtAS runs the browser consent flow at the AS: GET the consent page,
+// then POST the approval bound to the request ID the page carries.
+func approveAtAS(t *testing.T, c *http.Client, authURL string) *http.Response {
+	t.Helper()
+	page, err := c.Get(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if err != nil || page.StatusCode != http.StatusOK {
+		t.Fatalf("consent GET = %d (%v)", page.StatusCode, err)
+	}
+	m := regexp.MustCompile(`name="request" value="([^"]+)"`).FindSubmatch(body)
+	if m == nil {
+		t.Fatal("consent page has no request binding")
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := c.PostForm(u.Scheme+"://"+u.Host+u.Path,
+		url.Values{"request": {string(m[1])}, "approve": {"yes"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = approved.Body.Close()
+	return approved
+}
 
 // TestConsoleOAuthAddUpstream drives the whole console OAuth-add flow: POST the
 // upstream (no token) → get an authorize URL → the operator approves at the
@@ -31,7 +62,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -65,7 +96,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	tokenStore := openTestSecretStore(t, dir) // file store
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(tokenStore), WithStateDir(dir))
 	const opTok = "op"
-	admin := httptest.NewServer(srv.AdminHandler(opTok))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: opTok}))
 	defer admin.Close()
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -91,13 +122,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 	}
 
 	// 2. the operator approves at the upstream's AS → 302 back to our callback
-	au, _ := url.Parse(added.AuthorizeURL)
-	form := au.Query()
-	form.Set("approve", "yes")
-	approveResp, err := noRedirect.PostForm(au.Scheme+"://"+au.Host+au.Path, form)
-	if err != nil {
-		t.Fatal(err)
-	}
+	approveResp := approveAtAS(t, noRedirect, added.AuthorizeURL)
 	if approveResp.StatusCode != http.StatusFound {
 		t.Fatalf("approve = %d, want 302", approveResp.StatusCode)
 	}
@@ -159,7 +184,7 @@ func TestConsoleOAuthAddUpstream(t *testing.T) {
 // registers anything.
 func TestConsoleOAuthCallbackRejectsUnknownState(t *testing.T) {
 	srv := NewServer(fakeRunner{})
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 	r, err := http.Get(admin.URL + "/admin/oauth/callback?state=forged&code=x")
 	if err != nil {
@@ -182,7 +207,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -208,7 +233,7 @@ func TestConsoleOAuthAddPassesScope(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "up", "url": upTS.URL, "scope": "limacharlie:read limacharlie:write"})
@@ -264,7 +289,7 @@ func TestConsoleOAuthAddRejectsHostlessResourceIndicator(t *testing.T) {
 	defer upTS.Close()
 
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "evil", "url": upTS.URL})
@@ -294,7 +319,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	asTS := httptest.NewUnstartedServer(nil)
 	asURL := "http://" + asTS.Listener.Addr().String()
 	asMux := http.NewServeMux()
-	auth.NewAuthServer(signer, asURL, "microagency", time.Hour).Register(asMux)
+	auth.NewAuthServer(signer, asURL, "microagency", time.Hour, nil).Register(asMux)
 	var upstreamResource string
 	asMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -328,7 +353,7 @@ func TestConsoleReauthUpstream(t *testing.T) {
 	if err := srv.AddUpstream(context.Background(), "lc", &gateway.Upstream{Name: "lc", URL: upTS.URL, Client: &http.Client{}}); err != nil {
 		t.Fatalf("pre-register: %v", err)
 	}
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"scope": "limacharlie:read"})
@@ -393,7 +418,7 @@ func TestConsoleOAuthAddWithSuppliedClient(t *testing.T) {
 	dir := t.TempDir()
 	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL, "client_id": "goog-client-123", "client_secret": "goog-secret"})
@@ -438,7 +463,7 @@ func TestConsoleOAuthSuppliedClientOverridesStored(t *testing.T) {
 	dir := t.TempDir()
 	store := openTestSecretStore(t, dir)
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(store), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	add := func(id, secret string) string {
@@ -478,7 +503,7 @@ func TestConsoleOAuthAddNoDCRNoClientErrors(t *testing.T) {
 	dir := t.TempDir()
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}),
 		WithSecretStore(openTestSecretStore(t, dir)), WithStateDir(dir))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	body, _ := json.Marshal(map[string]any{"name": "gmail", "url": upURL})
@@ -529,7 +554,7 @@ func TestAdminOAuthScopesDiscovery(t *testing.T) {
 	upstreamResource = upTS.URL
 
 	srv := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}))
-	admin := httptest.NewServer(srv.AdminHandler("op"))
+	admin := httptest.NewServer(srv.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, admin.URL+"/admin/oauth-scopes?url="+url.QueryEscape(upTS.URL), nil)

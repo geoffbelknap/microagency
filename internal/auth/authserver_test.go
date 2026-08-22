@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,7 +29,7 @@ func newTestAS(t *testing.T) (*httptest.Server, *http.Client, *Signer) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	NewAuthServer(signer, testIss, testAud, time.Hour).Register(mux)
+	NewAuthServer(signer, testIss, testAud, time.Hour, nil).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	// Don't auto-follow redirects so we can read the auth code out of Location.
@@ -50,24 +54,46 @@ func registerClient(t *testing.T, ts *httptest.Server, c *http.Client) string {
 	return reg.ClientID
 }
 
-// approve runs GET+POST /authorize for the given client/challenge and returns the
-// issued auth code from the redirect.
+// consentRequestRE extracts the single-use request ID that binds the consent
+// POST to the pending grant the rendered page belongs to.
+var consentRequestRE = regexp.MustCompile(`name="request" value="([^"]+)"`)
+
+// browserConsent does what a real browser does: GET the consent page, read the
+// request ID out of the form, and POST the decision bound to it.
+func browserConsent(c *http.Client, authURL, decision string) (*http.Response, error) {
+	page, err := c.Get(authURL)
+	if err != nil {
+		return nil, err
+	}
+	body, err := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if page.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("consent GET status %d", page.StatusCode)
+	}
+	m := consentRequestRE.FindSubmatch(body)
+	if m == nil {
+		return nil, fmt.Errorf("consent page has no request binding")
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return nil, err
+	}
+	return c.PostForm(u.Scheme+"://"+u.Host+u.Path,
+		url.Values{"request": {string(m[1])}, "approve": {decision}})
+}
+
+// approve runs the browser consent flow for the given client/challenge and
+// returns the issued auth code from the redirect.
 func approve(t *testing.T, ts *httptest.Server, c *http.Client, clientID, challenge string) string {
 	t.Helper()
 	q := url.Values{
 		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"xyz"}, "scope": {"mcp"},
 	}
-	gr, err := c.Get(ts.URL + "/oauth/authorize?" + q.Encode())
-	if err != nil || gr.StatusCode != http.StatusOK {
-		t.Fatalf("consent GET: %v status=%v", err, gr.StatusCode)
-	}
-	form := url.Values{}
-	for k, v := range q {
-		form[k] = v
-	}
-	form.Set("approve", "yes")
-	pr, err := c.PostForm(ts.URL+"/oauth/authorize", form)
+	pr, err := browserConsent(c, ts.URL+"/oauth/authorize?"+q.Encode(), "yes")
 	if err != nil || pr.StatusCode != http.StatusFound {
 		t.Fatalf("approve POST: %v status=%v", err, pr.StatusCode)
 	}
@@ -141,15 +167,16 @@ func TestAuthServerFullFlow(t *testing.T) {
 	}
 }
 
-// A refresh re-stamps the CURRENT single-user subject, not the one baked into the
-// old refresh token — so an upgraded binary (new OS-user attribution) corrects run
-// attribution without forcing the client to re-consent.
-func TestRefreshRestampsCurrentSubject(t *testing.T) {
+// A refresh honors the subject baked into the presented token. When the local
+// principal changes between issue and refresh, the session no longer belongs to
+// that identity, so the refresh is refused (forcing re-consent) rather than
+// silently rebound to the new subject.
+func TestRefreshRefusedOnSubjectChange(t *testing.T) {
 	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	as := NewAuthServer(signer, testIss, testAud, time.Hour) // Subject defaults to "operator"
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, nil) // Subject defaults to "operator"
 	mux := http.NewServeMux()
 	as.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -168,22 +195,62 @@ func TestRefreshRestampsCurrentSubject(t *testing.T) {
 		t.Fatal("no refresh token")
 	}
 
-	// The binary is upgraded: the current subject is now the real OS user.
-	as.Subject = "alice"
-
+	// Same subject: the refresh succeeds and honors the token's own sub.
 	status, rf := postForm(t, c, ts.URL+"/oauth/token", url.Values{
 		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
 	})
 	if status != http.StatusOK {
-		t.Fatalf("refresh = %d (%v)", status, rf)
+		t.Fatalf("same-subject refresh = %d (%v)", status, rf)
 	}
+	rotated, _ := rf["refresh_token"].(string)
 	rs := &ResourceServer{Issuer: testIss, Audience: testAud, Keys: signer.KeySet()}
 	p, err := rs.Validate(context.Background(), rf["access_token"].(string))
 	if err != nil {
 		t.Fatalf("refreshed token invalid: %v", err)
 	}
-	if p.Subject != "alice" {
-		t.Fatalf("refresh should re-stamp the current subject; got %q, want alice", p.Subject)
+	if p.Subject != "operator" {
+		t.Fatalf("refresh should honor the token subject; got %q, want operator", p.Subject)
+	}
+
+	// The local principal changes (upgraded binary, reconfigured Subject).
+	as.Subject = "alice"
+
+	// The rotated token still carries sub=operator, which no longer matches the
+	// server. The refresh is refused, and the client must re-consent.
+	status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {rotated}, "client_id": {clientID},
+	})
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("subject-changed refresh = %d (%v), want 400 invalid_grant", status, body)
+	}
+}
+
+// A refresh token minted before client binding and jti existed (the legacy
+// form) is refused outright in local mode — it is unrotatable and, lacking a
+// jti, unrevocable.
+func TestRefreshRejectsLegacyFormat(t *testing.T) {
+	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
+	mux := http.NewServeMux()
+	as.Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	// A legacy refresh JWT: correct audience and subject, but no client_id and
+	// no jti — exactly what older builds minted.
+	legacy, err := signer.mint(testIss, testAud+refreshAudienceSuffix, "operator", []string{"mcp"}, refreshTTL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {legacy}, "client_id": {""},
+	})
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("legacy refresh = %d (%v), want 400 invalid_grant", status, body)
 	}
 }
 
@@ -215,6 +282,94 @@ func TestAuthServerRejectsUnknownClient(t *testing.T) {
 	}
 }
 
+// A page in the operator's browser can register a client (open DCR) and fire a
+// form POST at the loopback listener. Consent must refuse anything a browser
+// labels cross-site, and must never accept authorize parameters over POST.
+func TestLocalConsentRefusesCrossSiteForgery(t *testing.T) {
+	ts, c, _ := newTestAS(t)
+	clientID := registerClient(t, ts, c)
+	challenge := pkceS256("a-sufficiently-long-pkce-code-verifier-1234567890")
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {testRedirect},
+		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"xyz"}, "scope": {"mcp"},
+	}
+
+	// The old CSRF shape: POST the authorize parameters with approve=yes.
+	// It must not mint a code.
+	form := url.Values{}
+	for k, v := range q {
+		form[k] = v
+	}
+	form.Set("approve", "yes")
+	old, err := c.PostForm(ts.URL+"/oauth/authorize", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = old.Body.Close()
+	if old.StatusCode == http.StatusFound || old.Header.Get("Location") != "" {
+		t.Fatalf("parameter-carrying consent POST minted a code: %d %q", old.StatusCode, old.Header.Get("Location"))
+	}
+
+	// Get a REAL pending request ID, then forge the approval the way a browser
+	// fires it from another site. Every labeled-cross-site shape is refused.
+	page, err := c.Get(ts.URL + "/oauth/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	m := consentRequestRE.FindSubmatch(body)
+	if m == nil {
+		t.Fatal("consent page has no request binding")
+	}
+	decision := url.Values{"request": {string(m[1])}, "approve": {"yes"}}
+	postDecision := func(headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/oauth/authorize", strings.NewReader(decision.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp
+	}
+	for _, forged := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "https://attacker.example"},
+		{"Origin": "null"},
+		{"Sec-Fetch-Site": "cross-site", "Origin": "https://attacker.example"},
+	} {
+		if resp := postDecision(forged); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("forged consent POST %v = %d, want 403", forged, resp.StatusCode)
+		}
+	}
+
+	// The refusals fire before the pending lookup, so the legitimate
+	// same-origin approval with the same request ID still succeeds.
+	sameOrigin := map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": ts.URL}
+	approved := postDecision(sameOrigin)
+	if approved.StatusCode != http.StatusFound {
+		t.Fatalf("legitimate same-origin approval = %d, want 302", approved.StatusCode)
+	}
+	loc, _ := url.Parse(approved.Header.Get("Location"))
+	if loc.Query().Get("code") == "" {
+		t.Fatal("no code after legitimate approval")
+	}
+
+	// The request ID is single-use: replaying the approval mints nothing.
+	if replay := postDecision(sameOrigin); replay.StatusCode == http.StatusFound {
+		t.Fatal("request ID replay minted a second code")
+	}
+}
+
 // A dynamic client registration must survive a restart: a second AuthServer that
 // loads the same clients file recognizes a client_id registered against the first,
 // so the authorize path doesn't 400 "unknown client" (which would force a re-auth).
@@ -227,7 +382,7 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	clientsPath := filepath.Join(dir, "oauth-clients.json")
 
 	// First server: register a client (persists to clientsPath).
-	as1 := NewAuthServer(signer, testIss, testAud, time.Hour)
+	as1 := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
 	as1.LoadClients(clientsPath)
 	mux1 := http.NewServeMux()
 	as1.Register(mux1)
@@ -237,7 +392,7 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	clientID := registerClient(t, ts1, c)
 
 	// "Restart": a fresh AuthServer (empty in-memory map) loading the same file.
-	as2 := NewAuthServer(signer, testIss, testAud, time.Hour)
+	as2 := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
 	as2.LoadClients(clientsPath)
 	mux2 := http.NewServeMux()
 	as2.Register(mux2)
@@ -260,6 +415,87 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// The AS and the resource server share one file-backed revocation list in every
+// mode: POST /oauth/revoke kills the access token on the resource surface
+// immediately, and a consumed refresh token stays refused after a restart.
+func TestRevocationSharedWithResourceServerAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	signer, err := LoadOrCreateSigner(filepath.Join(dir, "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revocationsPath := filepath.Join(dir, "oauth-revocations.json")
+	revocations, err := NewRevocationList(revocationsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, revocations)
+	mux := http.NewServeMux()
+	as.Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	clientID := registerClient(t, ts, c)
+	verifier := "a-sufficiently-long-pkce-code-verifier-1234567890"
+	code := approve(t, ts, c, clientID, pkceS256(verifier))
+	status, tok := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {testRedirect}, "code_verifier": {verifier},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("token exchange = %d (%v)", status, tok)
+	}
+	access, _ := tok["access_token"].(string)
+	refresh, _ := tok["refresh_token"].(string)
+
+	// Resource server wired the way local mode wires it: SAME list, jti required.
+	rs := &ResourceServer{
+		Issuer: testIss, Audience: testAud, Keys: signer.KeySet(),
+		Revocations: revocations, RequireTokenID: true,
+	}
+	if _, err := rs.Validate(context.Background(), access); err != nil {
+		t.Fatalf("validate access token: %v", err)
+	}
+
+	// Revoking via the AS endpoint must take effect on the resource server at once.
+	revokeResp, err := c.PostForm(ts.URL+"/oauth/revoke", url.Values{"token": {access}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke = %d", revokeResp.StatusCode)
+	}
+	if _, err := rs.Validate(context.Background(), access); err == nil {
+		t.Fatal("revoked access token still validates on the resource server")
+	}
+
+	// Rotate the refresh token; its jti is consumed into the shared list.
+	if status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
+	}); status != http.StatusOK {
+		t.Fatalf("refresh = %d (%v)", status, body)
+	}
+
+	// "Restart": a fresh AS loading a fresh list from the same file. Replaying the
+	// consumed refresh token must still be refused.
+	reloaded, err := NewRevocationList(revocationsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as2 := NewAuthServer(signer, testIss, testAud, time.Hour, reloaded)
+	mux2 := http.NewServeMux()
+	as2.Register(mux2)
+	ts2 := httptest.NewServer(mux2)
+	t.Cleanup(ts2.Close)
+	if status, _ := postForm(t, c, ts2.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
+	}); status != http.StatusBadRequest {
+		t.Fatalf("consumed refresh token replay after restart = %d, want 400", status)
+	}
+}
+
 func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 	dir := t.TempDir()
 	signer, err := LoadOrCreateSigner(filepath.Join(dir, "k"))
@@ -267,7 +503,7 @@ func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientsPath := filepath.Join(dir, "oauth-clients.json")
-	as1 := NewAuthServer(signer, "https://first.example", "https://first.example/mcp", time.Hour)
+	as1 := NewAuthServer(signer, "https://first.example", "https://first.example/mcp", time.Hour, nil)
 	as1.LoadClients(clientsPath)
 	mux1 := http.NewServeMux()
 	as1.Register(mux1)
@@ -276,7 +512,7 @@ func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	clientID := registerClient(t, ts1, c)
 
-	as2 := NewAuthServer(signer, "https://second.example", "https://second.example/mcp", time.Hour)
+	as2 := NewAuthServer(signer, "https://second.example", "https://second.example/mcp", time.Hour, nil)
 	as2.LoadClients(clientsPath)
 	mux2 := http.NewServeMux()
 	as2.Register(mux2)

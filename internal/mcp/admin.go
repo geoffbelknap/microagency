@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"microagency/internal/auth"
 	"microagency/internal/catalog"
 	"microagency/internal/gateway"
+	"microagency/internal/optoken"
 	"microagency/internal/refstore"
 	"microagency/internal/sandbox"
 )
@@ -21,53 +23,60 @@ import (
 // RunInfo is an operator-facing view of one recorded run, including its egress
 // audit — the observability surface (what the agent reached, and what was denied).
 type RunInfo struct {
-	RunID                string   `json:"run_id"`
-	Kind                 string   `json:"kind,omitempty"`
-	TaskID               string   `json:"task_id,omitempty"`
-	ParentRunID          string   `json:"parent_run_id,omitempty"`
-	Delivery             string   `json:"delivery,omitempty"`
-	ProgramRequestID     string   `json:"program_request_id,omitempty"`
-	SourceID             string   `json:"source_id,omitempty"`
-	Upstream             string   `json:"upstream,omitempty"`
-	Tool                 string   `json:"tool,omitempty"`
-	Args                 string   `json:"args,omitempty"`
-	User                 string   `json:"user,omitempty"`
-	Campaign             string   `json:"campaign,omitempty"`
-	GrantID              string   `json:"grant_id,omitempty"`
-	GrantDigest          string   `json:"grant_digest,omitempty"`
-	Effect               string   `json:"effect,omitempty"`
-	ResourceIDs          []string `json:"resource_ids,omitempty"`
-	Session              string   `json:"session,omitempty"`
-	Substrate            string   `json:"substrate,omitempty"`
-	Engine               string   `json:"engine,omitempty"`
-	LatencyMs            int64    `json:"latency_ms"`
-	InputBytes           int      `json:"input_bytes"`
-	OutputBytes          int      `json:"output_bytes"`
-	RawBytes             int      `json:"raw_bytes,omitempty"`
-	ParkedBytes          int      `json:"parked_bytes,omitempty"`
-	MinimizedBytes       int      `json:"minimized_bytes,omitempty"`
-	ContextMeasured      bool     `json:"context_measured,omitempty"`
-	FullSchemaEntries    int      `json:"full_schema_entries,omitempty"`
-	SchemaDigestEntries  int      `json:"schema_digest_entries,omitempty"`
-	SummarizedEntries    int      `json:"summarized_entries,omitempty"`
-	OmittedEntries       int      `json:"omitted_entries,omitempty"`
-	ExactSchemaLookup    bool     `json:"exact_schema_lookup,omitempty"`
-	FusedInvocation      bool     `json:"fused_invocation,omitempty"`
-	TransformEngine      string   `json:"transform_engine,omitempty"`
-	TransformQuerySHA256 string   `json:"transform_query_sha256,omitempty"`
-	TransformInputBytes  int      `json:"transform_input_bytes,omitempty"`
-	TransformOutputBytes int      `json:"transform_output_bytes,omitempty"`
-	TransformLatencyMs   int64    `json:"transform_latency_ms,omitempty"`
-	TransformStatus      string   `json:"transform_status,omitempty"`
-	ProgramTools         []string `json:"program_tools,omitempty"`
-	ProgramCalls         int      `json:"program_calls,omitempty"`
-	ProgramBytes         int      `json:"program_bytes,omitempty"`
-	ProgramStatus        string   `json:"program_status,omitempty"`
-	Reffed               bool     `json:"reffed"`
-	Ref                  string   `json:"ref,omitempty"`
-	Bytes                int      `json:"bytes"`
-	Protected            int      `json:"protected,omitempty"` // sensitive field values minimized on this call
-	ExitCode             int      `json:"exit_code"`
+	RunID            string `json:"run_id"`
+	Kind             string `json:"kind,omitempty"`
+	TaskID           string `json:"task_id,omitempty"`
+	ParentRunID      string `json:"parent_run_id,omitempty"`
+	Delivery         string `json:"delivery,omitempty"`
+	ProgramRequestID string `json:"program_request_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	Upstream         string `json:"upstream,omitempty"`
+	Tool             string `json:"tool,omitempty"`
+	Args             string `json:"args,omitempty"`
+	// ArgsCapture/ArgsShape/ArgsSHA256 mirror the audit record's argument
+	// capture: on a multi-principal gateway, non-opted-up connections record
+	// structure + digest here instead of Args (see argcapture.go).
+	ArgsCapture          string          `json:"args_capture,omitempty"`
+	ArgsShape            json.RawMessage `json:"args_shape,omitempty"`
+	ArgsSHA256           string          `json:"args_sha256,omitempty"`
+	User                 string          `json:"user,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
+	Campaign             string          `json:"campaign,omitempty"`
+	GrantID              string          `json:"grant_id,omitempty"`
+	GrantDigest          string          `json:"grant_digest,omitempty"`
+	Effect               string          `json:"effect,omitempty"`
+	ResourceIDs          []string        `json:"resource_ids,omitempty"`
+	Session              string          `json:"session,omitempty"`
+	Substrate            string          `json:"substrate,omitempty"`
+	Engine               string          `json:"engine,omitempty"`
+	LatencyMs            int64           `json:"latency_ms"`
+	InputBytes           int             `json:"input_bytes"`
+	OutputBytes          int             `json:"output_bytes"`
+	RawBytes             int             `json:"raw_bytes,omitempty"`
+	ParkedBytes          int             `json:"parked_bytes,omitempty"`
+	MinimizedBytes       int             `json:"minimized_bytes,omitempty"`
+	ContextMeasured      bool            `json:"context_measured,omitempty"`
+	FullSchemaEntries    int             `json:"full_schema_entries,omitempty"`
+	SchemaDigestEntries  int             `json:"schema_digest_entries,omitempty"`
+	SummarizedEntries    int             `json:"summarized_entries,omitempty"`
+	OmittedEntries       int             `json:"omitted_entries,omitempty"`
+	ExactSchemaLookup    bool            `json:"exact_schema_lookup,omitempty"`
+	FusedInvocation      bool            `json:"fused_invocation,omitempty"`
+	TransformEngine      string          `json:"transform_engine,omitempty"`
+	TransformQuerySHA256 string          `json:"transform_query_sha256,omitempty"`
+	TransformInputBytes  int             `json:"transform_input_bytes,omitempty"`
+	TransformOutputBytes int             `json:"transform_output_bytes,omitempty"`
+	TransformLatencyMs   int64           `json:"transform_latency_ms,omitempty"`
+	TransformStatus      string          `json:"transform_status,omitempty"`
+	ProgramTools         []string        `json:"program_tools,omitempty"`
+	ProgramCalls         int             `json:"program_calls,omitempty"`
+	ProgramBytes         int             `json:"program_bytes,omitempty"`
+	ProgramStatus        string          `json:"program_status,omitempty"`
+	Reffed               bool            `json:"reffed"`
+	Ref                  string          `json:"ref,omitempty"`
+	Bytes                int             `json:"bytes"`
+	Protected            int             `json:"protected,omitempty"` // sensitive field values minimized on this call
+	ExitCode             int             `json:"exit_code"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -91,7 +100,8 @@ func (s *Server) RunLog() []RunInfo {
 			RunID: id, Kind: rec.Kind, TaskID: rec.TaskID, ParentRunID: rec.ParentRunID,
 			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
-			User: rec.User, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
+			ArgsCapture: rec.ArgsCapture, ArgsShape: rec.ArgsShape, ArgsSHA256: rec.ArgsSHA256,
+			User: rec.User, Reason: rec.Reason, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
 			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
@@ -114,14 +124,61 @@ func (s *Server) RunLog() []RunInfo {
 	return out
 }
 
+// OperatorAuth authenticates the operator surface (/admin + the console's data
+// API). Two credential kinds are accepted: the legacy single token from
+// ~/.microagency/token (full admin, break-glass), and named tokens from the
+// operator-token store, each carrying a role and optional expiry. With neither
+// configured every request is refused — an unconfigured operator plane is
+// closed, not open.
+type OperatorAuth struct {
+	// LegacyToken is the original single full-admin bearer; "" means the
+	// legacy credential path is disabled, never that auth is skipped.
+	LegacyToken string
+	// Tokens is the named operator-token store; nil disables named tokens.
+	Tokens *optoken.Store
+}
+
+// authenticate resolves a request to an operator identity: the acting token's
+// name and role. Comparisons are constant-time; an empty bearer never matches.
+func (a OperatorAuth) authenticate(r *http.Request) (name string, role optoken.Role, ok bool) {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if got == "" {
+		return "", "", false
+	}
+	if a.LegacyToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(a.LegacyToken)) == 1 {
+		return optoken.LegacyName, optoken.RoleAdmin, true
+	}
+	if a.Tokens != nil {
+		if t, ok := a.Tokens.Authenticate(got, time.Now()); ok {
+			return t.Name, t.Role, true
+		}
+	}
+	return "", "", false
+}
+
+// operatorActorKey carries the authenticated operator token's name in the
+// request context, so handlers attribute admin actions to the acting token.
+type operatorActorKey struct{}
+
+// operatorActor returns the acting operator token's name set by the guard.
+func operatorActor(r *http.Request) string {
+	if v, ok := r.Context().Value(operatorActorKey{}).(string); ok && v != "" {
+		return v
+	}
+	return "operator"
+}
+
 // AdminHandler is the operator-facing management API: read sources/runs/
 // upstreams (the console's data backbone + observability surface) and manage
-// sources and upstreams. A non-empty token is required (operator audience).
-func (s *Server) AdminHandler(token string) http.Handler {
+// sources and upstreams. Every route authenticates; most require the admin
+// role, and a small read-only observability set (runs, metrics, audit and
+// decision-ledger verification) also admits the auditor role.
+func (s *Server) AdminHandler(opAuth OperatorAuth) http.Handler {
 	mux := http.NewServeMux()
-	g := func(h http.HandlerFunc) http.HandlerFunc { return s.adminGuard(token, h) }
-	mux.HandleFunc("GET /admin/runs", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.RunLog()) }))
-	mux.HandleFunc("GET /admin/audit/verify", g(func(w http.ResponseWriter, _ *http.Request) {
+	g := func(h http.HandlerFunc) http.HandlerFunc { return s.operatorGuard(opAuth, true, h) }
+	ro := func(h http.HandlerFunc) http.HandlerFunc { return s.operatorGuard(opAuth, false, h) }
+	mux.HandleFunc("GET /admin/runs", ro(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.RunLog()) }))
+	mux.HandleFunc("GET /admin/audit/verify", ro(func(w http.ResponseWriter, _ *http.Request) {
 		v, err := s.VerifyAudit()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -129,7 +186,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, v)
 	}))
-	mux.HandleFunc("GET /admin/decisions/verify", g(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /admin/decisions/verify", ro(func(w http.ResponseWriter, r *http.Request) {
 		v := s.VerifyDecisionLedger(r.Context())
 		status := http.StatusOK
 		if !v.Intact || v.Error != "" {
@@ -138,8 +195,8 @@ func (s *Server) AdminHandler(token string) http.Handler {
 		writeJSON(w, status, v)
 	}))
 	mux.HandleFunc("GET /admin/refs/{ref}", g(s.adminMaterializeRef))
-	mux.HandleFunc("GET /admin/metrics", g(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Metrics()) }))
-	mux.HandleFunc("GET /admin/metrics/prometheus", g(func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /admin/metrics", ro(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.Metrics()) }))
+	mux.HandleFunc("GET /admin/metrics/prometheus", ro(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", PrometheusContentType)
 		_, _ = w.Write([]byte(s.Metrics().Prometheus()))
 	}))
@@ -176,6 +233,7 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
+	mux.HandleFunc("POST /admin/upstreams/{name}/audit-capture", g(s.adminSetAuditCapture))
 	mux.HandleFunc("POST /admin/upstreams/{name}/grants", g(s.adminSetGrants))
 	mux.HandleFunc("POST /admin/upstreams/{name}/minimize", g(s.adminSetMinimize))
 	mux.HandleFunc("POST /admin/upstreams/{name}/owner", g(s.adminSetOwner))
@@ -190,26 +248,40 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	return mux
 }
 
+// maxMaterializeReason bounds the operator-supplied reason so one request
+// can't bloat the audit log.
+const maxMaterializeReason = 512
+
 // adminMaterializeRef delivers the actual data behind a reference to the
 // authorized operator — the out-of-band channel that lets a human retrieve PII a
-// run kept off the model's context. It NEVER passes through the agent: it's
-// gated by the operator token and the retrieval is itself audited (ASK tenets 2
-// and 13 — every access to the data leaves a trace).
+// run kept off the model's context. It NEVER passes through the agent: it
+// requires the admin role, an explicit ?reason=, and the retrieval is itself
+// audited under the acting token's name (ASK tenets 2 and 13 — every access to
+// the data leaves a trace, and the trace says who and why).
 func (s *Server) adminMaterializeRef(w http.ResponseWriter, r *http.Request) {
 	if s.budget.Store == nil {
 		http.Error(w, "references are not enabled", http.StatusNotFound)
 		return
 	}
+	reason := strings.TrimSpace(r.URL.Query().Get("reason"))
+	if reason == "" {
+		http.Error(w, "materializing parked data requires a reason: repeat the request with ?reason=<why>; it is recorded in the audit log", http.StatusBadRequest)
+		return
+	}
+	if len(reason) > maxMaterializeReason {
+		http.Error(w, fmt.Sprintf("reason is too long (%d bytes; max %d)", len(reason), maxMaterializeReason), http.StatusBadRequest)
+		return
+	}
 	ref := r.PathValue("ref")
-	// The operator (this is behind the operator token) may materialize ANY ref
-	// out-of-band; owner binding gates the AGENT's reduce path, not the operator.
+	// The admin operator may materialize ANY ref out-of-band; owner binding
+	// gates the AGENT's reduce path, not the operator.
 	payload, _, ok := s.budget.Store.Get(refstore.Ref(ref))
 	if !ok {
 		http.Error(w, "unknown reference", http.StatusNotFound)
 		return
 	}
 	s.putRun(s.nextRunID(), runRecord{
-		Kind: "materialize", SourceID: ref, User: "operator",
+		Kind: "materialize", SourceID: ref, User: operatorActor(r), Reason: reason,
 		OutputBytes: len(payload), Bytes: len(payload),
 	})
 	name := strings.Trim(ref, "<>")
@@ -218,17 +290,23 @@ func (s *Server) adminMaterializeRef(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, payload)
 }
 
-// adminGuard enforces the operator bearer token (constant-time) on every route.
-func (s *Server) adminGuard(token string, h http.HandlerFunc) http.HandlerFunc {
+// operatorGuard authenticates every operator route and enforces the role gate.
+// requireAdmin routes refuse auditor tokens; the guard then stamps the acting
+// token's name into the request context for audit attribution. There is no
+// unauthenticated branch: a deployment with no operator credential configured
+// refuses every request rather than waving them through.
+func (s *Server) operatorGuard(opAuth OperatorAuth, requireAdmin bool, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if token != "" {
-			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		name, role, ok := opAuth.authenticate(r)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		h(w, r)
+		if requireAdmin && role != optoken.RoleAdmin {
+			http.Error(w, fmt.Sprintf("forbidden: operator token %q has the read-only auditor role; this operation requires an admin token", name), http.StatusForbidden)
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), operatorActorKey{}, name)))
 	}
 }
 
@@ -369,6 +447,28 @@ func (s *Server) adminSetReadOnly(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistReadOnly(name, in.ReadOnly)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "read_only": in.ReadOnly})
+}
+
+// adminSetAuditCapture opts a connection up to (or back down from) FULL
+// argument capture in the audit log on a multi-principal gateway, where the
+// default is structure + digest. Operator-plane: widening what the shared log
+// retains is a trust decision, so it lives behind the operator token. The
+// posture is disclosed in the upstream list and by `microagency doctor`.
+func (s *Server) adminSetAuditCapture(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		FullArgs bool `json:"full_args"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := s.SetUpstreamAuditFullArgs(name, in.FullArgs); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.persistAuditFullArgs(name, in.FullArgs)
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "audit_full_args": in.FullArgs})
 }
 
 func (s *Server) adminSetGrants(w http.ResponseWriter, r *http.Request) {

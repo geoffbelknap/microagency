@@ -154,7 +154,7 @@ func TestMinimizeFailsClosed(t *testing.T) {
 // The admin endpoint sets, clears, and validates a per-upstream policy.
 func TestAdminSetMinimizePolicy(t *testing.T) {
 	s := newTestServer(t, fakeRunner{}, WithMinimizer(cardTokenizer(), minimize.NewMemTokenStore()))
-	admin := httptest.NewServer(s.AdminHandler("op"))
+	admin := httptest.NewServer(s.AdminHandler(OperatorAuth{LegacyToken: "op"}))
 	defer admin.Close()
 
 	post := func(body string) int {
