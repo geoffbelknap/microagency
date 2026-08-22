@@ -181,6 +181,8 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 		fmt.Fprintf(out, "    audience        %s\n", dash(posture.Audience))
 		reportTunnelStability(out, posture)
 		fmt.Fprintln(out, "    consent         loopback operator listener")
+		fmt.Fprintln(out, "    posture         single-user (--single-user) — every remote client authenticates as the")
+		fmt.Fprintln(out, "                    local operator; several people need an external issuer (--issuer)")
 	case "oauth-external":
 		fmt.Fprintf(out, "  public auth      external OAuth (issuer %s)\n", dash(posture.Issuer))
 		if posture.Resource != "" {
