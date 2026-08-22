@@ -24,14 +24,30 @@ runs:
         go-version-file: go.mod
         cache: false
 
-    - uses: actions/cache@v4
+    # Pushes to main refresh the cache: run_id keeps the primary key unique, so
+    # the entry is always written instead of being skipped as a hit, and
+    # restore-keys start the job from the most recent entry for this scope.
+    - if: github.ref == 'refs/heads/main'
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cache/go-build
           ~/go/pkg/mod
-        # run_id makes the primary key unique, so the entry is always saved
-        # instead of being skipped as a hit; restore-keys still start the job
-        # from the most recent entry for this job and dependency set.
+        key: go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}
+        restore-keys: |
+          go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-
+          go-${{ runner.os }}-${{ inputs.job }}-
+
+    # Everywhere else, restore without saving. Pull requests read what main
+    # populated, so the job that paces a PR does not spend time uploading a cache
+    # at the end, and short-lived branches do not churn the repository's cache
+    # budget. A PR that changes go.sum still gets partial reuse via restore-keys.
+    - if: github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
         key: go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}
         restore-keys: |
           go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-
