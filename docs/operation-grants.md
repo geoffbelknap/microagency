@@ -4,12 +4,18 @@ description: Exact caller, operation, argument, resource, destination, and budge
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-22_
 
 Operation grants are an opt-in invocation boundary for shared gateways. A
-grant belongs to one signed token subject and campaign, names one connection
-and one exact upstream tool, and carries finite time, request, byte, and rate
+grant belongs to one caller identity and campaign, names one connection and
+one exact upstream tool, and carries finite time, request, byte, and rate
 limits. The MCP request can exercise a grant but cannot select or widen it.
+
+The `principal` field is the caller's principal key: the token issuer and
+subject joined as `issuer#subject`, with any literal `#` or `%` inside either
+half written as `%23` or `%25`. A bare token subject is rejected at
+validation, and a grant never matches the same `sub` asserted by a different
+issuer.
 
 Start a gateway-wide deny-by-default deployment with an external issuer:
 
@@ -37,7 +43,7 @@ curl -fsS http://127.0.0.1:8766/admin/upstreams/github/grants \
       "connection": "github",
       "tool": "get-repository",
       "effect": "read",
-      "principal": "user-123",
+      "principal": "https://issuer.example#user-123",
       "campaign": "review-2026-08",
       "expires_at": "2026-08-14T00:00:00Z",
       "arguments": [{

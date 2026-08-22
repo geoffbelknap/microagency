@@ -182,7 +182,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 	admin := httptest.NewServer(srv.AdminHandler("op"))
 	defer admin.Close()
 
-	if code, out := addUpstream(t, admin.URL, "op", map[string]any{"name": "alicedocs", "url": up.URL, "owner": "alice"}); code != http.StatusCreated || out["owner"] != "alice" {
+	if code, out := addUpstream(t, admin.URL, "op", map[string]any{"name": "alicedocs", "url": up.URL, "owner": pk("alice")}); code != http.StatusCreated || out["owner"] != pk("alice") {
 		t.Fatalf("add owned: code=%d out=%v", code, out)
 	}
 
@@ -193,7 +193,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 			owner = u.Owner
 		}
 	}
-	if owner != "alice" {
+	if owner != pk("alice") {
 		t.Fatalf("owner scoping lost across restart: %q", owner)
 	}
 	// Enforcement holds on the reloaded server.
@@ -202,7 +202,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 	}
 
 	// Reassign via the admin endpoint; the new scoping must persist too.
-	b, _ := json.Marshal(map[string]any{"owner": "carol"})
+	b, _ := json.Marshal(map[string]any{"owner": pk("carol")})
 	req, _ := http.NewRequest(http.MethodPost, admin.URL+"/admin/upstreams/alicedocs/owner", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer op")
 	resp, err := http.DefaultClient.Do(req)
@@ -215,7 +215,7 @@ func TestOwnerScopingPersistsAcrossRestart(t *testing.T) {
 	}
 	srv3 := reloadInto(t, dir)
 	for _, u := range srv3.UpstreamList() {
-		if u.Name == "alicedocs" && u.Owner != "carol" {
+		if u.Name == "alicedocs" && u.Owner != pk("carol") {
 			t.Fatalf("reassigned owner lost across restart: %q", u.Owner)
 		}
 	}

@@ -544,7 +544,7 @@ function openScope(u){
   openDialog(
     "Scope "+u.name+" to one user",
     "Enter a token subject: only that user can find or invoke this connection and the credential it holds. Leave empty to share it with every authenticated user.",
-    '<input class="inp mono" id="scope-inp" placeholder="token subject (empty = shared)" value="'+(u.owner||"").replace(/"/g,"&quot;")+'">',
+    '<input class="inp mono" id="scope-inp" placeholder="principal key issuer#subject (empty = shared)" value="'+(u.owner||"").replace(/"/g,"&quot;")+'">',
     "Apply",
     async function(){
       var sub=($("#scope-inp").value||"").trim();closeDialog();

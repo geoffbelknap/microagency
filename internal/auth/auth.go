@@ -36,9 +36,11 @@ type KeySet interface {
 	Key(ctx context.Context, kid string) (crypto.PublicKey, error)
 }
 
-// Principal is the authenticated caller extracted from a validated token. The
-// Subject is the user identity — it becomes the scope key, the audit subject,
-// and the join to that user's connected upstreams.
+// Principal is the authenticated caller extracted from a validated token. Its
+// identity is the (Issuer, Subject) pair: Key returns the canonical composite
+// form that becomes the scope key, the audit subject, and the join to that
+// user's connected upstreams. The bare Subject is never an identity on its
+// own — two issuers asserting the same `sub` are two different callers.
 type Principal struct {
 	Subject string
 	// Campaign is an immutable correlation/authority claim from the signed
@@ -47,6 +49,50 @@ type Principal struct {
 	Scopes   []string
 	Issuer   string
 	Expiry   time.Time
+}
+
+// LocalIssuer is the fixed issuer recorded for principals authenticated by
+// process-local trust rather than a validated token: the stdio/loopback
+// operator and the static-bearer principal. A fixed value keeps their keys
+// stable across restarts and configuration changes.
+const LocalIssuer = "local"
+
+// Key returns the caller's canonical identity: PrincipalKey(Issuer, Subject).
+// Use it — never the bare Subject — wherever identity is compared or persisted.
+func (p *Principal) Key() string { return PrincipalKey(p.Issuer, p.Subject) }
+
+// PrincipalKey composes the canonical caller identity "issuer#subject", with
+// "%" and "#" percent-escaped inside each half. The escaped halves cannot
+// contain "#", so the separator is unambiguous, and OIDC issuer identifiers
+// (https URLs without fragment) stay readable verbatim.
+func PrincipalKey(issuer, subject string) string {
+	return escapeKeyPart(issuer) + "#" + escapeKeyPart(subject)
+}
+
+// SplitPrincipalKey parses a canonical "issuer#subject" identity back into its
+// halves. It rejects anything that is not the exact canonical form — a bare
+// subject, empty halves, stray separators, or non-canonical escaping — so a
+// value that merely resembles a key cannot silently bind to no caller.
+func SplitPrincipalKey(key string) (issuer, subject string, err error) {
+	i := strings.Index(key, "#")
+	if i < 0 || strings.Contains(key[i+1:], "#") {
+		return "", "", fmt.Errorf("principal key %q must be the canonical issuer#subject form", key)
+	}
+	issuer, subject = unescapeKeyPart(key[:i]), unescapeKeyPart(key[i+1:])
+	if issuer == "" || subject == "" || PrincipalKey(issuer, subject) != key {
+		return "", "", fmt.Errorf("principal key %q must be the canonical issuer#subject form", key)
+	}
+	return issuer, subject, nil
+}
+
+func escapeKeyPart(s string) string {
+	s = strings.ReplaceAll(s, "%", "%25")
+	return strings.ReplaceAll(s, "#", "%23")
+}
+
+func unescapeKeyPart(s string) string {
+	s = strings.ReplaceAll(s, "%23", "#")
+	return strings.ReplaceAll(s, "%25", "%")
 }
 
 // HasScope reports whether the principal was granted scope s.

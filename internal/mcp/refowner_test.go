@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 // with the SAME error as a genuinely unknown ref (no oracle that it exists).
 func TestReduceRefBoundToCreatingPrincipal(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[{"x":1}]`, "alice") // owned by alice
+	ref, _ := store.Put(`[{"x":1}]`, pk("alice")) // owned by alice
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 		WithWasmEngine("jq", fakeEngine{}))
@@ -36,17 +37,18 @@ func TestReduceRefBoundToCreatingPrincipal(t *testing.T) {
 	}
 }
 
-// The default single-principal deployment (no per-request principal → subject
-// "local") is unaffected: a ref created as "local" reduces as "local".
+// The default single-principal deployment (no per-request principal → the
+// synthetic local caller) is unaffected: a ref created under the local caller
+// key reduces under the local caller key.
 func TestReduceRefLocalSubjectUnaffected(t *testing.T) {
 	store := refstore.NewMemStore()
-	ref, _ := store.Put(`[{"x":1}]`, "local")
+	ref, _ := store.Put(`[{"x":1}]`, localCallerKey())
 	s := newTestServer(t, fakeRunner{},
 		WithBudgetGate(budget.Gate{MaxBytes: 4096, Store: store}),
 		WithWasmEngine("jq", fakeEngine{}))
 	args, _ := json.Marshal(map[string]any{"ref": string(ref), "query": "length"})
 
-	if out := s.reduce(withPrincipal("local"), args); out["isError"].(bool) {
+	if out := s.reduce(context.Background(), args); out["isError"].(bool) {
 		raw, _ := json.Marshal(out)
 		t.Fatalf("local subject must reduce a local-owned ref: %s", raw)
 	}

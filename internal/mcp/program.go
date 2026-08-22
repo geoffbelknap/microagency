@@ -198,7 +198,7 @@ func (s *Server) validateProgramConfig(ctx context.Context, cfg programConfig) (
 	}
 
 	seen := make(map[string]struct{}, len(cfg.AllowedTools))
-	principal := principalOf(ctx).Subject
+	principal := callerKey(ctx)
 	for _, raw := range cfg.AllowedTools {
 		name := strings.TrimSpace(raw)
 		if name == "" || len(name) > 512 {
@@ -479,7 +479,7 @@ func (b *programBroker) materializeResult(result map[string]any) (string, error)
 			return "", errors.New("ref store unavailable")
 		}
 		data, owner, ok := b.server.budget.Store.Get(refstore.Ref(handle.Ref))
-		if !ok || owner != b.principal.Subject {
+		if !ok || owner != b.principal.Key() {
 			return "", errors.New("ref unavailable")
 		}
 		return data, nil
@@ -533,7 +533,7 @@ func (b *programBroker) Stats() programStats {
 
 func (b *programBroker) recordDecision(event, requestID, detail string, exitCode int) {
 	b.server.putRun(b.server.nextRunID(), runRecord{
-		Kind: "program", TaskID: b.taskID, User: b.principal.Subject,
+		Kind: "program", TaskID: b.taskID, User: b.principal.Key(),
 		ParentRunID: b.parentRun, Delivery: "program", ProgramRequestID: requestID,
 		Tool: event, ExitCode: exitCode, AuditErr: detail,
 	})

@@ -30,7 +30,7 @@ func (bearerSubjectAuth) Authenticate(r *http.Request) (*auth.Principal, error) 
 	if subject == "" || subject == r.Header.Get("Authorization") {
 		return nil, auth.ErrUnauthenticated
 	}
-	return &auth.Principal{Subject: subject, Scopes: []string{"mcp"}}, nil
+	return &auth.Principal{Subject: subject, Issuer: testIssuer, Scopes: []string{"mcp"}}, nil
 }
 
 type selfServiceFixture struct {
@@ -212,7 +212,7 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 		t.Fatalf("changed identity inherited old resources: %+v", renamed)
 	}
 
-	aliceTools, bobTools := fixture.server.indexedTools("alice"), fixture.server.indexedTools("bob")
+	aliceTools, bobTools := fixture.server.indexedTools(pk("alice")), fixture.server.indexedTools(pk("bob"))
 	aliceJSON, _ := json.Marshal(aliceTools)
 	bobJSON, _ := json.Marshal(bobTools)
 	if !strings.Contains(string(aliceJSON), aliceName+nsSep+"query") || strings.Contains(string(aliceJSON), bobName+nsSep+"query") {
@@ -243,14 +243,14 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 		}
 	}
 
-	ref, _ := fixture.server.budget.Store.Put(`[{"private":true}]`, "alice")
+	ref, _ := fixture.server.budget.Store.Put(`[{"private":true}]`, pk("alice"))
 	args, _ := json.Marshal(map[string]any{"ref": string(ref), "query": "length"})
 	if out := fixture.server.reduce(withPrincipal("bob"), args); !out["isError"].(bool) || !strings.Contains(errText(t, out), "unknown reference") {
 		t.Fatalf("Bob reduced Alice's reference: %+v", out)
 	}
 
-	aliceTokenKey := selfServiceTokenKey("alice", aliceName)
-	bobTokenKey := selfServiceTokenKey("bob", bobName)
+	aliceTokenKey := selfServiceTokenKey(pk("alice"), aliceName)
+	bobTokenKey := selfServiceTokenKey(pk("bob"), bobName)
 	if aliceTokenKey == bobTokenKey {
 		t.Fatal("principal credential keys collided")
 	}
@@ -263,8 +263,8 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 	if _, err := fixture.secrets.Load(context.Background(), tokenKey(aliceName)); !errors.Is(err, secretstore.ErrNotFound) {
 		t.Fatalf("self-service token was written to the shared key: %v", err)
 	}
-	aliceClientKey := selfServiceClientKey("alice", "documents", fixture.upstreamURL)
-	bobClientKey := selfServiceClientKey("bob", "documents", fixture.upstreamURL)
+	aliceClientKey := selfServiceClientKey(pk("alice"), "documents", fixture.upstreamURL)
+	bobClientKey := selfServiceClientKey(pk("bob"), "documents", fixture.upstreamURL)
 	if aliceClientKey == bobClientKey {
 		t.Fatal("principal DCR keys collided")
 	}
@@ -285,10 +285,10 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 
 	restarted := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(openTestSecretStore(t, fixture.stateDir)), WithStateDir(fixture.stateDir))
 	restarted.ReloadUpstreams(context.Background())
-	if aliceView, _ := json.Marshal(restarted.indexedTools("alice")); !strings.Contains(string(aliceView), aliceName+nsSep+"query") || strings.Contains(string(aliceView), bobName+nsSep+"query") {
+	if aliceView, _ := json.Marshal(restarted.indexedTools(pk("alice"))); !strings.Contains(string(aliceView), aliceName+nsSep+"query") || strings.Contains(string(aliceView), bobName+nsSep+"query") {
 		t.Fatalf("restart lost Alice isolation: %s", aliceView)
 	}
-	if bobView, _ := json.Marshal(restarted.indexedTools("bob")); !strings.Contains(string(bobView), bobName+nsSep+"query") || strings.Contains(string(bobView), aliceName+nsSep+"query") {
+	if bobView, _ := json.Marshal(restarted.indexedTools(pk("bob"))); !strings.Contains(string(bobView), bobName+nsSep+"query") || strings.Contains(string(bobView), aliceName+nsSep+"query") {
 		t.Fatalf("restart lost Bob isolation: %s", bobView)
 	}
 
@@ -297,7 +297,7 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, subject := range []string{"alice", "bob"} {
-		view, _ := json.Marshal(fixture.server.indexedTools(subject))
+		view, _ := json.Marshal(fixture.server.indexedTools(pk(subject)))
 		if !strings.Contains(string(view), "shared__query") {
 			t.Fatalf("shared operator connection missing for %s: %s", subject, view)
 		}
@@ -308,11 +308,11 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 			continue
 		}
 		switch {
-		case event.User == "alice" && event.Upstream == aliceName && event.Tool == "authorized":
+		case event.User == pk("alice") && event.Upstream == aliceName && event.Tool == "authorized":
 			aliceAuthorized = true
-		case event.User == "bob" && event.Upstream == bobName && event.Tool == "authorized":
+		case event.User == pk("bob") && event.Upstream == bobName && event.Tool == "authorized":
 			bobAuthorized = true
-		case event.User == "bob" && event.Upstream == "" && event.Tool == "delete_denied":
+		case event.User == pk("bob") && event.Upstream == "" && event.Tool == "delete_denied":
 			bobDenied = true
 		}
 	}
@@ -321,7 +321,7 @@ func TestSelfServiceConnectionsArePrincipalIsolated(t *testing.T) {
 	}
 
 	admin := adminReq(t, fixture.admin, http.MethodGet, "/admin/upstreams", "operator", "")
-	if !strings.Contains(admin.Body.String(), `"owner":"alice"`) || !strings.Contains(admin.Body.String(), `"owner":"bob"`) {
+	if !strings.Contains(admin.Body.String(), `"owner":"`+pk("alice")+`"`) || !strings.Contains(admin.Body.String(), `"owner":"`+pk("bob")+`"`) {
 		t.Fatalf("operator view omitted ownership: %s", admin.Body.String())
 	}
 	deletedByOperator := adminReq(t, fixture.admin, http.MethodDelete, "/admin/upstreams/"+bobName, "operator", "")
@@ -389,10 +389,10 @@ func TestSelfServiceQuotaAndRevocation(t *testing.T) {
 	if revoke.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", revoke.Code, revoke.Body.String())
 	}
-	if _, err := fixture.secrets.Load(context.Background(), selfServiceTokenKey("alice", name)); !errors.Is(err, secretstore.ErrNotFound) {
+	if _, err := fixture.secrets.Load(context.Background(), selfServiceTokenKey(pk("alice"), name)); !errors.Is(err, secretstore.ErrNotFound) {
 		t.Fatalf("revoked credential remains: %v", err)
 	}
-	if tools, _ := json.Marshal(fixture.server.indexedTools("alice")); strings.Contains(string(tools), name+nsSep) {
+	if tools, _ := json.Marshal(fixture.server.indexedTools(pk("alice"))); strings.Contains(string(tools), name+nsSep) {
 		t.Fatalf("revoked connection remains discoverable: %s", tools)
 	}
 	before := fixture.calls.Load()
@@ -413,12 +413,12 @@ func TestSelfServiceQuotaAndRevocation(t *testing.T) {
 	if reauth := adminReq(t, fixture.admin, http.MethodPost, "/admin/upstreams/"+name+"/reauth", "operator", "{}"); reauth.Code != http.StatusConflict {
 		t.Fatalf("operator rebound user credential = %d", reauth.Code)
 	}
-	if owner := adminReq(t, fixture.admin, http.MethodPost, "/admin/upstreams/"+name+"/owner", "operator", `{"owner":"bob"}`); owner.Code != http.StatusConflict {
+	if owner := adminReq(t, fixture.admin, http.MethodPost, "/admin/upstreams/"+name+"/owner", "operator", `{"owner":"`+pk("bob")+`"}`); owner.Code != http.StatusConflict {
 		t.Fatalf("operator transferred user grant = %d", owner.Code)
 	}
 	restarted := NewServer(fakeRunner{}, WithUpstreamClient(&http.Client{}), WithSecretStore(openTestSecretStore(t, fixture.stateDir)), WithStateDir(fixture.stateDir))
 	restarted.ReloadUpstreams(context.Background())
-	if view, _ := json.Marshal(restarted.indexedTools("alice")); strings.Contains(string(view), name+nsSep) {
+	if view, _ := json.Marshal(restarted.indexedTools(pk("alice"))); strings.Contains(string(view), name+nsSep) {
 		t.Fatalf("revoked credential became discoverable after restart: %s", view)
 	}
 	foundRevoked := false
@@ -436,7 +436,7 @@ func TestSelfServiceQuotaAndRevocation(t *testing.T) {
 	if deleted.StatusCode != http.StatusNoContent {
 		t.Fatalf("owner delete = %d", deleted.StatusCode)
 	}
-	if _, err := fixture.secrets.Load(context.Background(), selfServiceClientKey("alice", "documents", fixture.upstreamURL)); !errors.Is(err, secretstore.ErrNotFound) {
+	if _, err := fixture.secrets.Load(context.Background(), selfServiceClientKey(pk("alice"), "documents", fixture.upstreamURL)); !errors.Is(err, secretstore.ErrNotFound) {
 		t.Fatalf("last-connection DCR record remains after delete: %v", err)
 	}
 }

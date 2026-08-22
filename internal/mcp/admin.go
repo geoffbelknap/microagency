@@ -146,9 +146,11 @@ func (s *Server) AdminHandler(token string) http.Handler {
 	mux.HandleFunc("GET /admin/tools/rank", g(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		limit, _ := strconv.Atoi(q.Get("limit"))
+		// The subject parameter takes a canonical principal key (issuer#subject);
+		// the default is the local operator's key.
 		subject := q.Get("subject")
 		if subject == "" {
-			subject = "local"
+			subject = auth.PrincipalKey(auth.LocalIssuer, "local")
 		}
 		writeJSON(w, http.StatusOK, s.RankTools(subject, q.Get("q"), limit))
 	}))
@@ -238,9 +240,9 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		Scope    string `json:"scope"`     // OAuth scopes to request (space-separated); operator-chosen, least-privilege
 		Discover bool   `json:"discover"`  // register DISCOVERED (findable, not invocable) instead of enabled
 		ReadOnly bool   `json:"read_only"` // expose only READ tools; refuse writes (least-privilege at onboarding)
-		// Owner scopes the connection to ONE authenticated principal (by token
-		// subject): only that user can find or invoke it. "" = shared with every
-		// authenticated user of this gateway.
+		// Owner scopes the connection to ONE authenticated principal, by canonical
+		// identity key (issuer#subject): only that caller can find or invoke it.
+		// "" = shared with every authenticated user of this gateway.
 		Owner string `json:"owner"`
 		// ScopeParams narrows the upstream connection AT THE PROVIDER: operator-approved
 		// values for a known provider's curated scoping knobs (e.g. Supabase project_ref,
@@ -256,6 +258,15 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
+	}
+	// A non-canonical owner (e.g. a bare token subject) matches no authenticated
+	// caller; refuse it here so the operator learns immediately instead of
+	// shipping a connection nobody can reach.
+	if in.Owner != "" {
+		if _, _, err := auth.SplitPrincipalKey(in.Owner); err != nil {
+			http.Error(w, "owner: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	// Apply provider scoping at add-time: bake the operator's chosen knobs into the
 	// URL so every downstream use (OAuth probe, registration, persistence) targets
@@ -312,8 +323,9 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminSetOwner scopes (or, with "", un-scopes) a connection to one principal's
-// subject. Operator-plane: assigning ownership is a trust decision, so it lives
-// behind the operator token like every other grant.
+// canonical identity key (issuer#subject). Operator-plane: assigning ownership
+// is a trust decision, so it lives behind the operator token like every other
+// grant.
 func (s *Server) adminSetOwner(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var in struct {
@@ -322,6 +334,12 @@ func (s *Server) adminSetOwner(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
+	}
+	if in.Owner != "" {
+		if _, _, err := auth.SplitPrincipalKey(in.Owner); err != nil {
+			http.Error(w, "owner: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if err := s.SetUpstreamOwner(name, in.Owner); err != nil {
 		status := http.StatusNotFound

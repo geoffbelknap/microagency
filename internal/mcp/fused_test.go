@@ -233,7 +233,7 @@ func TestFusedTransformOutputThresholdAndOwnerIsolation(t *testing.T) {
 	}
 	engine := &fusedEngine{output: []byte(projected)}
 	s := newTestServer(t, fakeRunner{}, WithBudgetGate(budget.Gate{MaxBytes: 128, Store: store}), WithWasmEngine("jq", engine))
-	if err := s.AddUpstream(context.Background(), "owned", conn, WithOwner("alice")); err != nil {
+	if err := s.AddUpstream(context.Background(), "owned", conn, WithOwner(pk("alice"))); err != nil {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]any{
@@ -249,7 +249,7 @@ func TestFusedTransformOutputThresholdAndOwnerIsolation(t *testing.T) {
 	result := toolContentJSON(t, allowed)
 	ref, _ := result["ref"].(string)
 	stored, owner, ok := store.Get(refstore.Ref(ref))
-	if ref == "" || !ok || owner != "alice" || stored != projected || strings.Contains(stored, "RAW_MUST_NOT_BE_STORED") {
+	if ref == "" || !ok || owner != pk("alice") || stored != projected || strings.Contains(stored, "RAW_MUST_NOT_BE_STORED") {
 		t.Fatalf("transformed output reference = ref:%q owner:%q ok:%v bytes:%d", ref, owner, ok, len(stored))
 	}
 }

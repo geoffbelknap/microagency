@@ -145,7 +145,7 @@ func (s *Server) fusedProxyResult(ctx context.Context, runID, upstream, tool, so
 	if minimizedBytes < 0 {
 		minimizedBytes = 0
 	}
-	outcome := s.budget.Apply(answer, principalOf(ctx).Subject)
+	outcome := s.budget.Apply(answer, callerKey(ctx))
 	return proxyOutcome{
 		result:   s.fusedResult(runID, sourceTool, transform, outcome),
 		rawBytes: rawBytes, minimizedBytes: minimizedBytes, outcome: outcome,

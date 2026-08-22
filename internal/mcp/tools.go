@@ -279,7 +279,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			return toolError("reduce: give references (ref/refs) OR inline data, not both")
 		}
 		payloads = make([]string, len(refs))
-		subject := principalOf(ctx).Subject
+		subject := callerKey(ctx)
 		for i, rf := range refs {
 			p, owner, ok := s.budget.Store.Get(refstore.Ref(rf))
 			// A ref is bound to the subject that created it. Another principal holding
@@ -311,7 +311,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 	for _, p := range payloads {
 		totalIn += len(p)
 	}
-	user := principalOf(ctx).Subject
+	user := callerKey(ctx)
 	runID := s.nextRunID()
 	start := time.Now()
 

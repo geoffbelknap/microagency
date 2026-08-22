@@ -4,7 +4,7 @@ description: How find_tools and call_tool keep a thousand tools out of the conte
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-22_
 
 Upstream tools are not added to `tools/list`, because hundreds of tool
 schemas would swamp the model's context. They live in an index instead. The
@@ -29,8 +29,11 @@ schemas, arguments, or example values:
 
 ```sh
 curl -H "Authorization: Bearer $OPERATOR_TOKEN" \
-  "http://127.0.0.1:8765/admin/tools/rank?q=reschedule+meeting&subject=local"
+  "http://127.0.0.1:8765/admin/tools/rank?q=reschedule+meeting"
 ```
+
+`subject` selects whose scoped index to rank, as a principal key
+(`issuer#subject`, URL-encoded); it defaults to the local caller.
 
 The response reports names, scores, matched query terms, exact-name status,
 and usage. The query is not stored as ranking telemetry.

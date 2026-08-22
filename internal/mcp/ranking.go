@@ -41,15 +41,16 @@ type ToolRankInfo struct {
 }
 
 // RankTools explains the local rank for one caller-scoped index without storing
-// the query or exposing the protected metadata used to build the score.
-func (s *Server) RankTools(subject, query string, limit int) []ToolRankInfo {
+// the query or exposing the protected metadata used to build the score. The
+// caller is identified by canonical principal key (issuer#subject).
+func (s *Server) RankTools(callerKey, query string, limit int) []ToolRankInfo {
 	if limit <= 0 {
 		limit = 10
 	}
 	if limit > 50 {
 		limit = 50
 	}
-	ranked := rankIndexedTools(query, s.indexedTools(subject))
+	ranked := rankIndexedTools(query, s.indexedTools(callerKey))
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
 	}

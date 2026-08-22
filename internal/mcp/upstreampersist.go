@@ -31,7 +31,7 @@ type upstreamReg struct {
 	Discover    bool             `json:"discover"`
 	Auth        string           `json:"auth,omitempty"`         // authOAuth|authStatic|authNone; "" = oauth (legacy)
 	ReadOnly    bool             `json:"read_only,omitempty"`    // writes refused (least-privilege)
-	Owner       string           `json:"owner,omitempty"`        // principal subject this connection is scoped to; "" = shared
+	Owner       string           `json:"owner,omitempty"`        // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	Minimize    string           `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
 	SelfService bool             `json:"self_service,omitempty"` // admitted from an operator-approved template
 	Template    string           `json:"template,omitempty"`     // template id for self-service connections

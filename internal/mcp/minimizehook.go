@@ -84,7 +84,7 @@ func (s *Server) resolveOutbound(ctx context.Context, upstream string, args json
 	if s.tokens == nil || len(args) == 0 {
 		return args
 	}
-	scope := minimize.TokenScope{Owner: principalOf(ctx).Subject, Upstream: upstream}
+	scope := minimize.TokenScope{Owner: callerKey(ctx), Upstream: upstream}
 	return minimize.ResolvePlaceholders(args, s.tokens.Snapshot(scope))
 }
 
@@ -120,7 +120,7 @@ func (s *Server) scrubInbound(ctx context.Context, upstream, tool string, result
 		// Scope the bindings to the principal this result is surfaced to and the
 		// upstream that produced them — so they resolve only on that principal's calls
 		// back to this same upstream.
-		scope := minimize.TokenScope{Owner: principalOf(ctx).Subject, Upstream: upstream}
+		scope := minimize.TokenScope{Owner: callerKey(ctx), Upstream: upstream}
 		if err := s.tokens.Put(scope, out.Tokens); err != nil {
 			// A dropped binding means a placeholder the model later echoes back won't
 			// resolve to its real value on the outbound call — surface it rather than

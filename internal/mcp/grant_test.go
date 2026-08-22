@@ -16,7 +16,7 @@ import (
 )
 
 func withCampaign(sub, campaign string) context.Context {
-	return context.WithValue(context.Background(), principalKey, &auth.Principal{Subject: sub, Campaign: campaign})
+	return context.WithValue(context.Background(), principalKey, &auth.Principal{Subject: sub, Issuer: testIssuer, Campaign: campaign})
 }
 
 func newGovernedTestServer(t *testing.T, tools []upTool, appendLine func(string, []byte) error, shared bool) (*Server, *int32) {
@@ -39,7 +39,7 @@ func newGovernedTestServer(t *testing.T, tools []upTool, appendLine func(string,
 	s := NewServer(fakeRunner{}, opts...)
 	var upstreamOpts []UpstreamOption
 	if !shared {
-		upstreamOpts = append(upstreamOpts, WithOwner("alice"))
+		upstreamOpts = append(upstreamOpts, WithOwner(pk("alice")))
 	}
 	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: up.Client()}, upstreamOpts...); err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func newGovernedTestServer(t *testing.T, tools []upTool, appendLine func(string,
 func readGrant(tool string) OperationGrant {
 	return OperationGrant{
 		Version: grantVersion, ID: "read-repo", Connection: "u", Tool: tool, Effect: effectRead,
-		Principal: "alice", Campaign: "campaign-a", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		Principal: pk("alice"), Campaign: "campaign-a", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		Arguments:   []ArgumentGrant{{Pointer: "/repo", Required: true, Values: []string{"org/repo"}}},
 		Resources:   []ResourceGrant{{Kind: "repository", Namespace: "github", Argument: "/repo"}},
 		MaxRequests: 4, MaxBytes: 8192, MaxResponseBytes: 1024,
@@ -89,7 +89,7 @@ func TestHighAssuranceReadGrantDoesNotTrustRelabeledWriteTool(t *testing.T) {
 	if !out["isError"].(bool) || atomic.LoadInt32(hit) != 0 {
 		t.Fatalf("read grant trusted a relabeled write tool: out=%v hits=%d", out, atomic.LoadInt32(hit))
 	}
-	indexed, _ := json.Marshal(s.indexedToolsFor("alice", "campaign-a"))
+	indexed, _ := json.Marshal(s.indexedToolsFor(pk("alice"), "campaign-a"))
 	if strings.Contains(string(indexed), "create-repo") {
 		t.Fatalf("relabeled write tool remained discoverable under a read grant: %s", indexed)
 	}
@@ -142,7 +142,7 @@ func TestGrantURLQueryMustMatchExactCanonicalAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := evaluateOperationGrant(checked, "alice", "campaign-a", "fetch-url", json.RawMessage(`{"url":"https://fixture.example/approved?version=1"}`), time.Now()); err != nil {
+	if _, err := evaluateOperationGrant(checked, pk("alice"), "campaign-a", "fetch-url", json.RawMessage(`{"url":"https://fixture.example/approved?version=1"}`), time.Now()); err != nil {
 		t.Fatalf("exact query was denied: %v", err)
 	}
 	for _, raw := range []string{
@@ -150,7 +150,7 @@ func TestGrantURLQueryMustMatchExactCanonicalAllowlist(t *testing.T) {
 		`{"url":"https://fixture.example/approved?version=2"}`,
 		`{"url":"https://fixture.example/approved?version=1&next=https%3A%2F%2Fevil.example"}`,
 	} {
-		if _, err := evaluateOperationGrant(checked, "alice", "campaign-a", "fetch-url", json.RawMessage(raw), time.Now()); err == nil {
+		if _, err := evaluateOperationGrant(checked, pk("alice"), "campaign-a", "fetch-url", json.RawMessage(raw), time.Now()); err == nil {
 			t.Fatalf("non-exact URL query was accepted: %s", raw)
 		}
 	}
@@ -205,7 +205,7 @@ func TestSharedWritableNamespaceRequiresExplicitOptIn(t *testing.T) {
 	s, hit := newGovernedTestServer(t, []upTool{{name: "create-object"}}, nil, true)
 	grant := OperationGrant{
 		Version: grantVersion, ID: "write-object", Connection: "u", Tool: "create-object", Effect: effectWrite,
-		Principal: "alice", Campaign: "campaign-a", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		Principal: pk("alice"), Campaign: "campaign-a", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		Arguments:   []ArgumentGrant{{Pointer: "/object", Required: true, Pattern: `[a-z0-9-]+`, MaxBytes: 64}},
 		Resources:   []ResourceGrant{{Kind: "object", Namespace: "mailbox", Argument: "/object"}},
 		MaxRequests: 2, MaxBytes: 4096, MaxResponseBytes: 1024,
@@ -275,7 +275,7 @@ func TestDecisionLedgerIsSignedAnchoredPrivateAndBudgeted(t *testing.T) {
 	if strings.Contains(string(raw), "org/repo") || !strings.Contains(string(raw), `"resource_ids":["res_`) {
 		t.Fatalf("ledger exposed raw object identity or omitted opaque identity: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"principal":"alice"`) || !strings.Contains(string(raw), `"campaign":"campaign-a"`) || !strings.Contains(string(raw), `"grant_id":"read-repo"`) || !strings.Contains(string(raw), `"operation":"get-repo"`) || !strings.Contains(string(raw), `"reason":"request budget exhausted"`) {
+	if !strings.Contains(string(raw), `"principal":"`+pk("alice")+`"`) || !strings.Contains(string(raw), `"campaign":"campaign-a"`) || !strings.Contains(string(raw), `"grant_id":"read-repo"`) || !strings.Contains(string(raw), `"operation":"get-repo"`) || !strings.Contains(string(raw), `"reason":"request budget exhausted"`) {
 		t.Fatalf("ledger denial attribution is incomplete: %s", raw)
 	}
 	runs := s.RunLog()
@@ -379,8 +379,8 @@ func TestHighAssuranceIndexExposesOnlyCurrentCallerGrant(t *testing.T) {
 	if err := s.SetUpstreamGrants("u", []OperationGrant{readGrant("get-repo")}); err != nil {
 		t.Fatal(err)
 	}
-	alice, _ := json.Marshal(s.indexedToolsFor("alice", "campaign-a"))
-	bob, _ := json.Marshal(s.indexedToolsFor("bob", "campaign-a"))
+	alice, _ := json.Marshal(s.indexedToolsFor(pk("alice"), "campaign-a"))
+	bob, _ := json.Marshal(s.indexedToolsFor(pk("bob"), "campaign-a"))
 	if !strings.Contains(string(alice), "u__get-repo") || strings.Contains(string(alice), "create-repo") || strings.Contains(string(bob), "u__") {
 		t.Fatalf("grant-filtered index: alice=%s bob=%s", alice, bob)
 	}
@@ -400,10 +400,10 @@ func TestOperationGrantsPersistAndReload(t *testing.T) {
 			WithAuditSigner(signer), WithHighAssuranceMultiUser(true), WithUpstreamClient(up.Client()))
 	}
 	s := newServer()
-	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: up.Client()}, WithOwner("alice")); err != nil {
+	if err := s.AddUpstream(context.Background(), "u", &gateway.Upstream{Name: "u", URL: up.URL, Client: up.Client()}, WithOwner(pk("alice"))); err != nil {
 		t.Fatal(err)
 	}
-	s.persistRegistration("u", up.URL, false, authNone, "alice")
+	s.persistRegistration("u", up.URL, false, authNone, pk("alice"))
 	grant := readGrant("get-repo")
 	grant.MaxRequests = 1
 	if err := s.SetUpstreamGrants("u", []OperationGrant{grant}); err != nil {
@@ -433,7 +433,7 @@ func TestAdminGrantRouteIsStrictAndPersists(t *testing.T) {
 	if len(upstreams) != 1 {
 		t.Fatalf("upstreams = %+v", upstreams)
 	}
-	s.persistRegistration("u", upstreams[0].URL, false, authNone, "alice")
+	s.persistRegistration("u", upstreams[0].URL, false, authNone, pk("alice"))
 	grant := readGrant("get-repo")
 	body, err := json.Marshal(map[string]any{"grants": []OperationGrant{grant}})
 	if err != nil {
