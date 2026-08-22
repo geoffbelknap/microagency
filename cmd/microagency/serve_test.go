@@ -360,17 +360,67 @@ func TestOperatorSurfaceSharesListenerByDefault(t *testing.T) {
 
 func TestTunnelConfigurationRequiresSeparateLoopbackListeners(t *testing.T) {
 	cases := []httpConfig{
-		{addr: "0.0.0.0:8765", tunnel: "cloudflare"},
-		{addr: "127.0.0.1:8765", adminAddr: "0.0.0.0:8766", tunnel: "cloudflare"},
-		{addr: "127.0.0.1:8765", adminAddr: "127.0.0.1:8765", tunnel: "cloudflare"},
+		{addr: "0.0.0.0:8765", tunnel: "cloudflare", singleUser: true},
+		{addr: "127.0.0.1:8765", adminAddr: "0.0.0.0:8766", tunnel: "cloudflare", singleUser: true},
+		{addr: "127.0.0.1:8765", adminAddr: "127.0.0.1:8765", tunnel: "cloudflare", singleUser: true},
 	}
 	for _, cfg := range cases {
 		if err := validateHTTPConfig(cfg); err == nil {
 			t.Fatalf("unsafe tunnel config accepted: %+v", cfg)
 		}
 	}
-	if err := validateHTTPConfig(httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare"}); err != nil {
+	if err := validateHTTPConfig(httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", singleUser: true}); err != nil {
 		t.Fatalf("safe tunnel defaults rejected: %v", err)
+	}
+}
+
+// TestPublicBuiltInOAuthRequiresExplicitSingleUser asserts that exposing the
+// built-in OAuth server through a tunnel is never silent: the server identifies
+// exactly one person, so startup refuses unless --single-user acknowledges that
+// posture or another auth mode (--issuer, --token) replaces the built-in server.
+func TestPublicBuiltInOAuthRequiresExplicitSingleUser(t *testing.T) {
+	refused := []struct {
+		name string
+		cfg  httpConfig
+		want string // substring the refusal must carry (the remediation)
+	}{
+		{"tunnel built-in OAuth unacknowledged", httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare"}, "--single-user"},
+		{"tunnel built-in OAuth names the issuer path", httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare"}, "--issuer"},
+		{"--single-user without a tunnel", httpConfig{addr: "127.0.0.1:8765", singleUser: true}, "--public"},
+		{"--single-user with --issuer", httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", issuer: "https://as.example", singleUser: true}, "mutually exclusive"},
+		{"--single-user with --token", httpConfig{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "tok", singleUser: true}, "mutually exclusive"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHTTPConfig(tc.cfg)
+			if err == nil {
+				t.Fatalf("config accepted, want refusal: %+v", tc.cfg)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("refusal %q does not mention %q", err.Error(), tc.want)
+			}
+		})
+	}
+	accepted := []httpConfig{
+		{addr: "127.0.0.1:8765", tunnel: "cloudflare", singleUser: true},
+		{addr: "127.0.0.1:8765", tunnel: "cloudflare", issuer: "https://as.example"},
+		{addr: "127.0.0.1:8765", tunnel: "cloudflare", token: "tok"},
+		{addr: "127.0.0.1:8765"}, // the loopback default needs no acknowledgment
+	}
+	for _, cfg := range accepted {
+		if err := validateHTTPConfig(cfg); err != nil {
+			t.Fatalf("safe config rejected: %+v: %v", cfg, err)
+		}
+	}
+}
+
+func TestParseUpOptionsSingleUser(t *testing.T) {
+	o, err := parseUpOptions([]string{"--public", "--single-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.public || !o.singleUser {
+		t.Fatalf("parsed options = %+v, want public and singleUser set", o)
 	}
 }
 
