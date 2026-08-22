@@ -147,7 +147,7 @@ func (s *Server) fusedProxyResult(ctx context.Context, runID, upstream, tool, so
 	}
 	outcome := s.budget.Apply(answer, callerKey(ctx))
 	return proxyOutcome{
-		result:   s.fusedResult(runID, sourceTool, transform, outcome),
+		result:   s.fusedResult(runID, sourceTool, transform, outcome, callerKey(ctx)),
 		rawBytes: rawBytes, minimizedBytes: minimizedBytes, outcome: outcome,
 		egressHost: egressHost, protected: protected, extra: minimizeAlertEvents(alerts),
 		transformRan: true, transformInputBytes: len(payload), transformOutputBytes: len(summary),
@@ -164,7 +164,7 @@ func fusedFailure(runID string, rawBytes, inputBytes, outputBytes int, status, e
 	}
 }
 
-func (s *Server) fusedResult(runID, sourceTool string, transform *declarativeTransform, out budget.Outcome) map[string]any {
+func (s *Server) fusedResult(runID, sourceTool string, transform *declarativeTransform, out budget.Outcome, owner string) map[string]any {
 	result := map[string]any{
 		"run_id": runID,
 		"reffed": out.Reffed,
@@ -179,7 +179,7 @@ func (s *Server) fusedResult(runID, sourceTool string, transform *declarativeTra
 	if out.Reffed {
 		result["ref"] = string(out.Ref)
 		summary := map[string]any{"bytes": out.Summary.Bytes}
-		if preview := s.refPreview(out.Ref); preview != nil {
+		if preview := s.refPreview(out.Ref, owner); preview != nil {
 			summary["preview"] = preview
 		}
 		result["summary"] = summary

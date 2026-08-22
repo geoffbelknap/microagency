@@ -385,7 +385,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			return response
 		}
 		out := s.finalizeReduce(s.budget.Apply(string(summary), user)) // reduce output is owned by its caller
-		response := s.reduceResult(runID, out, s.largeReduceHint(engineName, len(payload)))
+		response := s.reduceResult(runID, out, s.largeReduceHint(engineName, len(payload)), user)
 		parkedBytes := 0
 		if out.Reffed {
 			parkedBytes = out.Summary.Bytes
@@ -465,7 +465,7 @@ func (s *Server) reduce(ctx context.Context, args json.RawMessage) map[string]an
 			auditErr = dec.AuditErr.Error()
 		}
 		out := s.finalizeReduce(budget.Outcome{Reffed: dec.Reffed, Inline: dec.Inline, Ref: dec.Ref, Summary: dec.Summary})
-		response := s.reduceResult(runID, out, "")
+		response := s.reduceResult(runID, out, "", user)
 		if dec.ExitCode != 0 || dec.StartError != "" {
 			response = toolError("%s", classifyReduceFailure(dec.ExitCode, dec.StartError, runID))
 		}
@@ -530,12 +530,12 @@ func (s *Server) largeReduceHint(engineName string, payloadBytes int) string {
 // large (so a chained reduce is often unnecessary). A non-empty advisory is
 // attached alongside the result without altering it (a substrate steer, not a
 // failure).
-func (s *Server) reduceResult(runID string, out budget.Outcome, advisory string) map[string]any {
+func (s *Server) reduceResult(runID string, out budget.Outcome, advisory, owner string) map[string]any {
 	r := map[string]any{"run_id": runID, "reffed": out.Reffed}
 	if out.Reffed {
 		r["ref"] = string(out.Ref)
 		summary := map[string]any{"bytes": out.Summary.Bytes}
-		if p := s.refPreview(out.Ref); p != nil {
+		if p := s.refPreview(out.Ref, owner); p != nil {
 			summary["preview"] = p
 		}
 		r["summary"] = summary

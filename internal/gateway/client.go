@@ -64,23 +64,105 @@ type Upstream struct {
 	Bearer func(context.Context) (string, error)
 	Client *http.Client // optional; defaults to http.DefaultClient
 
-	mu        sync.Mutex
-	sessionID string // Mcp-Session-Id from initialize; echoed on later requests
+	mu sync.Mutex
+	// sessions holds one Mcp-Session-Id PER CALLER SCOPE, so upstream session
+	// state (server-side conversation state keyed to that id) never spans
+	// callers on a shared connection. Scope "" is the connection's baseline —
+	// gateway wiring calls like initialize and tools/list. Each caller scope
+	// runs its own initialize handshake lazily before its first request.
+	sessions  map[string]string
+	initiated map[string]bool // scopes whose initialize handshake has run
 }
 
-func (u *Upstream) session() string {
+// maxSessionScopes bounds the per-caller session and handshake maps. When the
+// cap is reached an arbitrary other scope is evicted; that caller simply
+// re-initializes on its next call.
+const maxSessionScopes = 512
+
+// sessionScopeContextKey carries the caller scope for upstream session state.
+type sessionScopeContextKey struct{}
+
+// WithSessionScope returns a context whose upstream MCP session state is keyed
+// to scope — the caller's canonical identity key. Requests without a scope use
+// the connection's baseline session (operator wiring: initialize, tools/list).
+func WithSessionScope(ctx context.Context, scope string) context.Context {
+	if scope == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionScopeContextKey{}, scope)
+}
+
+func sessionScopeFrom(ctx context.Context) string {
+	scope, _ := ctx.Value(sessionScopeContextKey{}).(string)
+	return scope
+}
+
+func (u *Upstream) session(scope string) string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.sessionID
+	return u.sessions[scope]
 }
 
-func (u *Upstream) setSession(id string) {
+func (u *Upstream) setSession(scope, id string) {
 	if id == "" {
 		return
 	}
 	u.mu.Lock()
-	u.sessionID = id
+	defer u.mu.Unlock()
+	if u.sessions == nil {
+		u.sessions = map[string]string{}
+	}
+	u.roomForScopeLocked(scope)
+	u.sessions[scope] = id
+}
+
+// beginScopeHandshake reports whether this call should run the scope's
+// initialize handshake, marking it begun so exactly one caller does. Marked
+// before running (not after) so the handshake's own requests don't recurse.
+func (u *Upstream) beginScopeHandshake(scope string) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.initiated[scope] {
+		return false
+	}
+	if u.initiated == nil {
+		u.initiated = map[string]bool{}
+	}
+	u.roomForScopeLocked(scope)
+	u.initiated[scope] = true
+	return true
+}
+
+func (u *Upstream) clearScopeHandshake(scope string) {
+	u.mu.Lock()
+	delete(u.initiated, scope)
 	u.mu.Unlock()
+}
+
+// roomForScopeLocked makes room for a NEW scope under the maxSessionScopes
+// bound by dropping an arbitrary OTHER caller scope from both maps — never the
+// baseline "". The evicted caller simply re-initializes on its next call.
+// Caller holds u.mu.
+func (u *Upstream) roomForScopeLocked(scope string) {
+	if _, ok := u.sessions[scope]; ok || u.initiated[scope] {
+		return
+	}
+	if len(u.sessions) < maxSessionScopes && len(u.initiated) < maxSessionScopes {
+		return
+	}
+	for k := range u.initiated {
+		if k != scope && k != "" {
+			delete(u.initiated, k)
+			delete(u.sessions, k)
+			return
+		}
+	}
+	for k := range u.sessions {
+		if k != scope && k != "" {
+			delete(u.sessions, k)
+			return
+		}
+	}
 }
 
 func (u *Upstream) bearer(ctx context.Context) (string, error) {
@@ -121,7 +203,20 @@ type rpcReply struct {
 // call sends one JSON-RPC request and returns the result, surfacing transport,
 // HTTP, and JSON-RPC errors. External servers are data sources, not trusted
 // callers, so every failure mode is explicit (fail-closed for the caller).
+// Session state is read and written under the context's caller scope; a scoped
+// caller's first request runs its own initialize handshake first, so a server
+// that keys state to Mcp-Session-Id sees one session per caller.
 func (u *Upstream) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	scope := sessionScopeFrom(ctx)
+	if scope != "" && method != "initialize" && u.beginScopeHandshake(scope) {
+		// Best-effort, like wiring-time Initialize: a server without sessions may
+		// not require (or even accept) it; the real call below surfaces errors.
+		// A failed handshake is unmarked so a transient failure can't leave this
+		// caller permanently sessionless against a session-requiring server.
+		if err := u.Initialize(ctx); err != nil {
+			u.clearScopeHandshake(scope)
+		}
+	}
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return nil, err
@@ -134,8 +229,8 @@ func (u *Upstream) call(ctx context.Context, method string, params any) (json.Ra
 	// Streamable-HTTP servers (e.g. Supabase) require the client to accept BOTH —
 	// and may answer with an SSE stream, which we parse below.
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if sid := u.session(); sid != "" {
-		req.Header.Set("Mcp-Session-Id", sid) // MCP Streamable-HTTP session (set by initialize)
+	if sid := u.session(scope); sid != "" {
+		req.Header.Set("Mcp-Session-Id", sid) // MCP Streamable-HTTP session (set by initialize, per caller scope)
 	}
 	if tok, err := u.bearer(ctx); err != nil {
 		return nil, fmt.Errorf("gateway %q: %s: auth: %w", u.Name, method, err)
@@ -147,7 +242,7 @@ func (u *Upstream) call(ctx context.Context, method string, params any) (json.Ra
 		return nil, fmt.Errorf("gateway %q: %s: %w", u.Name, method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	u.setSession(resp.Header.Get("Mcp-Session-Id")) // capture/refresh the session id
+	u.setSession(scope, resp.Header.Get("Mcp-Session-Id")) // capture/refresh the session id for THIS caller scope
 	// Buffer the WHOLE body before decoding. Large upstream results (the ones most
 	// likely to need off-context parking) must reassemble on byte boundaries — a
 	// streaming line reader truncates at its buffer limit or cuts mid-escape at a
@@ -236,8 +331,9 @@ func sseResponse(buf []byte) []byte {
 	return events[len(events)-1]
 }
 
-// Initialize performs the MCP initialize handshake, captures the session id, and
-// sends the initialized notification to complete it.
+// Initialize performs the MCP initialize handshake, captures the session id
+// (under the context's caller scope), and sends the initialized notification
+// to complete it.
 func (u *Upstream) Initialize(ctx context.Context) error {
 	if _, err := u.call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
@@ -259,7 +355,7 @@ func (u *Upstream) notify(ctx context.Context, method string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if sid := u.session(); sid != "" {
+	if sid := u.session(sessionScopeFrom(ctx)); sid != "" {
 		req.Header.Set("Mcp-Session-Id", sid)
 	}
 	if tok, _ := u.bearer(ctx); tok != "" {

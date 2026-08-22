@@ -39,9 +39,15 @@ type inflight struct {
 
 func newInflight() *inflight { return &inflight{calls: map[string]*inflightCall{}} }
 
-// inflightKey identifies a call by upstream + tool + exact arguments.
-func inflightKey(upstream, tool string, args json.RawMessage) string {
+// inflightKey identifies a call by caller + upstream + tool + exact arguments.
+// The caller's canonical identity key is part of the key UNCONDITIONALLY, even
+// on a shared connection: two callers' upstream authority may differ, so a
+// result produced for one must never be served from cache to the other. That
+// deliberately trades some dedup between callers for the isolation boundary.
+func inflightKey(callerKey, upstream, tool string, args json.RawMessage) string {
 	h := sha256.New()
+	h.Write([]byte(callerKey))
+	h.Write([]byte{0})
 	h.Write([]byte(upstream))
 	h.Write([]byte{0})
 	h.Write([]byte(tool))

@@ -852,17 +852,22 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 		}
 	}
 	// Reads run through the in-flight cache (a client-timeout cancel won't abort
-	// near-done work, and identical concurrent reads share one execution); writes and
-	// unclassifiable tools run under the caller context (a cancel aborts, nothing
-	// commits in the background after the client stopped waiting).
+	// near-done work, and identical concurrent reads share one execution — per
+	// caller: the cache key carries the caller's identity, so callers never share
+	// a cached result); writes and unclassifiable tools run under the caller
+	// context (a cancel aborts, nothing commits in the background after the
+	// client stopped waiting). Upstream session state is scoped to the caller
+	// too, and the in-flight runner detaches from the caller context, so the
+	// session scope is re-attached inside the detached run.
+	caller := callerKey(ctx)
 	var res json.RawMessage
 	var err error
 	if !haveSpec || isWriteTool(spec) {
-		res, err = rec.conn.CallTool(ctx, tool, args)
+		res, err = rec.conn.CallTool(gateway.WithSessionScope(ctx, caller), tool, args)
 	} else {
 		var canceled bool
-		res, err, canceled = s.inflight.do(ctx, inflightKey(upName, tool, args), func(c context.Context) (json.RawMessage, error) {
-			return rec.conn.CallTool(c, tool, args)
+		res, err, canceled = s.inflight.do(ctx, inflightKey(caller, upName, tool, args), func(c context.Context) (json.RawMessage, error) {
+			return rec.conn.CallTool(gateway.WithSessionScope(c, caller), tool, args)
 		})
 		if canceled {
 			return proxyOutcome{result: toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), err: err, egressHost: upHost}
@@ -913,8 +918,8 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 			if !rehydrated && len(payload) < len(res)/2 {
 				stored = string(res) // extraction dropped data — ref the full result instead
 			}
-			ref, sum := s.budget.Store.Put(stored, callerKey(ctx))
-			return proxyOutcome{result: s.refHandleResult(ref, sum, name), rawBytes: max(len(res), len(stored)), outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
+			ref, sum := s.budget.Store.Put(stored, caller)
+			return proxyOutcome{result: s.refHandleResult(ref, sum, name, caller), rawBytes: max(len(res), len(stored)), outcome: budget.Outcome{Reffed: true, Ref: ref, Summary: sum}, egressHost: upHost}
 		}
 		if rehydrated { // small enough to inline, but return the DATA, never the offload URL
 			return proxyOutcome{result: rehydratedResult(payload), rawBytes: len(payload), egressHost: upHost}
@@ -1108,8 +1113,9 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 const maxUnwrapFraming = 512
 
 // refHandleResult is what the agent receives when a proxied result is held off
-// context: the handle + size + how to reduce it. Never the raw data.
-func (s *Server) refHandleResult(ref refstore.Ref, sum refstore.Summary, toolName string) map[string]any {
+// context: the handle + size + how to reduce it. Never the raw data. owner is
+// the caller the ref was just stored for; the preview is bound to it.
+func (s *Server) refHandleResult(ref refstore.Ref, sum refstore.Summary, toolName, owner string) map[string]any {
 	out := map[string]any{
 		"reffed": true,
 		"ref":    string(ref),
@@ -1119,18 +1125,21 @@ func (s *Server) refHandleResult(ref refstore.Ref, sum refstore.Summary, toolNam
 			"reduce(ref=%q, code=<python that reads /app/input>) for arbitrary logic.",
 			toolName, sum.Bytes, ref, ref, ref),
 	}
-	if p := s.refPreview(ref); p != nil {
+	if p := s.refPreview(ref, owner); p != nil {
 		out["preview"] = p
 	}
 	return toolResult(out)
 }
 
-// refPreview computes the structural preview of a stored ref's payload.
-func (s *Server) refPreview(ref refstore.Ref) map[string]any {
+// refPreview computes the structural preview of a stored ref's payload, and
+// only for the ref's owner. Every current caller passes a ref it just created
+// for that same owner, but the check lives HERE so a future call site cannot
+// leak a preview of another principal's data by handle.
+func (s *Server) refPreview(ref refstore.Ref, owner string) map[string]any {
 	if s.budget.Store == nil {
 		return nil
 	}
-	if data, _, ok := s.budget.Store.Get(ref); ok { // preview is gateway-internal; owner enforced at reduce
+	if data, got, ok := s.budget.Store.Get(ref); ok && got == owner {
 		return structuralPreview(data)
 	}
 	return nil
