@@ -87,6 +87,11 @@ type upstream struct {
 	selfService bool
 	template    string
 	revoked     bool
+	// delegation, when set, makes this a google-dwd connection: per call, the
+	// source derives a short-lived upstream token acting as the CALLER's
+	// provider-verified email, so the provider's own ACLs trim results.
+	// Callers with no verified email cannot see or invoke the connection.
+	delegation *auth.DelegatedTokenSource
 	// authGeneration changes on operator revocation. Self-service refresh writers
 	// and reauthorization callbacks may commit only against the generation they
 	// started from, so an in-flight operation cannot resurrect a revoked grant.
@@ -391,6 +396,11 @@ type UpstreamInfo struct {
 	Tools         int      `json:"tools"` // count of advertised tools (shown per connection in the console)
 	GrantCount    int      `json:"grant_count,omitempty"`
 	GrantDigests  []string `json:"grant_digests,omitempty"`
+	// Strategy is how a calling principal maps to upstream authority: static,
+	// per-user-oauth, or google-dwd. Delegation carries a google-dwd
+	// connection's non-secret config; the key itself is never exposed.
+	Strategy   string          `json:"strategy"`
+	Delegation *DelegationInfo `json:"delegation,omitempty"`
 	// Minimize is the field-minimization policy set for this upstream (type→action
 	// JSON), or empty when none is configured. Shown/edited in the console.
 	Minimize json.RawMessage `json:"minimize,omitempty"`
@@ -434,7 +444,9 @@ func (s *Server) SetUpstreamOwner(name, owner string) error {
 }
 
 // DisableUpstream makes a connection non-invocable while retaining its indexed
-// metadata and credential. Revoked connections remain revoked.
+// metadata and credential. Revoked connections remain revoked. A delegated
+// connection's derived-token cache is dropped, so no derived credential
+// outlives the decision inside the gateway.
 func (s *Server) DisableUpstream(name string) error {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
@@ -443,11 +455,15 @@ func (s *Server) DisableUpstream(name string) error {
 		return fmt.Errorf("gateway: unknown upstream %q", name)
 	}
 	rec.enabled = false
+	if rec.delegation != nil {
+		rec.delegation.DropCache()
+	}
 	return nil
 }
 
 // RevokeUpstream makes a connection invisible and non-invocable immediately. The
-// caller separately deletes its durable credential before reporting success.
+// caller separately deletes its durable credential before reporting success. A
+// delegated connection's derived-token cache is dropped as well.
 func (s *Server) RevokeUpstream(name string) error {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
@@ -458,6 +474,9 @@ func (s *Server) RevokeUpstream(name string) error {
 	rec.enabled = false
 	rec.revoked = true
 	rec.authGeneration++
+	if rec.delegation != nil {
+		rec.delegation.DropCache()
+	}
 	return nil
 }
 
@@ -548,7 +567,17 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
 		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
-			Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
+			Strategy: StrategyStatic, Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
+		switch {
+		case rec.delegation != nil:
+			info.Strategy = StrategyGoogleDWD
+			info.Delegation = &DelegationInfo{
+				ClientEmail: rec.delegation.ClientEmail(), TokenEndpoint: rec.delegation.TokenEndpoint(),
+				Scopes: rec.delegation.Scopes(), KeyConfigured: true,
+			}
+		case rec.selfService:
+			info.Strategy = StrategyPerUserOAuth
+		}
 		if !rec.lastOK.IsZero() {
 			info.LastOK = rec.lastOK.Format(time.RFC3339)
 		}
@@ -570,12 +599,17 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 }
 
 // RemoveUpstream deregisters an upstream (enabled or discovered), dropping its
-// tools from the index.
+// tools from the index — and, for a delegated connection, its derived-token
+// cache.
 func (s *Server) RemoveUpstream(name string) bool {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
-	if _, ok := s.reg.conns[name]; !ok {
+	rec, ok := s.reg.conns[name]
+	if !ok {
 		return false
+	}
+	if rec.delegation != nil {
+		rec.delegation.DropCache()
 	}
 	delete(s.reg.conns, name)
 	return true
@@ -593,6 +627,9 @@ func (s *Server) indexedTools(callerKey string) []map[string]any {
 }
 
 func (s *Server) indexedToolsFor(callerKey, campaign string) []map[string]any {
+	// Resolved before the lock: whether this caller has a provider-verified
+	// email — the identity delegated (google-dwd) connections act as.
+	delegationSubject := s.delegationSubjectForKey(callerKey)
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
@@ -601,6 +638,12 @@ func (s *Server) indexedToolsFor(callerKey, campaign string) []map[string]any {
 			continue
 		}
 		if rec.owner != "" && rec.owner != callerKey {
+			continue
+		}
+		// A delegated connection is usable only by callers with a verified
+		// email to act as; for anyone else it is absent from the index — the
+		// same as-unknown boundary the invocation gate enforces.
+		if rec.delegation != nil && delegationSubject == "" {
 			continue
 		}
 		for _, t := range rec.tools {
@@ -764,12 +807,33 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 		}
 		evaluated = &checked
 	}
+	// Delegated (google-dwd) connection: resolve the caller's provider-verified
+	// email — the identity the upstream call will act as. A caller with none is
+	// refused BEFORE any egress or token derivation, with an audited record; no
+	// fallback identity is ever substituted. The resolved pair rides the
+	// context so the connection's bearer derives for exactly this caller.
+	delegated := ""
+	if rec.delegation != nil {
+		delegated = s.delegationSubject(ctx)
+		if delegated == "" {
+			runID := s.nextRunID()
+			start := time.Now()
+			out := proxyOutcome{
+				result: toolError("upstream %q maps each caller to their own provider identity, and no provider-verified email is recorded for this caller, so the call is refused. Sign in through the gateway's federated sign-in (or ask the operator to enable it), then retry.", upName),
+				err:    fmt.Errorf("delegated call without a provider-verified caller identity"),
+			}
+			s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated, rec.auditFullArgs, "")
+			return out.result, true
+		}
+		ctx = withDelegatedCall(ctx, principal, delegated)
+	}
 	runID := s.nextRunID()
 	start := time.Now()
 	out := s.proxyCall(ctx, runID, start, upName, tool, name, rec, args, evaluated)
 	// THE single audit record: every proxyCall outcome — refusal, error, ref,
 	// inline, or success — lands here, so "every outcome is audited" is structural.
-	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated, rec.auditFullArgs)
+	// Delegated calls record the derived subject beside the caller identity.
+	s.recordProxy(ctx, runID, upName, tool, args, marshalLen(out.result), start, out, evaluated, rec.auditFullArgs, delegated)
 	return out.result, true
 }
 
@@ -858,8 +922,10 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	// context (a cancel aborts, nothing commits in the background after the
 	// client stopped waiting). Upstream session state is scoped to the caller
 	// too, and the in-flight runner detaches from the caller context, so the
-	// session scope is re-attached inside the detached run.
+	// session scope — and, on a delegated connection, the caller's resolved
+	// delegation identity — is re-attached inside the detached run.
 	caller := callerKey(ctx)
+	delegatedCaller, delegatedSubject := delegatedCallFrom(ctx)
 	var res json.RawMessage
 	var err error
 	if !haveSpec || isWriteTool(spec) {
@@ -867,7 +933,11 @@ func (s *Server) proxyCall(ctx context.Context, runID string, start time.Time, u
 	} else {
 		var canceled bool
 		res, err, canceled = s.inflight.do(ctx, inflightKey(caller, upName, tool, args), func(c context.Context) (json.RawMessage, error) {
-			return rec.conn.CallTool(gateway.WithSessionScope(c, caller), tool, args)
+			c = gateway.WithSessionScope(c, caller)
+			if delegatedSubject != "" {
+				c = withDelegatedCall(c, delegatedCaller, delegatedSubject)
+			}
+			return rec.conn.CallTool(c, tool, args)
 		})
 		if canceled {
 			return proxyOutcome{result: toolError("upstream %q: still running after the client stopped waiting; the call was not aborted — retry to collect the result", upName), err: err, egressHost: upHost}
@@ -1020,7 +1090,9 @@ func (s *Server) fetchOffload(ctx context.Context, rawURL string, evaluated *eva
 // when the call was refused BEFORE any egress (read-only gate, pre-egress schema
 // block). When set, it's recorded as an egress_allow event so the console and the
 // audit chain show the gateway's outbound call, not "no egress".
-func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome, evaluated *evaluatedGrant, fullCapture bool) {
+// delegated is the provider identity a google-dwd call acted as (the derived
+// subject), recorded beside the caller identity; "" on every other call.
+func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, args json.RawMessage, contextBytes int, start time.Time, out proxyOutcome, evaluated *evaluatedGrant, fullCapture bool, delegated string) {
 	exit, auditErr := 0, ""
 	if out.err != nil {
 		exit, auditErr = 1, out.err.Error()
@@ -1074,7 +1146,7 @@ func (s *Server) recordProxy(ctx context.Context, runID, upstream, tool string, 
 		Kind: "proxy", TaskID: taskIDOf(ctx), Upstream: upstream, Tool: tool, Args: recordedArgs,
 		ArgsCapture: capture, ArgsShape: argsShape, ArgsSHA256: argsDigest,
 		ParentRunID: parentRun, Delivery: delivery, ProgramRequestID: requestID,
-		User: callerKey(ctx), Campaign: campaignOf(ctx),
+		User: callerKey(ctx), Campaign: campaignOf(ctx), DelegatedIdentity: delegated,
 		InputBytes:      len(args), // the tool arguments are the call's input payload
 		RawBytes:        out.rawBytes,
 		ParkedBytes:     parkedBytes,
