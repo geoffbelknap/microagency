@@ -188,6 +188,10 @@ type DelegationInfo struct {
 	TokenEndpoint string   `json:"token_endpoint"`
 	Scopes        []string `json:"scopes"`
 	KeyConfigured bool     `json:"key_configured"`
+	// DiscoverySubject is the identity wiring-time calls act as, echoed so an
+	// operator can see what a connection was configured with without reading
+	// the registry file.
+	DiscoverySubject string `json:"discovery_subject,omitempty"`
 }
 
 // buildDelegatedSource parses a service-account key document and builds the

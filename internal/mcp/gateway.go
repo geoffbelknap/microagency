@@ -597,6 +597,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 			info.Delegation = &DelegationInfo{
 				ClientEmail: rec.delegation.ClientEmail(), TokenEndpoint: rec.delegation.TokenEndpoint(),
 				Scopes: rec.delegation.Scopes(), KeyConfigured: true,
+				DiscoverySubject: rec.delegation.DiscoverySubject(),
 			}
 		case rec.selfService:
 			info.Strategy = StrategyPerUserOAuth
