@@ -95,3 +95,25 @@ func TestDiscoverySubjectMustBeAProviderIdentity(t *testing.T) {
 		t.Fatalf("want a provider-identity refusal, got %v", err)
 	}
 }
+
+// An operator must be able to see what a connection was configured with,
+// without reading the registry file off disk.
+func TestUpstreamListingReportsDiscoverySubject(t *testing.T) {
+	provider := newDelegationProvider(t)
+	src := discoverySource(t, provider, "operator@example.com")
+	s := newTestServer(t, fakeRunner{})
+	if err := s.registerUpstream("docs", &upstream{
+		conn: &fakeConn{endpoint: "https://upstream.example/mcp"}, enabled: true,
+	}, WithDelegation(src)); err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range s.UpstreamList() {
+		if info.Name == "docs" {
+			if info.Delegation == nil || info.Delegation.DiscoverySubject != "operator@example.com" {
+				t.Fatalf("listing did not report the discovery subject: %+v", info.Delegation)
+			}
+			return
+		}
+	}
+	t.Fatal("connection missing from the listing")
+}
