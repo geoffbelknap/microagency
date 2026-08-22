@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-22_
 
 ## The CLI
 
@@ -35,7 +35,8 @@ Everything lives under `~/.microagency`:
 | `oauth-key` | the built-in OAuth server's signing key |
 | `oauth-clients.json` | dynamic client registrations, bound to their issuer |
 | `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
-| `auth-posture.json` | the active public auth mode, issuer, and resource |
+| `auth-posture.json` | the active public auth mode, issuer, resource, and tunnel URL stability |
+| `tunnel-state.json` | the tunnel subprocess: provider, quick or named mode, URL, pid, and any recorded exit |
 | `upstreams.json` | non-secret connection registrations, ownership, operation grants, template identity, and revoked state |
 | `connection-templates.json` | operator-approved self-service provider, scope, parameter, and quota bounds; never OAuth client secrets |
 | `mediation.json` | non-secret enforced workspace, gateway URL/host, and policy digest |
@@ -80,6 +81,8 @@ copy-then-switch migration, restart requirements, backup, and recovery.
 - Whether the server is running.
 - The secret-store posture, meaning where your credentials are.
 - The active OAuth mode, issuer, resource, and public consent location.
+- The tunnel posture: quick or named, whether the URL survives restarts, and
+  whether the tunnel process is still serving the public URL.
 - The loaded query engines.
 - Whether the microVM runtime can boot a real workload.
 - Enforcement hygiene: any upstream the gateway proxies that a client is

@@ -31,8 +31,8 @@ func runDoctor(args []string) {
 		switch a {
 		case "-h", "--help", "help":
 			fmt.Fprintln(os.Stdout, "usage: microagency doctor")
-			fmt.Fprintln(os.Stdout, "  check runtime + engine health (server, secret store, query engines,")
-			fmt.Fprintln(os.Stdout, "  microVM runtime, enforcement-hygiene bypasses)")
+			fmt.Fprintln(os.Stdout, "  check runtime + engine health (server, secret store, public auth + tunnel,")
+			fmt.Fprintln(os.Stdout, "  query engines, microVM runtime, enforcement-hygiene bypasses)")
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", a)
@@ -53,6 +53,7 @@ func runDoctor(args []string) {
 	}
 	reportSecretPosture(out)
 	reportAuthPosture(out)
+	tunnelOK, tunnelClause := reportTunnelHealth(out, pid != 0)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
 	// query path (filter / count / extract) in-process, no VM.
@@ -144,7 +145,7 @@ func runDoctor(args []string) {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause, mediationReady, mediationClause))
+	fmt.Fprintln(out, closingVerdict(pid != 0, bypassWarnings, runtimeHealthy, runtimeClause, mediationReady, mediationClause, tunnelOK, tunnelClause))
 }
 
 func reportAuthPosture(out io.Writer) {
@@ -165,6 +166,7 @@ func reportAuthPostureAt(out io.Writer, path string) {
 		fmt.Fprintf(out, "    issuer          %s\n", dash(posture.Issuer))
 		fmt.Fprintf(out, "    resource        %s\n", dash(posture.Resource))
 		fmt.Fprintf(out, "    audience        %s\n", dash(posture.Audience))
+		reportTunnelStability(out, posture)
 		fmt.Fprintln(out, "    consent         loopback operator listener")
 	case "oauth-external":
 		fmt.Fprintf(out, "  public auth      external OAuth (issuer %s)\n", dash(posture.Issuer))
@@ -174,6 +176,7 @@ func reportAuthPostureAt(out io.Writer, path string) {
 		if posture.Audience != "" {
 			fmt.Fprintf(out, "    audience        %s\n", posture.Audience)
 		}
+		reportTunnelStability(out, posture)
 	case "bearer":
 		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
 	case "oauth-local":
@@ -183,15 +186,77 @@ func reportAuthPostureAt(out io.Writer, path string) {
 	}
 }
 
+// reportTunnelStability names the URL contract the recorded tunnel mode
+// carries: a named tunnel keeps its issuer across restarts, a quick tunnel
+// does not — which decides whether issued tokens survive a restart.
+func reportTunnelStability(out io.Writer, posture authPosture) {
+	switch posture.TunnelMode {
+	case "named":
+		fmt.Fprintf(out, "    url stability   stable — named tunnel %q keeps the issuer across restarts (tokens survive)\n", posture.TunnelName)
+	case "quick":
+		fmt.Fprintln(out, "    url stability   quick tunnel — the URL changes on restart, invalidating issued tokens")
+	}
+}
+
+func reportTunnelHealth(out io.Writer, serverUp bool) (bool, string) {
+	return reportTunnelHealthAt(out, tunnelStatePath(), serverUp, processAlive)
+}
+
+// reportTunnelHealthAt answers "is the public URL actually being served" from
+// the tunnel-state record the server wrote when it started its tunnel child.
+// A dead child under a live server is the alarm case: clients still hold the
+// public URL, and nothing behind it is listening.
+func reportTunnelHealthAt(out io.Writer, path string, serverUp bool, alive func(int) bool) (ok bool, clause string) {
+	st, err := readTunnelState(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, "" // no tunnel in this deployment — nothing to check
+		}
+		fmt.Fprintf(out, "  tunnel            ⚠ state unreadable: %v\n", err)
+		fmt.Fprintln(out, "                    (tunnel liveness is unknown; restart with `microagency restart` to rewrite it)")
+		return false, "tunnel liveness is unknown because its state record is unreadable"
+	}
+	desc := st.Provider
+	switch st.Mode {
+	case "named":
+		desc = fmt.Sprintf("%s (named tunnel %q)", st.Provider, st.Name)
+	case "quick":
+		desc = st.Provider + " (quick tunnel)"
+	}
+	const restartHint = "the public URL is unreachable — restart with `microagency restart`"
+	switch {
+	case !serverUp:
+		fmt.Fprintf(out, "  tunnel            — not running: %s starts and stops with the server\n", desc)
+		return true, "" // the dead server already fails the verdict
+	case st.ExitedAt != "":
+		fmt.Fprintf(out, "  tunnel            ✗ %s exited — %s is not being served\n", desc, dash(st.URL))
+		if st.ExitError != "" {
+			fmt.Fprintf(out, "                    (%s; restart with `microagency restart`)\n", st.ExitError)
+		} else {
+			fmt.Fprintln(out, "                    (restart with `microagency restart`)")
+		}
+		return false, "the tunnel process has exited so " + restartHint
+	case !alive(st.PID):
+		fmt.Fprintf(out, "  tunnel            ✗ %s process (pid %d) is gone — %s is not being served\n", desc, st.PID, dash(st.URL))
+		fmt.Fprintln(out, "                    (restart with `microagency restart`)")
+		return false, "the tunnel process is gone so " + restartHint
+	default:
+		fmt.Fprintf(out, "  tunnel            ✓ %s running (pid %d), serving %s\n", desc, st.PID, dash(st.URL))
+		return true, ""
+	}
+}
+
 // closingVerdict composes the page's rollup sentence, gated on everything the
-// page reported: the server, the bypass check, and the runtime clause from the
-// end-to-end probe. It exists so a dead server can never sit above an ending
-// that reads green — the closing sentence answers for the whole page or it
-// does not claim readiness.
-func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string, mediationReady bool, mediationClause string) string {
+// page reported: the server, the tunnel child, the bypass check, and the
+// runtime clause from the end-to-end probe. It exists so a dead server can
+// never sit above an ending that reads green — the closing sentence answers
+// for the whole page or it does not claim readiness.
+func closingVerdict(serverUp bool, bypassWarnings int, runtimeHealthy bool, runtimeClause string, mediationReady bool, mediationClause string, tunnelOK bool, tunnelClause string) string {
 	switch {
 	case !serverUp:
 		return fmt.Sprintf("The gateway is not ready: the server is not running (start it with `microagency up`), %s, and %s.", runtimeClause, mediationClause)
+	case !tunnelOK:
+		return fmt.Sprintf("The server is running and %s, but %s.", runtimeClause, tunnelClause)
 	case bypassWarnings == 1:
 		return fmt.Sprintf("The server is running and %s, but one upstream is reachable around the gateway — remove the direct entry above so every call is governed and audited.", runtimeClause)
 	case bypassWarnings > 1:

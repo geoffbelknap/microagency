@@ -178,19 +178,22 @@ func TestClosingVerdictGatesOnWholePage(t *testing.T) {
 		bypassWarnings int
 		runtimeHealthy bool
 		mediationReady bool
+		tunnelOK       bool
 		wantContains   string
 		wantNotReady   bool
 	}{
-		{"all green claims ready", true, 0, true, true, "microagency is ready", false},
-		{"dead server never reads green", false, 0, true, true, "The gateway is not ready", true},
-		{"back door blocks the ready claim", true, 1, true, true, "reachable around the gateway", true},
-		{"multiple back doors are counted", true, 3, true, true, "3 upstreams", true},
-		{"unhealthy runtime blocks the ready claim", true, 0, false, true, "The server is running, but", true},
-		{"degraded mediation blocks ready", true, 0, true, false, "mediation is degraded", true},
+		{"all green claims ready", true, 0, true, true, true, "microagency is ready", false},
+		{"dead server never reads green", false, 0, true, true, true, "The gateway is not ready", true},
+		{"dead tunnel blocks the ready claim", true, 0, true, true, false, "tunnel process has exited", true},
+		{"back door blocks the ready claim", true, 1, true, true, true, "reachable around the gateway", true},
+		{"multiple back doors are counted", true, 3, true, true, true, "3 upstreams", true},
+		{"unhealthy runtime blocks the ready claim", true, 0, false, true, true, "The server is running, but", true},
+		{"degraded mediation blocks ready", true, 0, true, false, true, "mediation is degraded", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := closingVerdict(tt.serverUp, tt.bypassWarnings, tt.runtimeHealthy, healthy, tt.mediationReady, "enforced workspace mediation is degraded")
+			got := closingVerdict(tt.serverUp, tt.bypassWarnings, tt.runtimeHealthy, healthy, tt.mediationReady, "enforced workspace mediation is degraded",
+				tt.tunnelOK, "the tunnel process has exited so the public URL is unreachable — restart with `microagency restart`")
 			if !strings.Contains(got, tt.wantContains) {
 				t.Errorf("verdict %q should contain %q", got, tt.wantContains)
 			}
