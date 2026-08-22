@@ -10,6 +10,7 @@ import (
 // data or I/O is the problem. The gateway reads the class from this, so an
 // engine that drifts from the convention silently changes what an agent is told.
 func TestBadQueryFollowsTheEngineConvention(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		exitCode int
@@ -22,6 +23,7 @@ func TestBadQueryFollowsTheEngineConvention(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			err := &ExitError{ExitCode: tt.exitCode, Stderr: "jq: parse query: unexpected token"}
 			if got := err.BadQuery(); got != tt.want {
 				t.Errorf("BadQuery() for exit %d = %v, want %v", tt.exitCode, got, tt.want)
@@ -36,6 +38,7 @@ func TestBadQueryFollowsTheEngineConvention(t *testing.T) {
 // through a document can quote the data it was processing, and that must never
 // ride an error message back into a model's context.
 func TestErrorTextNeverCarriesStderr(t *testing.T) {
+	t.Parallel()
 	secret := "row 42: customer=alice@example.com balance=91231.55"
 	for _, code := range []int{1, 2} {
 		err := &ExitError{ExitCode: code, Stderr: "jq: " + secret}

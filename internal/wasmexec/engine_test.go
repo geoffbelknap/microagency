@@ -11,10 +11,33 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/geoffbelknap/microagent/pkg/sandbox"
 )
 
 // SandboxEngine must satisfy the Engine seam the reduce path consumes.
 var _ Engine = SandboxEngine{}
+
+// TestMain creates one throwaway sandbox runtime while the process is still
+// single-threaded.
+//
+// wazero caches its own version string in an unsynchronized package-level
+// variable, populated the first time a runtime is created
+// (internal/version.GetWazeroVersion). Two goroutines creating a runtime
+// concurrently before that cache is warm race on it, inside the dependency —
+// and every Run here builds a runtime. Touching it once up front closes that
+// window for the parallel tests below.
+//
+// It is a one-shot lazy init, so this suppresses nothing else: every other race,
+// in this package or in wazero's engine, is still reported normally.
+func TestMain(m *testing.M) {
+	// The 8-byte header is the smallest well-formed module. Only runtime
+	// creation matters here, so a compile failure is fine to ignore.
+	if rt, err := sandbox.Compile(context.Background(), []byte("\x00asm\x01\x00\x00\x00"), sandbox.RuntimeOptions{}); err == nil {
+		_ = rt.Close(context.Background())
+	}
+	os.Exit(m.Run())
+}
 
 // buildResult caches one engine compile. env marks failures that are genuine
 // environment limitations (no Go toolchain, no temp dir) — those skip; anything
@@ -36,15 +59,15 @@ var (
 // broken, not the environment.
 func buildWasip1(t *testing.T, srcDir string) []byte {
 	t.Helper()
+	// Held across the compile so concurrent tests wait for the first builder
+	// rather than each spawning a duplicate `go build` for the same engine.
 	engMu.Lock()
 	c, done := engCache[srcDir]
-	engMu.Unlock()
 	if !done {
 		c = compileWasip1(srcDir)
-		engMu.Lock()
 		engCache[srcDir] = c
-		engMu.Unlock()
 	}
+	engMu.Unlock()
 	if c.err != nil {
 		if c.env {
 			t.Skip(c.err.Error())
@@ -77,6 +100,7 @@ func compileWasip1(srcDir string) buildResult {
 }
 
 func TestSandboxEngineRunsWasip1Module(t *testing.T) {
+	t.Parallel()
 	eng := SandboxEngine{Module: buildWasip1(t, "testdata/rowcount")}
 	summary, err := eng.Run(context.Background(), "count", []byte("alpha\nbeta\ngamma\n"))
 	if err != nil {
@@ -95,6 +119,7 @@ func TestSandboxEngineRunsWasip1Module(t *testing.T) {
 // error MESSAGE must never carry it — Error() is content-free; the bytes ride
 // only on the ExitError field, bound for the operator's audit record.
 func TestExitErrorMessageOmitsStderr(t *testing.T) {
+	t.Parallel()
 	err := &ExitError{ExitCode: 3, Stderr: `jq: error: cannot index "MRN-8675309"`}
 	if strings.Contains(err.Error(), "MRN-8675309") {
 		t.Fatalf("guest stderr leaked into the error message: %q", err.Error())
@@ -107,6 +132,7 @@ func TestExitErrorMessageOmitsStderr(t *testing.T) {
 // A real module that exits non-zero must surface as *ExitError: stderr captured
 // on the field (for the operator), absent from the message (agent-bound).
 func TestSandboxEngineNonZeroExitReturnsExitError(t *testing.T) {
+	t.Parallel()
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/jq")}
 	_, err := eng.Run(context.Background(), `.[] | bogus_fn_zz`, []byte(`[1]`))
 	if err == nil {
@@ -125,6 +151,7 @@ func TestSandboxEngineNonZeroExitReturnsExitError(t *testing.T) {
 }
 
 func TestSandboxEngineRunsJqQuery(t *testing.T) {
+	t.Parallel()
 	// jq: a real jq program executes over fetched JSON.
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/jq")}
 	data := []byte(`[{"email":"ana@x.io","active":true},{"email":"bo@x.io","active":false},{"email":"cy@x.io","active":true}]`)
@@ -138,6 +165,7 @@ func TestSandboxEngineRunsJqQuery(t *testing.T) {
 }
 
 func TestSandboxEngineRunsTextQuery(t *testing.T) {
+	t.Parallel()
 	// text: the query is a regular expression; matching lines come back (grep).
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/text")}
 	summary, err := eng.Run(context.Background(), "ERROR|WARN", []byte("INFO ok\nERROR boom\nDEBUG x\nWARN careful\n"))
@@ -150,6 +178,7 @@ func TestSandboxEngineRunsTextQuery(t *testing.T) {
 }
 
 func TestSandboxEngineRunsHtmlQuery(t *testing.T) {
+	t.Parallel()
 	// html: the query is a CSS selector; "@attr" extracts an attribute.
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/html")}
 	html := []byte("<html><head><title>Hi There</title></head><body><a href='/a'>One</a><a href='/b'>Two</a></body></html>")
@@ -170,6 +199,7 @@ func TestSandboxEngineRunsHtmlQuery(t *testing.T) {
 }
 
 func TestHtmlEngineRejectsInvalidSelector(t *testing.T) {
+	t.Parallel()
 	// A malformed CSS selector must be a bad-query error (exit 2), not a silent
 	// zero-match success — otherwise the agent can't tell a typo from no matches.
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/html")}
@@ -184,6 +214,7 @@ func TestHtmlEngineRejectsInvalidSelector(t *testing.T) {
 }
 
 func TestTextEngineFailsClosedOnOversizedLine(t *testing.T) {
+	t.Parallel()
 	// A line past the 16 MiB scanner cap stops the scan with an error; the engine
 	// must fail closed (non-zero exit) rather than exit 0 with truncated matches.
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/text")}
@@ -199,6 +230,7 @@ func TestTextEngineFailsClosedOnOversizedLine(t *testing.T) {
 }
 
 func TestSandboxEngineRunsSqlQuery(t *testing.T) {
+	t.Parallel()
 	// sql: a real SELECT with WHERE + GROUP BY + aggregate over JSON rows.
 	eng := SandboxEngine{Module: buildWasip1(t, "../../engines/sql")}
 	data := []byte(`[{"dept":"eng","active":true},{"dept":"eng","active":false},{"dept":"sales","active":true}]`)

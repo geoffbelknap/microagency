@@ -1,0 +1,38 @@
+name: Set up Go with a per-job cache
+description: >-
+  Installs Go and restores a build cache scoped to the calling job, so jobs that
+  compile with different flags do not share one cache entry.
+
+inputs:
+  job:
+    description: >-
+      Cache scope. Jobs whose compiler flags differ (notably -race, which has its
+      own build cache) must pass different values or they will overwrite each
+      other's entry.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # setup-go's own cache is keyed on the Go version and go.sum alone, so every
+    # job in the workflow lands on one entry. The first job to finish saves it and
+    # the rest report a hit and skip saving, which freezes the cache as whatever
+    # that job happened to build. A job compiling with -race then finds none of
+    # its objects and rebuilds the dependency tree from scratch on every run.
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        # run_id makes the primary key unique, so the entry is always saved
+        # instead of being skipped as a hit; restore-keys still start the job
+        # from the most recent entry for this job and dependency set.
+        key: go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}
+        restore-keys: |
+          go-${{ runner.os }}-${{ inputs.job }}-${{ hashFiles('**/go.sum') }}-
+          go-${{ runner.os }}-${{ inputs.job }}-
