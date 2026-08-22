@@ -119,6 +119,8 @@ copy-then-switch migration, restart requirements, backup, and recovery.
 - Whether the server is running.
 - The secret-store posture, meaning where your credentials are.
 - The active OAuth mode, issuer, resource, and public consent location.
+- Whether the operator surface (`/admin` + console) is reachable beyond
+  loopback, warned on every run while that posture holds.
 - The tunnel posture: quick or named, whether the URL survives restarts, and
   whether the tunnel process is still serving the public URL.
 - The loaded query engines.

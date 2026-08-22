@@ -207,6 +207,13 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 	default:
 		fmt.Fprintf(out, "  public auth      ⚠ unknown posture %q\n", posture.Mode)
 	}
+	// A lifted loopback floor never passes silently: keep the exposure visible
+	// on every doctor run for as long as the posture holds.
+	if posture.RemoteAdmin != "" {
+		fmt.Fprintf(out, "  operator surface ⚠ /admin + /console reachable beyond loopback on %s (--allow-remote-admin)\n", posture.RemoteAdmin)
+		fmt.Fprintln(out, "                    (cleartext HTTP, operator token only — front it with TLS, or bind")
+		fmt.Fprintln(out, "                     loopback and use SSH forwarding)")
+	}
 }
 
 // reportTunnelStability names the URL contract the recorded tunnel mode
