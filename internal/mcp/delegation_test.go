@@ -118,6 +118,14 @@ func (p *delegationProvider) registerKey(t *testing.T, email string) string {
 	return doc
 }
 
+// seenSubjects returns the assertion subjects the provider was asked to
+// exchange for, in order.
+func (p *delegationProvider) seenSubjects() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.subjects...)
+}
+
 func (p *delegationProvider) exchangeCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

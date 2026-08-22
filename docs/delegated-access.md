@@ -92,6 +92,23 @@ invocation gate and drops the derived-token cache. Revoking also deletes the
 stored key. Tokens the provider already issued expire on their own short
 lifetime; the provider owns their revocation.
 
+## Registering against an upstream that authenticates discovery
+
+Registration and index refresh carry no caller, so by default those wiring
+calls go out unauthenticated rather than acting as anyone. An upstream that
+requires authentication for `tools/list` cannot be registered that way. Declare
+a discovery subject for it:
+
+```json
+{"delegation": {"scopes": ["..."], "discovery_subject": "operator@example.com"}}
+```
+
+Wiring calls then act as that identity. They read the connection's tool
+catalog, which is the same for every caller, so this is not a way to read one
+user's data. A real caller is always served a token for their own
+provider-verified identity: a caller without one is refused before any token is
+derived, so the discovery subject can never stand in for a caller.
+
 ## Connectors beside the gateway
 
 A connector often runs next to the gateway rather than on the public internet —
