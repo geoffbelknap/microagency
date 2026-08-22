@@ -180,9 +180,14 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 		fmt.Fprintf(out, "    resource        %s\n", dash(posture.Resource))
 		fmt.Fprintf(out, "    audience        %s\n", dash(posture.Audience))
 		reportTunnelStability(out, posture)
+		if posture.SSOIssuer != "" {
+			reportFederatedSignIn(out, posture, optedUp)
+			break
+		}
 		fmt.Fprintln(out, "    consent         loopback operator listener")
 		fmt.Fprintln(out, "    posture         single-user (--single-user) — every remote client authenticates as the")
-		fmt.Fprintln(out, "                    local operator; several people need an external issuer (--issuer)")
+		fmt.Fprintln(out, "                    local operator; several people need federated sign-in (--sso-issuer)")
+		fmt.Fprintln(out, "                    or an external issuer (--issuer)")
 	case "oauth-external":
 		fmt.Fprintf(out, "  public auth      external OAuth (issuer %s)\n", dash(posture.Issuer))
 		if posture.Resource != "" {
@@ -204,6 +209,9 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
 	case "oauth-local":
 		fmt.Fprintln(out, "  public auth      local built-in OAuth")
+		if posture.SSOIssuer != "" {
+			reportFederatedSignIn(out, posture, optedUp)
+		}
 	default:
 		fmt.Fprintf(out, "  public auth      ⚠ unknown posture %q\n", posture.Mode)
 	}
@@ -213,6 +221,25 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string) {
 		fmt.Fprintf(out, "  operator surface ⚠ /admin + /console reachable beyond loopback on %s (--allow-remote-admin)\n", posture.RemoteAdmin)
 		fmt.Fprintln(out, "                    (cleartext HTTP, operator token only — front it with TLS, or bind")
 		fmt.Fprintln(out, "                     loopback and use SSH forwarding)")
+	}
+}
+
+// reportFederatedSignIn renders the federated posture: the identity provider
+// people sign in at, the hosted-domain requirement (explicitly "none" when not
+// enforced, so its absence is visible), the multi-user posture, and what the
+// shared audit log retains of callers' arguments.
+func reportFederatedSignIn(out io.Writer, posture authPosture, optedUp []string) {
+	fmt.Fprintf(out, "    sign-in         federated to %s\n", posture.SSOIssuer)
+	if posture.SSOHostedDomain != "" {
+		fmt.Fprintf(out, "    hosted domain   %s (hd claim enforced on every sign-in)\n", posture.SSOHostedDomain)
+	} else {
+		fmt.Fprintln(out, "    hosted domain   none required — any account at the provider may sign in")
+	}
+	fmt.Fprintln(out, "    posture         multi-user — each provider account is a distinct principal")
+	if len(optedUp) == 0 {
+		fmt.Fprintln(out, "    audit capture   argument structure + digest (callers' argument values stay out of the shared log)")
+	} else {
+		fmt.Fprintf(out, "    audit capture   ⚠ FULL arguments for: %s (operator opt-up; other connections record structure + digest)\n", strings.Join(optedUp, ", "))
 	}
 }
 

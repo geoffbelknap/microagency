@@ -1,12 +1,15 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,11 +32,14 @@ const (
 	refreshAudienceSuffix = "#refresh"
 )
 
-// AuthServer is a self-contained, single-user OAuth 2.1 authorization server: open
-// dynamic client registration, authorization-code + PKCE with a one-click consent
-// page, and refresh tokens. It mints ES256 access tokens via the Signer that the
-// resource server (same process) validates. Single-user collapses the hard parts —
-// there is one principal ("operator"), so "login" is the single Approve click.
+// AuthServer is a self-contained OAuth 2.1 authorization server: open dynamic
+// client registration, authorization-code + PKCE, and refresh tokens. It mints
+// ES256 access tokens via the Signer that the resource server (same process)
+// validates. By default it is single-user — one principal ("operator"), so
+// "login" is the single Approve click on the consent page. With federation
+// configured (ConfigureFederation), the human-authentication step is delegated
+// to an upstream OIDC identity provider instead, and each token's subject is
+// that provider's stable `sub` — a multi-principal surface.
 type AuthServer struct {
 	signer    *Signer
 	issuer    string        // our own URL, e.g. http://127.0.0.1:8765
@@ -52,10 +58,17 @@ type AuthServer struct {
 	requireState    bool
 	requireResource bool
 
+	// federation, when set, replaces the consent surfaces entirely: authorize
+	// redirects the browser to the identity provider, and only the provider
+	// callback can complete a pending grant.
+	federation     *Federation
+	identities     map[string]federatedRecord // provider sub -> verified email etc.
+	identitiesPath string                     // if set, federated identities persist here
+
 	// Subject is the `sub` this single-user AS stamps on the tokens it issues — the
 	// one local principal. Defaults to "operator"; main sets it to the OS user so
-	// runs are attributed to the real human, matching the console header. When
-	// microagency grows multi-principal, this stops being a single fixed value.
+	// runs are attributed to the real human, matching the console header. In
+	// federated mode it is unused: subjects come from validated ID tokens.
 	Subject string
 }
 
@@ -73,6 +86,12 @@ type authCode struct {
 	state         string
 	resource      string
 	expiry        time.Time
+
+	// Federated mode: the nonce and PKCE verifier this server sent toward the
+	// identity provider for this pending grant. The callback validates the ID
+	// token against the nonce and exchanges the provider code with the verifier.
+	providerNonce    string
+	providerVerifier string
 }
 
 // NewAuthServer builds an AS that issues for audience, identified by issuer (our
@@ -91,10 +110,26 @@ func NewAuthServer(signer *Signer, issuer, audience string, accessTTL time.Durat
 	return &AuthServer{
 		signer: signer, issuer: issuer, audience: audience, accessTTL: accessTTL,
 		clients: map[string]clientReg{}, codes: map[string]authCode{}, pending: map[string]authCode{},
-		resource: audience, revocations: revocations,
+		identities: map[string]federatedRecord{},
+		resource:   audience, revocations: revocations,
 		Subject: "operator",
 	}
 }
+
+// ConfigureFederation delegates the human-authentication step to fed: authorize
+// redirects the browser to the identity provider, the provider callback
+// completes pending grants, and the local and operator consent surfaces stop
+// accepting decisions. Call before Register.
+func (s *AuthServer) ConfigureFederation(fed *Federation) {
+	s.federation = fed
+}
+
+// Federation returns the configured identity-provider binding, or nil.
+func (s *AuthServer) Federation() *Federation { return s.federation }
+
+// ssoRedirectURI is the provider-facing callback: this server's own origin plus
+// the fixed callback path, which the operator registers at the provider.
+func (s *AuthServer) ssoRedirectURI() string { return s.issuer + "/oauth/sso/callback" }
 
 // ConfigurePublicFlow binds authorization requests to resource and moves the
 // human consent decision to approvalBase, which must be an HTTP loopback origin
@@ -127,12 +162,17 @@ func (s *AuthServer) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/oauth/token", s.token)
 	mux.HandleFunc("/oauth/revoke", s.revoke)
 	mux.HandleFunc("/oauth/jwks", s.jwks)
+	if s.federation != nil {
+		mux.HandleFunc("/oauth/sso/callback", s.ssoCallback)
+	}
 }
 
 // RegisterOperator mounts the public flow's consent page on the loopback-only
-// operator mux. It never mounts on the tunneled mux.
+// operator mux. It never mounts on the tunneled mux, and in federated mode it
+// mounts nothing: consent is decided at the identity provider, so no local
+// surface may approve a grant.
 func (s *AuthServer) RegisterOperator(mux *http.ServeMux) {
-	if s.approvalBase != "" {
+	if s.approvalBase != "" && s.federation == nil {
 		mux.HandleFunc("/oauth/consent", s.operatorConsent)
 	}
 }
@@ -223,6 +263,10 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 	case http.MethodPost:
+		if s.federation != nil {
+			http.Error(w, "consent is decided at the identity provider", http.StatusMethodNotAllowed)
+			return
+		}
 		if s.approvalBase != "" {
 			http.Error(w, "public consent is decided on the operator listener", http.StatusMethodNotAllowed)
 			return
@@ -253,12 +297,26 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectErr(w, r, redirectURI, state, "invalid_request")
 		return
 	}
-	requestID, ok := s.storePending(authCode{
+	pendingGrant := authCode{
 		clientID: clientID, redirectURI: redirectURI, codeChallenge: challenge,
 		scope: scope, state: state, resource: resource,
-	})
+	}
+	if s.federation != nil {
+		pendingGrant.providerNonce = randToken(16)
+		pendingGrant.providerVerifier = randToken(32)
+	}
+	requestID, ok := s.storePending(pendingGrant)
 	if !ok {
 		http.Error(w, "too many pending authorization requests", http.StatusTooManyRequests)
+		return
+	}
+	if s.federation != nil {
+		// Federated: the person signs in at the identity provider. The state
+		// parameter is the single-use request ID, so the callback can complete
+		// exactly this pending grant and nothing else.
+		u := s.federation.AuthorizeURL(s.ssoRedirectURI(), requestID,
+			pendingGrant.providerNonce, pkceS256(pendingGrant.providerVerifier))
+		http.Redirect(w, r, u, http.StatusSeeOther)
 		return
 	}
 	if s.approvalBase != "" {
@@ -272,7 +330,9 @@ func (s *AuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 // storePending records a pending grant under a fresh unguessable request ID,
 // stamping the current subject and a 5-minute expiry. It refuses when the
 // pending table is full, so an unauthenticated flood cannot grow memory
-// without bound.
+// without bound. In federated mode the subject stays empty: only a validated
+// ID token at the provider callback supplies it, so no other path can turn
+// this pending grant into a token.
 func (s *AuthServer) storePending(pending authCode) (string, bool) {
 	requestID := randToken(24)
 	s.mu.Lock()
@@ -281,7 +341,9 @@ func (s *AuthServer) storePending(pending authCode) (string, bool) {
 	if len(s.pending) >= 4096 {
 		return "", false
 	}
-	pending.subject = s.currentSubjectLocked()
+	if s.federation == nil {
+		pending.subject = s.currentSubjectLocked()
+	}
 	pending.expiry = time.Now().Add(5 * time.Minute)
 	s.pending[requestID] = pending
 	return requestID, true
@@ -352,6 +414,70 @@ func crossSiteReason(r *http.Request) string {
 	return ""
 }
 
+// ssoCallback completes a federated authorization. The identity provider
+// redirected the person's browser back here with a provider code; state is the
+// single-use request ID minted at /oauth/authorize, so an unknown, expired, or
+// replayed state matches no pending grant and mints nothing. The provider code
+// is exchanged and the ID token fully validated (issuer, audience, expiry,
+// signature via the provider's JWKS, and the nonce bound to this request)
+// before the MCP client's authorization completes with the provider's `sub` as
+// the subject.
+func (s *AuthServer) ssoCallback(w http.ResponseWriter, r *http.Request) {
+	if s.federation == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	state := q.Get("state")
+	s.mu.Lock()
+	s.prunePendingLocked(time.Now())
+	pending, ok := s.pending[state]
+	if ok {
+		delete(s.pending, state) // single-use, even on failure
+	}
+	s.mu.Unlock()
+	if !ok || state == "" {
+		authui.WriteUserMessage(w, "This sign-in request is missing, expired, or was already used. Start again from your MCP client.")
+		return
+	}
+	if q.Get("error") != "" {
+		// The person declined at the provider (or the provider refused). The
+		// registered MCP client learns only the standard denial.
+		s.redirectErr(w, r, pending.redirectURI, pending.state, "access_denied")
+		return
+	}
+	code := q.Get("code")
+	if code == "" {
+		s.redirectErr(w, r, pending.redirectURI, pending.state, "invalid_request")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	id, err := s.federation.Exchange(ctx, code, s.ssoRedirectURI(), pending.providerVerifier, pending.providerNonce)
+	if err != nil {
+		if errors.Is(err, ErrHostedDomainRefused) {
+			hd := s.federation.HostedDomain()
+			authui.WriteUserMessage(w, "This account is not in the required domain ("+hd+"). Sign in with a "+hd+" account and start again from your MCP client.")
+			return
+		}
+		slog.Warn("sso sign-in failed", "err", err)
+		authui.WriteUserMessage(w, "Sign-in could not be verified. Start again from your MCP client.")
+		return
+	}
+	s.recordFederatedIdentity(id, s.federation.Issuer())
+	grantCode := randToken(24)
+	pending.subject = id.Subject
+	pending.expiry = time.Now().Add(60 * time.Second)
+	s.mu.Lock()
+	s.codes[grantCode] = pending
+	s.mu.Unlock()
+	s.redirectAuthorizationResult(w, r, pending.redirectURI, pending.state, "code", grantCode)
+}
+
 // operatorConsent is deliberately reachable only on the separate loopback
 // listener. The public authorization endpoint redirects the operator's browser
 // here, proving local presence without asking for or transmitting the operator
@@ -359,6 +485,12 @@ func crossSiteReason(r *http.Request) string {
 func (s *AuthServer) operatorConsent(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "loopback only", http.StatusForbidden)
+		return
+	}
+	if s.federation != nil {
+		// Defense in depth: RegisterOperator never mounts this in federated
+		// mode, but no consent surface may approve a federated grant.
+		http.Error(w, "consent is decided at the identity provider", http.StatusMethodNotAllowed)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
@@ -455,7 +587,8 @@ func (s *AuthServer) grantCode(w http.ResponseWriter, f url.Values) {
 	if !ok || time.Now().After(ac.expiry) || !validPKCEVerifier(f.Get("code_verifier")) ||
 		ac.clientID != f.Get("client_id") || ac.redirectURI != f.Get("redirect_uri") ||
 		pkceS256(f.Get("code_verifier")) != ac.codeChallenge ||
-		(ac.resource != "" && f.Get("resource") != ac.resource) {
+		(ac.resource != "" && f.Get("resource") != ac.resource) ||
+		ac.subject == "" { // fail closed: a grant with no authenticated subject mints nothing
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
@@ -475,20 +608,28 @@ func (s *AuthServer) grantRefresh(w http.ResponseWriter, f url.Values) {
 		return
 	}
 	// Honor the subject baked into the refresh token, not the server's current
-	// one. If the local principal has changed since this token was issued (an
-	// upgraded binary now attributing to a different OS user, or a reconfigured
-	// Subject), the session no longer belongs to that identity: refuse so the
-	// client re-consents rather than silently rebinding the session across the
-	// identity change. This changes when microagency grows multi-principal.
-	s.mu.Lock()
-	current := s.Subject
-	s.mu.Unlock()
-	if current == "" {
-		current = "operator"
-	}
-	if subject != current {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
-		return
+	// one. In single-user mode the token's subject must still match the local
+	// principal: if that changed since issue (an upgraded binary now attributing
+	// to a different OS user, or a reconfigured Subject), the session no longer
+	// belongs to that identity — refuse so the client re-consents rather than
+	// silently rebinding the session across the identity change.
+	//
+	// Federated mode is multi-principal: the token's subject IS the caller's
+	// identity, and refresh continues under it for the refresh token's lifetime
+	// without re-contacting the provider. Revocation at the provider therefore
+	// takes effect at refresh-token expiry (refreshTTL) or on explicit gateway
+	// revocation via /oauth/revoke.
+	if s.federation == nil {
+		s.mu.Lock()
+		current := s.Subject
+		s.mu.Unlock()
+		if current == "" {
+			current = "operator"
+		}
+		if subject != current {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+			return
+		}
 	}
 	// Consume the rotating token's jti only after every other check passes, so a
 	// request we are going to refuse never burns the token.

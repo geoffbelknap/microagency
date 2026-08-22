@@ -61,7 +61,7 @@ The guarantees, and where each one is enforced:
   fsynced and anchored before upstream egress. A ledger or anchor failure
   refuses the call.
 - **Caller privacy in the shared log.** On a multi-user gateway (external
-  issuer), proxy records capture argument structure and a SHA-256 digest of
+  issuer or federated sign-in), proxy records capture argument structure and a SHA-256 digest of
   the canonicalized arguments instead of the values, so one operator-readable
   file does not concentrate every caller's raw arguments. Single-user
   deployments keep full capture. An operator can opt a connection back up to
@@ -82,8 +82,14 @@ The guarantees, and where each one is enforced:
   Every consent decision is bound to single-use, unguessable request state,
   and a consent POST the browser labels cross-site (`Sec-Fetch-Site`,
   `Origin`) is refused — a web page cannot forge approval to the loopback
-  listener. An MCP token cannot authenticate the operator API, and operator
-  tokens cannot authenticate `/mcp`.
+  listener. With
+  [federated sign-in](public-mode.md#federated-sign-in-sso), no consent
+  surface exists at all: authorization completes only after the gateway
+  validates the identity provider's signed ID token (issuer, audience,
+  expiry, nonce, and signature against the provider's published keys), and
+  the provider client secret lives in the secret store, never on the
+  command line. An MCP token cannot authenticate the operator API, and
+  operator tokens cannot authenticate `/mcp`.
   The public `/connections` account API accepts the MCP principal token but
   cannot route to `/admin`; its unauthenticated provider callback is protected
   by expiring, single-use OAuth state and PKCE.

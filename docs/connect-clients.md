@@ -18,6 +18,11 @@ yourself.
 To disconnect, run `claude mcp remove microagency`. To skip
 auto-registration, pass `--no-register`.
 
+On a shared gateway, the built-in server can federate its sign-in to an OIDC
+identity provider (`--sso-issuer`), so each person authenticates with their
+own account and becomes a distinct principal. See
+[federated sign-in](public-mode.md#federated-sign-in-sso).
+
 The OAuth signing key lives at `~/.microagency/oauth-key` (mode 0600), so
 issued tokens survive restarts. Revoking a token at `/oauth/revoke` cuts off
 `/mcp` access immediately, and a used refresh token stays refused after a
@@ -102,11 +107,13 @@ audience the gateway validates is always the resource identifier it
 advertises in discovery metadata; see
 [public mode](public-mode.md#external-authorization-server) for the defaults.
 
-Built-in OAuth also works over Cloudflare and ngrok tunnels, and stays
-single-user there: pass `--single-user` to acknowledge that every remote
-client authenticates as you, or `up` refuses to start. Consent stays on
-the loopback operator listener. See [public mode](public-mode.md) for the
-endpoints, restart behavior, and external issuer option.
+Built-in OAuth also works over Cloudflare and ngrok tunnels. There it stays
+single-user unless sign-in is federated. Pass `--single-user` to acknowledge
+that every remote client authenticates as you, or `--sso-issuer` to let each
+person sign in with their own account; without either, `up` refuses to
+start. Without federation, consent stays on the loopback operator
+listener. See [public mode](public-mode.md) for the endpoints, restart
+behavior, and the federated and external-issuer options.
 
 ## Client-spawned (stdio)
 

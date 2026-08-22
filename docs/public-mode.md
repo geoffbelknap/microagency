@@ -22,11 +22,12 @@ The built-in OAuth server identifies exactly one person: you. Every token it
 issues authenticates as your local user, so several people connecting through
 the tunnel would be indistinguishable and would share connections, credentials,
 and parked data. `--single-user` is the required acknowledgment of that
-posture. Without it — and without `--issuer` or `--token` selecting another
-auth mode — `up` refuses to start. Startup output and `microagency doctor`
-both report the single-user posture while it is active. To serve several
-people, use an [external authorization server](#external-authorization-server)
-instead.
+posture. Without it — and without `--sso-issuer`, `--issuer`, or `--token`
+selecting another auth mode — `up` refuses to start. Startup output and
+`microagency doctor` both report the single-user posture while it is active.
+To serve several people, [federate sign-in](#federated-sign-in-sso) to an
+identity provider, or use an
+[external authorization server](#external-authorization-server).
 
 Paste the printed `/mcp` URL into the remote MCP client. The client discovers
 the authorization server, registers, and opens a consent request. The consent
@@ -61,8 +62,8 @@ microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com \
 ```
 
 A named tunnel changes URL stability, not the auth posture: built-in OAuth
-still serves one person, so `--single-user` (or `--issuer`/`--token`) is
-still required.
+still serves one person, so `--single-user` (or `--sso-issuer`, `--issuer`,
+or `--token`) is still required.
 
 microagency runs `cloudflared tunnel run` pointed at the local MCP listener,
 overriding any ingress rules in your cloudflared config. The URL you supply
@@ -77,6 +78,56 @@ invalidates them, and startup says so.
 microagency watches the tunnel process instead of assuming it stays up. If
 `cloudflared` exits, the server log records the exit and its last output, and
 `microagency doctor` reports the dead tunnel with a restart remediation.
+
+## Federated sign-in (SSO)
+
+To serve several people from one gateway without deploying an authorization
+server, federate the built-in server's sign-in to an OIDC identity provider:
+
+```sh
+export MICROAGENCY_SSO_CLIENT_SECRET=<client-secret>   # first start only
+microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com \
+  --sso-issuer https://accounts.google.com \
+  --sso-client-id <client-id>.apps.googleusercontent.com \
+  --sso-hd example.com
+```
+
+The gateway stays the authorization server toward MCP clients: dynamic client
+registration, PKCE, and token minting are unchanged, and issued tokens still
+carry the gateway as their issuer. Only the human sign-in step is delegated.
+Pointing `--issuer` directly at a provider like Google does not work for MCP
+clients. Its access tokens are opaque to a third-party resource server, its ID
+tokens are audience-bound to one client, and it offers no open dynamic client
+registration.
+
+Create the OAuth client at the provider once, with the redirect URI
+`<public-url>/oauth/sso/callback`. A quick tunnel changes its URL on restart,
+which breaks that registration — use a named tunnel or your own stable URL.
+
+When an MCP client starts authorization, the gateway parks the request under
+single-use state and sends the person's browser to the provider with PKCE and
+a nonce. On return it exchanges the code, validates the ID token — issuer,
+audience, expiry, nonce, and signature against the provider's published keys —
+and completes the client's authorization. Each token's subject is the
+provider's stable `sub` claim, so every account is a distinct principal:
+connections, parked references, and grants are scoped per person exactly as
+under an external issuer. The provider-verified email is recorded alongside
+for display; identity comparisons use only the subject.
+
+With `--sso-hd`, the ID token must carry that exact `hd` (hosted domain)
+claim. An account outside the domain is refused during sign-in, before any
+gateway token exists.
+
+The provider client secret is supplied once — via `MICROAGENCY_SSO_CLIENT_SECRET`
+or `--sso-client-secret-file` — and is kept only in the secret store, never on
+the command line. Later starts read it back from the store.
+
+Federated mode is multi-user, so it starts without `--single-user`. A refresh
+continues under the token's own subject without re-contacting the provider.
+Disabling an account at the provider therefore takes effect when the gateway
+refresh token expires (30 days at most), or immediately on revocation at
+`/oauth/revoke`. Startup output and `microagency doctor` report the federated
+posture, the provider issuer, and the hosted-domain requirement.
 
 ## External authorization server
 
@@ -116,6 +167,7 @@ Built-in public OAuth serves these routes on the tunneled listener:
 - `/oauth/token`
 - `/oauth/revoke`
 - `/oauth/jwks`
+- `/oauth/sso/callback` (federated sign-in only)
 - `/connections` and `/connections/*`
 - `/mcp`
 

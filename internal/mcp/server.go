@@ -326,6 +326,11 @@ func withDecisionLedgerAppender(appendLine func(string, []byte) error) Option {
 // OAuth refresh tokens).
 func WithSecretStore(s2 secretstore.Store) Option { return func(s *Server) { s.secrets = s2 } }
 
+// SecretStore returns the installed secret store, or nil. Startup wiring uses
+// it so operator-supplied secrets (the SSO provider client secret) land in the
+// same custody as every other credential instead of a second store.
+func (s *Server) SecretStore() secretstore.Store { return s.secrets }
+
 // WithStateDir sets the directory for non-secret persisted state (the upstream
 // registrations index), so OAuth upstreams reload across restarts.
 func WithStateDir(dir string) Option { return func(s *Server) { s.stateDir = dir } }
