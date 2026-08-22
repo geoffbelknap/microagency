@@ -97,7 +97,10 @@ microagency up
 ```
 
 For a shared deployment, `up --issuer <url>` validates tokens from an
-external authorization server. Clients log in through that issuer.
+external authorization server. Clients log in through that issuer. The
+audience the gateway validates is always the resource identifier it
+advertises in discovery metadata; see
+[public mode](public-mode.md#external-authorization-server) for the defaults.
 
 Built-in OAuth also works over Cloudflare and ngrok tunnels, and stays
 single-user there: pass `--single-user` to acknowledge that every remote
