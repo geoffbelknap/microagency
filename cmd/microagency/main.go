@@ -203,6 +203,9 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "  up flags:")
 	fmt.Fprintln(w, "    --http <addr>         bind address (default 127.0.0.1:8765)")
 	fmt.Fprintln(w, "    --public              expose built-in OAuth + /mcp via Cloudflare")
+	fmt.Fprintln(w, "    --tunnel <provider>   tunnel provider: cloudflare (default with --public) or ngrok")
+	fmt.Fprintln(w, "    --tunnel-name <name>  run a named Cloudflare tunnel you created (stable URL; tokens survive restarts)")
+	fmt.Fprintln(w, "    --tunnel-url <url>    the named tunnel's public https:// origin (required with --tunnel-name)")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
@@ -229,6 +232,7 @@ func upFlags(w io.Writer) {
 type upOptions struct {
 	httpAddr, token                     string
 	issuer, audience, tunnel, adminAddr string
+	tunnelName, tunnelURL               string
 	requireScope                        string
 	wasmMaxMemMB                        int // per-wasm-run memory ceiling (ASK tenet 8 — bounded ops)
 	// Results larger than maxInlineBytes come back as a reference, not raw
@@ -271,6 +275,12 @@ func parseUpOptions(args []string) (upOptions, error) {
 			i++
 		case args[i] == "--tunnel" && i+1 < len(args):
 			o.tunnel = args[i+1]
+			i++
+		case args[i] == "--tunnel-name" && i+1 < len(args):
+			o.tunnelName = args[i+1]
+			i++
+		case args[i] == "--tunnel-url" && i+1 < len(args):
+			o.tunnelURL = args[i+1]
 			i++
 		case args[i] == "--admin-addr" && i+1 < len(args):
 			o.adminAddr = args[i+1] // bind /admin + /console on their own listener
@@ -316,7 +326,36 @@ func parseUpOptions(args []string) (upOptions, error) {
 	if o.highAssuranceMultiUser && o.issuer == "" {
 		return o, fmt.Errorf("--high-assurance-multi-user requires --issuer with a signed campaign or campaign_id claim")
 	}
+	// A named tunnel is one contract with two halves: the tunnel to run and the
+	// stable origin it serves. Half a contract fails closed with both named.
+	if (o.tunnelName == "") != (o.tunnelURL == "") {
+		return o, fmt.Errorf("--tunnel-name and --tunnel-url must be set together (the name picks the tunnel to run; the URL is its public origin)")
+	}
+	if o.tunnelName != "" {
+		if o.tunnel != "" && o.tunnel != "cloudflare" {
+			return o, fmt.Errorf("--tunnel-name works with --tunnel cloudflare only (got --tunnel %s)", o.tunnel)
+		}
+		normalized, err := normalizeTunnelURL(o.tunnelURL)
+		if err != nil {
+			return o, err
+		}
+		o.tunnelURL = normalized
+	}
 	return o, nil
+}
+
+// normalizeTunnelURL validates the operator-declared public origin for a named
+// tunnel. It becomes the OAuth issuer and resource base, so anything beyond a
+// plain https:// origin — a path, query, fragment, or embedded credentials —
+// would corrupt every derived endpoint. The returned form has no trailing
+// slash.
+func normalizeTunnelURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("--tunnel-url must be a plain https:// origin like https://mcp.example.com, got %q", raw)
+	}
+	return strings.TrimSuffix(u.String(), "/"), nil
 }
 
 func run(args []string) {
@@ -340,7 +379,7 @@ func run(args []string) {
 	highAssuranceMultiUser := o.highAssuranceMultiUser
 	engineSpecs := o.engineSpecs
 
-	if public && tunnelProvider == "" {
+	if (public || o.tunnelName != "") && tunnelProvider == "" {
 		tunnelProvider = "cloudflare"
 	}
 	if token == "" {
@@ -349,7 +388,8 @@ func run(args []string) {
 	cfg := httpConfig{
 		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
-		tunnel: tunnelProvider, noRegister: noRegister,
+		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
+		noRegister: noRegister,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -469,7 +509,11 @@ func daemonize(cfg httpConfig) {
 	fmt.Fprintf(os.Stderr, "    MCP endpoint   http://%s/mcp   (in Claude Code: /mcp → Authenticate)\n", cfg.addr)
 	fmt.Fprintf(os.Stderr, "    Console        http://%s/console\n", consoleAddr(cfg))
 	if cfg.tunnel != "" {
-		fmt.Fprintf(os.Stderr, "    Tunnel         public URL appears in the logs — it exposes /mcp only; the console stays loopback\n")
+		if cfg.tunnelName != "" {
+			fmt.Fprintf(os.Stderr, "    Tunnel         %s (named tunnel %q, stable across restarts) — exposes /mcp only; the console stays loopback\n", cfg.tunnelURL, cfg.tunnelName)
+		} else {
+			fmt.Fprintf(os.Stderr, "    Tunnel         public URL appears in the logs — it exposes /mcp only; the console stays loopback\n")
+		}
 		switch {
 		case cfg.issuer != "":
 			fmt.Fprintf(os.Stderr, "    Public auth    external OAuth (%s)\n", cfg.issuer)
@@ -746,7 +790,9 @@ func verifyFullPurgeTarget(dir string) error {
 
 type httpConfig struct {
 	addr, adminAddr, token, issuer, audience, tunnel string
-	publicURL                                        string // discovered from the tunnel process, never from request headers
+	tunnelName                                       string // named-tunnel mode: the operator-created tunnel to run
+	tunnelURL                                        string // named-tunnel mode: the operator-declared stable https origin
+	publicURL                                        string // scraped from a quick tunnel or declared via --tunnel-url, never from request headers
 	authDir                                          string // test-only override; production uses ~/.microagency
 	requireScope                                     string // with --issuer: OAuth scope a token must carry to reach /mcp
 	noRegister                                       bool
@@ -1021,11 +1067,22 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 		}
 	}
 
-	// Discover the provider-assigned public origin before building OAuth metadata.
-	// That exact HTTPS origin, not Host/Forwarded headers, becomes the issuer and
-	// default resource identifier for the lifetime of this process.
+	// Establish the public origin before building OAuth metadata. A quick tunnel
+	// reports its assigned origin on stdout; a named tunnel serves the origin the
+	// operator declared with --tunnel-url. Either way that exact HTTPS origin,
+	// not Host/Forwarded headers, becomes the issuer and default resource
+	// identifier for the lifetime of this process.
 	var tun *tunnel.Tunnel
-	if cfg.tunnel != "" {
+	switch {
+	case cfg.tunnel != "" && cfg.tunnelName != "":
+		t, err := tunnel.StartNamed(context.Background(), cfg.tunnel, cfg.tunnelName, cfg.addr, 3*time.Second)
+		if err != nil {
+			closeListeners()
+			fatal("start named tunnel", "err", err)
+		}
+		tun = t
+		cfg.publicURL = cfg.tunnelURL // operator-declared; validated at parse time
+	case cfg.tunnel != "":
 		t, err := tunnel.Start(context.Background(), cfg.tunnel, cfg.addr, 45*time.Second)
 		if err != nil {
 			closeListeners()
@@ -1042,6 +1099,14 @@ func serveHTTP(srv *mcp.Server, cfg httpConfig) {
 	}
 	if tun != nil {
 		defer func() { _ = tun.Close() }()
+		if err := writeTunnelState(tunnelStatePath(), newTunnelState(cfg, tun.Pid())); err != nil {
+			slog.Warn("tunnel state not recorded; doctor cannot see tunnel liveness", "err", err)
+		}
+		go watchTunnel(tun, tunnelStatePath())
+	} else {
+		// No tunnel this run: drop any record from a previous one so doctor
+		// reports the deployment that exists, not the one that used to.
+		_ = os.Remove(tunnelStatePath())
 	}
 
 	mcpMux, adminMux, mode, bearer, err := buildMuxes(srv, cfg, operatorToken)
@@ -1171,8 +1236,13 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 		case "oauth-tunnel":
 			fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth over %s; consent is approved only on %s\n", cfg.tunnel, consoleAddr(cfg))
 			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
-			if changedOrigin {
+			switch {
+			case changedOrigin:
 				fmt.Fprintln(os.Stderr, "  URL changed    prior tunnel tokens are invalid; reconnect clients at this URL")
+			case cfg.tunnelName != "":
+				fmt.Fprintf(os.Stderr, "  URL            stable — named tunnel %q keeps this URL across restarts (tokens survive)\n", cfg.tunnelName)
+			default:
+				fmt.Fprintln(os.Stderr, "  URL            quick tunnel — the URL changes on restart, invalidating issued tokens")
 			}
 		}
 	case "bearer":
@@ -1297,12 +1367,16 @@ func oauthRevocationsPathFor(dir string) string {
 }
 
 type authPosture struct {
-	Mode      string `json:"mode"`
-	Issuer    string `json:"issuer,omitempty"`
-	Resource  string `json:"resource,omitempty"`
-	Audience  string `json:"audience,omitempty"`
-	Tunnel    string `json:"tunnel,omitempty"`
-	UpdatedAt string `json:"updated_at"`
+	Mode     string `json:"mode"`
+	Issuer   string `json:"issuer,omitempty"`
+	Resource string `json:"resource,omitempty"`
+	Audience string `json:"audience,omitempty"`
+	Tunnel   string `json:"tunnel,omitempty"`
+	// TunnelMode records URL stability: "named" tunnels keep their issuer
+	// across restarts (tokens survive); "quick" tunnels get a fresh one.
+	TunnelMode string `json:"tunnel_mode,omitempty"`
+	TunnelName string `json:"tunnel_name,omitempty"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
@@ -1354,6 +1428,10 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 	posture := authPosture{
 		Mode: mode, Issuer: issuer, Resource: resource, Audience: audience, Tunnel: cfg.tunnel,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if cfg.tunnel != "" {
+		posture.TunnelMode = tunnelMode(cfg)
+		posture.TunnelName = cfg.tunnelName
 	}
 	b, err := json.Marshal(posture)
 	if err != nil {

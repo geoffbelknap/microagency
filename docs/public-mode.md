@@ -28,8 +28,40 @@ cannot be replayed.
 
 Cloudflare quick-tunnel URLs can change after a restart. When the URL changes,
 old tokens and client registrations stop working. Reconnect the client at the
-new URL. Startup output and `microagency doctor` show the active issuer and
-resource.
+new URL, or use a named tunnel for a stable one. Startup output and
+`microagency doctor` show the active issuer and resource.
+
+## Named tunnels (stable URL)
+
+A named Cloudflare tunnel serves a hostname you own, so the issuer survives
+restarts and issued tokens stay valid. Create the tunnel and its DNS route
+once with your Cloudflare account:
+
+```sh
+cloudflared tunnel login
+cloudflared tunnel create microagency
+cloudflared tunnel route dns microagency mcp.example.com
+```
+
+Then start microagency with the tunnel's name and its public URL:
+
+```sh
+microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com
+```
+
+microagency runs `cloudflared tunnel run` pointed at the local MCP listener,
+overriding any ingress rules in your cloudflared config. The URL you supply
+becomes the OAuth issuer and resource. It must be a plain `https://` origin
+with no path, query, or credentials.
+
+`--tunnel-name` and `--tunnel-url` are required together and imply
+`--tunnel cloudflare`. Because the URL is stable, restarts keep issued tokens
+and client registrations working. Changing `--tunnel-url` between runs
+invalidates them, and startup says so.
+
+microagency watches the tunnel process instead of assuming it stays up. If
+`cloudflared` exits, the server log records the exit and its last output, and
+`microagency doctor` reports the dead tunnel with a restart remediation.
 
 ## External authorization server
 
