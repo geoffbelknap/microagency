@@ -92,6 +92,26 @@ invocation gate and drops the derived-token cache. Revoking also deletes the
 stored key. Tokens the provider already issued expire on their own short
 lifetime; the provider owns their revocation.
 
+## Connectors beside the gateway
+
+A connector often runs next to the gateway rather than on the public internet —
+a sidecar in the same workload, or an internal server on the same network. An
+upstream URL is untrusted by default, so the gateway refuses private addresses
+unless the operator declares this connection's endpoint reachable:
+
+```sh
+curl -fsS http://127.0.0.1:8766/admin/upstreams \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"name": "drive", "url": "http://127.0.0.1:8770/mcp",
+           "allow_private_destination": true, "strategy": "google-dwd", "...": "..."}'
+```
+
+The declaration covers that connection's own address and nothing else. A
+self-service connection is refused it, and cloud-metadata addresses stay
+refused for every connection. `microagency doctor` lists the connections
+declared this way.
+
 ## Audit
 
 Every delegated call's proxy record carries both identities: the caller

@@ -11,6 +11,7 @@ import (
 
 	"microagency/internal/auth"
 	"microagency/internal/gateway"
+	"microagency/internal/safedial"
 	"microagency/internal/secretstore"
 )
 
@@ -31,7 +32,11 @@ type upstreamReg struct {
 	Discover bool   `json:"discover"`
 	Auth     string `json:"auth,omitempty"`      // authOAuth|authStatic|authNone; "" = oauth (legacy)
 	ReadOnly bool   `json:"read_only,omitempty"` // writes refused (least-privilege)
-	Owner    string `json:"owner,omitempty"`     // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
+	// PrivateDestination records the operator's declaration that this connection's
+	// own endpoint is reachable although private, so the permission survives a
+	// restart without the operator re-declaring it.
+	PrivateDestination bool   `json:"private_destination,omitempty"`
+	Owner              string `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	// AuditFullArgs opts this connection up to full argument capture in the
 	// audit log on a multi-principal gateway (default there: structure + digest).
 	AuditFullArgs bool   `json:"audit_full_args,omitempty"`
@@ -77,6 +82,9 @@ type UpstreamRegistration struct {
 	// their prerequisites from these.
 	Strategy   string
 	Delegation *DelegationSummary
+	// PrivateDestination: the operator declared this connection's own endpoint
+	// reachable although private. Doctor discloses it as part of the posture.
+	PrivateDestination bool
 }
 
 // ReadUpstreamRegistrations returns the persisted upstream registrations under
@@ -95,7 +103,7 @@ func ReadUpstreamRegistrations(stateDir string) []UpstreamRegistration {
 	}
 	out := make([]UpstreamRegistration, 0, len(regs))
 	for _, r := range regs {
-		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL, AuditFullArgs: r.AuditFullArgs, Strategy: r.strategyKind(), Delegation: r.Delegation})
+		out = append(out, UpstreamRegistration{Name: r.Name, URL: r.URL, AuditFullArgs: r.AuditFullArgs, Strategy: r.strategyKind(), Delegation: r.Delegation, PrivateDestination: r.PrivateDestination})
 	}
 	return out
 }
@@ -196,6 +204,7 @@ func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 		for i := range regs {
 			if regs[i].Name == reg.Name {
 				reg.ReadOnly = regs[i].ReadOnly // preserve an operator's read-only setting across re-registration
+				reg.PrivateDestination = regs[i].PrivateDestination
 				reg.AuditFullArgs = regs[i].AuditFullArgs
 				reg.Minimize = regs[i].Minimize
 				if len(reg.Grants) == 0 {
@@ -448,6 +457,15 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 	for _, reg := range s.loadRegistrations() {
 		u := &gateway.Upstream{Name: reg.Name, URL: reg.URL, Client: s.upstreamClient}
 		opts := []UpstreamOption{}
+		if reg.PrivateDestination {
+			dest, derr := safedial.ParseDestination(reg.URL)
+			if derr != nil {
+				slog.Warn("reload upstream: private destination refused", "upstream", reg.Name, "err", derr)
+				continue
+			}
+			u.Client = safedial.GuardedClientForDestination(0, 0, dest)
+			opts = append(opts, WithPrivateDestination())
+		}
 		if reg.Owner != "" {
 			opts = append(opts, WithOwner(reg.Owner))
 		}

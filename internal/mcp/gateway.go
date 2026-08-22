@@ -61,6 +61,12 @@ type upstream struct {
 	// to reads so an org-scoped OAuth grant (e.g. Supabase across all projects) can't
 	// be used to mutate through microagency.
 	readOnly bool
+	// privateDestination is set when the operator declared this connection's own
+	// endpoint reachable even though it is loopback or otherwise private — a
+	// sidecar connector, or an internal MCP server beside the gateway. It is
+	// operator-only: a principal-created connection can never carry it, so the
+	// SSRF guard still covers every URL that came from a user.
+	privateDestination bool
 	// auditFullArgs opts this connection up to FULL argument capture in the
 	// audit log on a multi-principal gateway, where the default is structure +
 	// digest (see argcapture.go). Inert on single-principal deployments, which
@@ -156,6 +162,13 @@ func WithSelfService(template string) UpstreamOption {
 	return func(u *upstream) { u.selfService, u.template = true, template }
 }
 
+// WithPrivateDestination permits this connection to dial its own endpoint when
+// that endpoint is private. Only the operator admin path may set it; see
+// registerUpstream, which refuses it together with WithSelfService.
+func WithPrivateDestination() UpstreamOption {
+	return func(u *upstream) { u.privateDestination = true }
+}
+
 // WithRevoked restores a persisted revoked record without restoring a credential.
 func WithRevoked() UpstreamOption { return func(u *upstream) { u.revoked = true } }
 
@@ -174,6 +187,13 @@ func (s *Server) registerUpstream(name string, u *upstream, opts ...UpstreamOpti
 	}
 	for _, opt := range opts {
 		opt(u)
+	}
+	// A private destination is operator authority. Refuse the combination at
+	// REGISTRATION rather than at dial time, so no self-service path — template,
+	// reauthorize, or a future one — can admit a principal-supplied URL that
+	// reaches inside the deployment's own network.
+	if u.privateDestination && u.selfService {
+		return fmt.Errorf("gateway: upstream %q: a self-service connection may not declare a private destination", name)
 	}
 	if u.enabled && !u.revoked {
 		if err := s.validateMediationEndpoint(u.conn.Endpoint()); err != nil {
@@ -383,10 +403,13 @@ func (s *Server) RefreshUpstream(ctx context.Context, name string) error {
 type UpstreamInfo struct {
 	Name       string `json:"name"`
 	URL        string `json:"url"`
-	State      string `json:"state"`           // "enabled" | "discovered"
-	Provenance string `json:"provenance"`      // preloaded | catalog | discovered
-	ReadOnly   bool   `json:"read_only"`       // writes refused (least-privilege)
-	Owner      string `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
+	State      string `json:"state"`      // "enabled" | "discovered"
+	Provenance string `json:"provenance"` // preloaded | catalog | discovered
+	ReadOnly   bool   `json:"read_only"`  // writes refused (least-privilege)
+	// PrivateDestination reports an operator-declared connection whose own
+	// endpoint is private (a sidecar or an internal server beside the gateway).
+	PrivateDestination bool   `json:"private_destination,omitempty"`
+	Owner              string `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	// AuditFullArgs: this connection is opted up to full argument capture in the
 	// audit log on a multi-principal gateway (default there: structure + digest).
 	AuditFullArgs bool     `json:"audit_full_args,omitempty"`
@@ -566,7 +589,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, PrivateDestination: rec.privateDestination, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
 			Strategy: StrategyStatic, Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		switch {
 		case rec.delegation != nil:

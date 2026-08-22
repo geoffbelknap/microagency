@@ -187,7 +187,7 @@ func newDelegatedServer(t *testing.T, provider *delegationProvider, up *delegati
 		WithSecretStore(openTestSecretStore(t, t.TempDir())))...)
 	s.SetDelegatedEmailLookup(func(subject string) string { return emails[subject] })
 	cfg := &DelegationSummary{Scopes: []string{"https://provider.example/auth/data.readonly"}}
-	if _, code, err := s.addDelegatedUpstream(context.Background(), "docs", up.ts.URL, false, false, "", cfg, saKey); err != nil {
+	if _, code, err := s.addDelegatedUpstream(context.Background(), "docs", up.ts.URL, false, false, false, "", cfg, saKey); err != nil {
 		t.Fatalf("add delegated upstream (%d): %v", code, err)
 	}
 	return s
@@ -423,7 +423,7 @@ func TestDelegatedReloadAcrossRestart(t *testing.T) {
 	saKey := provider.registerKey(t, "delegate@project.example")
 	s1 := newTestServer(t, fakeRunner{}, WithStateDir(stateDir), WithUpstreamClient(&http.Client{}), WithSecretStore(openTestSecretStore(t, secretDir)))
 	cfg := &DelegationSummary{Scopes: []string{"https://provider.example/auth/data.readonly"}}
-	if _, code, err := s1.addDelegatedUpstream(context.Background(), "docs", up.ts.URL, false, false, "", cfg, saKey); err != nil {
+	if _, code, err := s1.addDelegatedUpstream(context.Background(), "docs", up.ts.URL, false, false, false, "", cfg, saKey); err != nil {
 		t.Fatalf("add delegated upstream (%d): %v", code, err)
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"microagency/internal/auth"
 	"microagency/internal/gateway"
+	"microagency/internal/safedial"
 	"microagency/internal/secretstore"
 )
 
@@ -313,7 +314,7 @@ func (s *Server) adminUpdateDelegation(w http.ResponseWriter, r *http.Request) {
 // addDelegatedUpstream is the admin add path for strategy google-dwd: parse
 // and store the service-account key, build the per-caller source, register
 // the connection, and persist the non-secret record.
-func (s *Server) addDelegatedUpstream(ctx context.Context, name, rawURL string, discover, readOnly bool, owner string, cfg *DelegationSummary, saKey string) (string, int, error) {
+func (s *Server) addDelegatedUpstream(ctx context.Context, name, rawURL string, discover, readOnly, privateDestination bool, owner string, cfg *DelegationSummary, saKey string) (string, int, error) {
 	if s.secrets == nil {
 		return "", http.StatusServiceUnavailable, errors.New("a secret store is required for delegated connections")
 	}
@@ -333,8 +334,20 @@ func (s *Server) addDelegatedUpstream(ctx context.Context, name, rawURL string, 
 	if err := s.secrets.Save(ctx, DelegationKeyKey(name), []byte(saKey)); err != nil {
 		return "", http.StatusServiceUnavailable, fmt.Errorf("store service-account key: %w", err)
 	}
-	u := &gateway.Upstream{Name: name, URL: rawURL, Client: s.upstreamClient, Bearer: delegatedBearer(src)}
+	client := s.upstreamClient
 	opts := []UpstreamOption{WithDelegation(src)}
+	if privateDestination {
+		dest, derr := safedial.ParseDestination(rawURL)
+		if derr != nil {
+			if delErr := s.secrets.Delete(ctx, DelegationKeyKey(name)); delErr != nil && delErr != secretstore.ErrNotFound {
+				derr = errors.Join(derr, delErr)
+			}
+			return "", http.StatusBadRequest, derr
+		}
+		client = safedial.GuardedClientForDestination(0, 0, dest)
+		opts = append(opts, WithPrivateDestination())
+	}
+	u := &gateway.Upstream{Name: name, URL: rawURL, Client: client, Bearer: delegatedBearer(src)}
 	if owner != "" {
 		opts = append(opts, WithOwner(owner))
 	}
@@ -353,7 +366,7 @@ func (s *Server) addDelegatedUpstream(ctx context.Context, name, rawURL string, 
 	resolved := resolvedDelegationSummary(src)
 	s.persistRegistrationRecord(upstreamReg{
 		Name: name, URL: rawURL, Discover: discover, Auth: authNone,
-		ReadOnly: readOnly, Owner: owner,
+		ReadOnly: readOnly, PrivateDestination: privateDestination, Owner: owner,
 		Strategy: StrategyGoogleDWD, Delegation: resolved,
 	})
 	if readOnly {

@@ -54,6 +54,7 @@ func runDoctor(args []string) {
 	reportSecretPosture(out)
 	reportAuthPosture(out)
 	reportDelegatedConnections(out)
+	reportPrivateDestinations(out)
 	tunnelOK, tunnelClause := reportTunnelHealth(out, pid != 0)
 
 	// query engines — the WebAssembly modules that run reduce's declarative
@@ -155,6 +156,32 @@ func reportAuthPosture(out io.Writer) {
 
 func reportDelegatedConnections(out io.Writer) {
 	reportDelegatedConnectionsAt(out, microagencyDir(), authPosturePath())
+}
+
+// reportPrivateDestinations lists connections the operator declared reachable at
+// a private address. Reaching inside the deployment's own network is authority
+// worth seeing in the posture, so it is stated rather than left silent. Nothing
+// is printed when no connection carries the declaration.
+func reportPrivateDestinations(out io.Writer) {
+	reportPrivateDestinationsAt(out, microagencyDir())
+}
+
+func reportPrivateDestinationsAt(out io.Writer, stateDir string) {
+	var private []mcp.UpstreamRegistration
+	for _, reg := range mcp.ReadUpstreamRegistrations(stateDir) {
+		if reg.PrivateDestination {
+			private = append(private, reg)
+		}
+	}
+	if len(private) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "  private upstreams operator-declared endpoints inside this deployment's network")
+	for _, reg := range private {
+		fmt.Fprintf(out, "    %-15s %s\n", reg.Name, reg.URL)
+	}
+	fmt.Fprintln(out, "                    (self-service connections can never reach a private address;")
+	fmt.Fprintln(out, "                     cloud-metadata addresses stay refused for these too)")
 }
 
 // reportDelegatedConnectionsAt renders each delegated (google-dwd) connection
