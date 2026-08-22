@@ -128,6 +128,13 @@ results are scoped the same way: each `<ref_>` is bound to the principal
 that created it, so one user can't reduce over another's parked data even
 with the handle.
 
+Result caching and upstream session state follow the same boundary. The
+short-lived read cache is keyed per caller, so a result produced for one
+user is never replayed to another — identical reads by different users each
+reach the upstream, even on a shared connection. Upstream MCP sessions are
+per caller too: each user's calls run their own session handshake and present
+only their own session id, so server-side session state never spans users.
+
 ### Allow self-service connections
 
 An operator can permit a provider without permitting arbitrary upstream URLs.
