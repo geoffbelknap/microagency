@@ -17,6 +17,7 @@ import (
 	"microagency/internal/gateway"
 	"microagency/internal/optoken"
 	"microagency/internal/refstore"
+	"microagency/internal/safedial"
 	"microagency/internal/sandbox"
 )
 
@@ -320,6 +321,11 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		Scope    string `json:"scope"`     // OAuth scopes to request (space-separated); operator-chosen, least-privilege
 		Discover bool   `json:"discover"`  // register DISCOVERED (findable, not invocable) instead of enabled
 		ReadOnly bool   `json:"read_only"` // expose only READ tools; refuse writes (least-privilege at onboarding)
+		// AllowPrivateDestination declares this connection's own endpoint reachable
+		// even when it is loopback or otherwise private — a sidecar connector, or an
+		// internal MCP server beside the gateway. Operator-only: this surface is the
+		// only one that accepts it, and the metadata addresses stay refused regardless.
+		AllowPrivateDestination bool `json:"allow_private_destination"`
 		// Owner scopes the connection to ONE authenticated principal, by canonical
 		// identity key (issuer#subject): only that caller can find or invoke it.
 		// "" = shared with every authenticated user of this gateway.
@@ -379,7 +385,7 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "token and strategy \"google-dwd\" are mutually exclusive: a delegated connection derives a per-caller credential and cannot also hold a static bearer; drop one of them", http.StatusBadRequest)
 			return
 		}
-		state, code, err := s.addDelegatedUpstream(r.Context(), in.Name, in.URL, in.Discover, in.ReadOnly, in.Owner, in.Delegation, in.ServiceAccountKey)
+		state, code, err := s.addDelegatedUpstream(r.Context(), in.Name, in.URL, in.Discover, in.ReadOnly, in.AllowPrivateDestination, in.Owner, in.Delegation, in.ServiceAccountKey)
 		if err != nil {
 			http.Error(w, err.Error(), code)
 			return
@@ -401,7 +407,16 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown credential strategy "+strconv.Quote(in.Strategy)+"; one of: static, per-user-oauth, google-dwd", http.StatusBadRequest)
 		return
 	}
-	u := &gateway.Upstream{Name: in.Name, URL: in.URL, Token: in.Token, Client: s.upstreamClient}
+	client := s.upstreamClient
+	if in.AllowPrivateDestination {
+		dest, derr := safedial.ParseDestination(in.URL)
+		if derr != nil {
+			http.Error(w, derr.Error(), http.StatusBadRequest)
+			return
+		}
+		client = safedial.GuardedClientForDestination(0, 0, dest)
+	}
+	u := &gateway.Upstream{Name: in.Name, URL: in.URL, Token: in.Token, Client: client}
 	// No static token → probe for OAuth. If the upstream requires it, start the web
 	// flow and return an authorize URL for the operator's browser to visit (no PAT).
 	if in.Token == "" {
@@ -418,6 +433,9 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 	var opts []UpstreamOption
 	if in.Owner != "" {
 		opts = append(opts, WithOwner(in.Owner))
+	}
+	if in.AllowPrivateDestination {
+		opts = append(opts, WithPrivateDestination())
 	}
 	var err error
 	state := "enabled"
@@ -438,7 +456,10 @@ func (s *Server) adminAddUpstream(w http.ResponseWriter, r *http.Request) {
 		authKind = authStatic
 		s.saveStaticToken(r.Context(), in.Name, in.Token)
 	}
-	s.persistRegistration(in.Name, in.URL, in.Discover, authKind, in.Owner)
+	s.persistRegistrationRecord(upstreamReg{
+		Name: in.Name, URL: in.URL, Discover: in.Discover, Auth: authKind,
+		Owner: in.Owner, PrivateDestination: in.AllowPrivateDestination,
+	})
 	if in.ReadOnly {
 		_ = s.SetUpstreamReadOnly(in.Name, true)
 		s.persistReadOnly(in.Name, true)

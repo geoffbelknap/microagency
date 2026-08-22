@@ -46,6 +46,17 @@ The guarantees, and where each one is enforced:
   redacted or tokenized before they reach the model, on by default; a
   tokenized value is resolved back only on the principal's outbound call to
   the same upstream (see [field minimization](field-minimization.md)).
+- **Outbound reach.** An upstream URL is untrusted input, so the gateway's
+  outbound client refuses loopback, private, CGNAT, and link-local addresses:
+  a URL supplied by a user cannot turn the gateway into a proxy for the
+  network it runs in. An operator registering a connection may declare its
+  endpoint reachable at a private address, for a sidecar connector or an
+  internal MCP server beside the gateway. That declaration is accepted only
+  on the operator admin surface, permits only that connection's own address,
+  and is refused outright for a self-service connection. Cloud-metadata
+  addresses stay refused for every connection. `doctor` lists any connection
+  declared this way.
+
 - **Mediation.** [Enforced workspace mode](mediation.md) gives one governed
   microagent workspace a host-owned locked allowlist: the gateway host is its
   only direct network destination, so upstream calls must cross `call_tool`.
