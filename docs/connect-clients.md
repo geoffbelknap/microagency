@@ -19,8 +19,11 @@ To disconnect, run `claude mcp remove microagency`. To skip
 auto-registration, pass `--no-register`.
 
 The OAuth signing key lives at `~/.microagency/oauth-key` (mode 0600), so
-issued tokens survive restarts. The admin API and the console use a separate
-operator token: `cat ~/.microagency/token`.
+issued tokens survive restarts. Revoking a token at `/oauth/revoke` cuts off
+`/mcp` access immediately, and a used refresh token stays refused after a
+restart: both are recorded in `~/.microagency/oauth-revocations.json`. The
+admin API and the console use a separate operator token:
+`cat ~/.microagency/token`.
 
 ## Where credentials live
 

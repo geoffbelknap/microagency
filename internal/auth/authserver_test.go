@@ -25,7 +25,7 @@ func newTestAS(t *testing.T) (*httptest.Server, *http.Client, *Signer) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	NewAuthServer(signer, testIss, testAud, time.Hour).Register(mux)
+	NewAuthServer(signer, testIss, testAud, time.Hour, nil).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	// Don't auto-follow redirects so we can read the auth code out of Location.
@@ -149,7 +149,7 @@ func TestRefreshRestampsCurrentSubject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	as := NewAuthServer(signer, testIss, testAud, time.Hour) // Subject defaults to "operator"
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, nil) // Subject defaults to "operator"
 	mux := http.NewServeMux()
 	as.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -227,7 +227,7 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	clientsPath := filepath.Join(dir, "oauth-clients.json")
 
 	// First server: register a client (persists to clientsPath).
-	as1 := NewAuthServer(signer, testIss, testAud, time.Hour)
+	as1 := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
 	as1.LoadClients(clientsPath)
 	mux1 := http.NewServeMux()
 	as1.Register(mux1)
@@ -237,7 +237,7 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	clientID := registerClient(t, ts1, c)
 
 	// "Restart": a fresh AuthServer (empty in-memory map) loading the same file.
-	as2 := NewAuthServer(signer, testIss, testAud, time.Hour)
+	as2 := NewAuthServer(signer, testIss, testAud, time.Hour, nil)
 	as2.LoadClients(clientsPath)
 	mux2 := http.NewServeMux()
 	as2.Register(mux2)
@@ -260,6 +260,87 @@ func TestClientRegistrationPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// The AS and the resource server share one file-backed revocation list in every
+// mode: POST /oauth/revoke kills the access token on the resource surface
+// immediately, and a consumed refresh token stays refused after a restart.
+func TestRevocationSharedWithResourceServerAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	signer, err := LoadOrCreateSigner(filepath.Join(dir, "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revocationsPath := filepath.Join(dir, "oauth-revocations.json")
+	revocations, err := NewRevocationList(revocationsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := NewAuthServer(signer, testIss, testAud, time.Hour, revocations)
+	mux := http.NewServeMux()
+	as.Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	clientID := registerClient(t, ts, c)
+	verifier := "a-sufficiently-long-pkce-code-verifier-1234567890"
+	code := approve(t, ts, c, clientID, pkceS256(verifier))
+	status, tok := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {testRedirect}, "code_verifier": {verifier},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("token exchange = %d (%v)", status, tok)
+	}
+	access, _ := tok["access_token"].(string)
+	refresh, _ := tok["refresh_token"].(string)
+
+	// Resource server wired the way local mode wires it: SAME list, jti required.
+	rs := &ResourceServer{
+		Issuer: testIss, Audience: testAud, Keys: signer.KeySet(),
+		Revocations: revocations, RequireTokenID: true,
+	}
+	if _, err := rs.Validate(context.Background(), access); err != nil {
+		t.Fatalf("validate access token: %v", err)
+	}
+
+	// Revoking via the AS endpoint must take effect on the resource server at once.
+	revokeResp, err := c.PostForm(ts.URL+"/oauth/revoke", url.Values{"token": {access}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke = %d", revokeResp.StatusCode)
+	}
+	if _, err := rs.Validate(context.Background(), access); err == nil {
+		t.Fatal("revoked access token still validates on the resource server")
+	}
+
+	// Rotate the refresh token; its jti is consumed into the shared list.
+	if status, body := postForm(t, c, ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
+	}); status != http.StatusOK {
+		t.Fatalf("refresh = %d (%v)", status, body)
+	}
+
+	// "Restart": a fresh AS loading a fresh list from the same file. Replaying the
+	// consumed refresh token must still be refused.
+	reloaded, err := NewRevocationList(revocationsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as2 := NewAuthServer(signer, testIss, testAud, time.Hour, reloaded)
+	mux2 := http.NewServeMux()
+	as2.Register(mux2)
+	ts2 := httptest.NewServer(mux2)
+	t.Cleanup(ts2.Close)
+	if status, _ := postForm(t, c, ts2.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID},
+	}); status != http.StatusBadRequest {
+		t.Fatalf("consumed refresh token replay after restart = %d, want 400", status)
+	}
+}
+
 func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 	dir := t.TempDir()
 	signer, err := LoadOrCreateSigner(filepath.Join(dir, "k"))
@@ -267,7 +348,7 @@ func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientsPath := filepath.Join(dir, "oauth-clients.json")
-	as1 := NewAuthServer(signer, "https://first.example", "https://first.example/mcp", time.Hour)
+	as1 := NewAuthServer(signer, "https://first.example", "https://first.example/mcp", time.Hour, nil)
 	as1.LoadClients(clientsPath)
 	mux1 := http.NewServeMux()
 	as1.Register(mux1)
@@ -276,7 +357,7 @@ func TestPublicClientRegistrationDoesNotRebindToChangedIssuer(t *testing.T) {
 	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	clientID := registerClient(t, ts1, c)
 
-	as2 := NewAuthServer(signer, "https://second.example", "https://second.example/mcp", time.Hour)
+	as2 := NewAuthServer(signer, "https://second.example", "https://second.example/mcp", time.Hour, nil)
 	as2.LoadClients(clientsPath)
 	mux2 := http.NewServeMux()
 	as2.Register(mux2)

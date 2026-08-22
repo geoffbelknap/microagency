@@ -29,10 +29,44 @@ func TestReportAuthPostureNamesPublicIssuerResourceAndConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	reportAuthPostureAt(&out, path)
+	reportAuthPostureAt(&out, path, nil)
 	for _, want := range []string{"built-in OAuth", "cloudflare", posture.Issuer, posture.Resource, posture.Audience, "loopback operator listener"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("auth posture %q is missing %q", out.String(), want)
+		}
+	}
+}
+
+// On a multi-user posture (external issuer), doctor states what the shared
+// audit log retains, and a full-capture opt-up never passes silently.
+func TestReportAuthPostureDisclosesAuditCapture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-posture.json")
+	posture := authPosture{
+		Mode: "oauth-external", Issuer: "https://as.example",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	b, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	reportAuthPostureAt(&out, path, nil)
+	if !strings.Contains(out.String(), "structure + digest") {
+		t.Fatalf("default multi-user capture posture is not stated: %q", out.String())
+	}
+	if strings.Contains(out.String(), "⚠") {
+		t.Fatalf("the safe default should not warn: %q", out.String())
+	}
+
+	out.Reset()
+	reportAuthPostureAt(&out, path, []string{"github", "slack"})
+	for _, want := range []string{"⚠", "FULL arguments", "github, slack"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("opt-up disclosure %q is missing %q", out.String(), want)
 		}
 	}
 }
