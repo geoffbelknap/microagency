@@ -1,0 +1,638 @@
+<div class="wrap">
+
+  <div class="top">
+    <span class="mark"><i></i><i></i><i></i><i></i></span>
+    <div class="grow">
+      <div class="word">microagency</div>
+      <div class="sub">account</div>
+    </div>
+    <div class="who" id="who"></div>
+    <button class="btn sm hidden" id="signout">Sign out</button>
+  </div>
+
+  <div id="boot" class="sec">
+    <p class="lead">Loading your account…</p>
+    <div class="bar"><i></i></div>
+  </div>
+
+  <div id="signedout" class="hidden">
+    <div class="sec">
+      <div class="eyebrow">Account</div>
+      <h2 style="margin-top:9px">Connect a provider to your own account</h2>
+      <p class="hint">This gateway lets you add the providers your operator has published.
+        A connection you create here is yours: its credential is held by the gateway, and no
+        other user of this gateway can see it or call its tools.</p>
+      <div id="signin-notice"></div>
+      <div style="margin-top:20px"><button class="btn primary" id="signin" style="max-width:220px">Sign in</button></div>
+      <p class="note" style="text-align:left;margin-top:14px">you sign in the same way an MCP client does · nothing is stored on this page but the tab's own session</p>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div id="flash"></div>
+
+    <div class="sec">
+      <h2>Your connections</h2>
+      <p class="hint">Connections you own on this gateway. Your agent reaches their tools through
+        <span class="mono">find_tools</span>, <span class="mono">call_tool</span>, and <span class="mono">reduce</span> — never the credential.</p>
+      <div id="conns"></div>
+    </div>
+
+    <div class="sec">
+      <h2>Available providers</h2>
+      <p class="hint">Your operator published these and fixed each one's target. Connecting sends you to
+        the provider to sign in; the grant comes back to the gateway.</p>
+      <div id="templates"></div>
+    </div>
+  </div>
+
+  <div class="posture">
+    <div class="eyebrow">What this gateway does with your access</div>
+    <ul>
+      <li><strong>The credential stays in the gateway.</strong> Your provider grant is stored by
+        microagency and used on your behalf. It is not shown on this page, and it is not given to
+        the agent or the model.</li>
+      <li><strong>The connection is private to you.</strong> It is bound to the account you signed in
+        with. Other users of this gateway cannot list it, call it, or reach its data.</li>
+      <li><strong>The operator chose what is connectable.</strong> You can only connect a provider
+        that has been published here, at the target the operator fixed, with the parameters and
+        scopes the operator allowed.</li>
+      <li><strong>Every call is recorded.</strong> Tool calls made against your connections are
+        written to the gateway's audit log.</li>
+    </ul>
+  </div>
+
+  <div class="foot-note" id="foot"></div>
+</div>
+
+<div class="scrim" id="scrim"><div class="modal" id="modal"></div></div>
+
+<script>
+/* microagency account portal.
+   No framework, no CDN, no build step — the same constraints as the operator
+   console. This page is a CLIENT of the public API: it signs in against the
+   gateway's own OAuth authorization server with dynamic client registration and
+   PKCE (exactly as an MCP client does), keeps the access token in this tab's
+   sessionStorage, and calls /connections with it. There is no cookie and no
+   server-side session, so there is nothing here for another site to ride on. */
+(function () {
+  "use strict";
+
+  var CFG = {};
+  try { CFG = JSON.parse(document.getElementById("portal-config").textContent || "{}"); } catch (e) { CFG = {}; }
+
+  var TOKEN_KEY = "microagency.portal.token";
+  var PKCE_KEY = "microagency.portal.pkce";
+  var ATTEMPT_KEY = "microagency.portal.attempt";
+  /* The client_id is a public identifier, not a secret, and it is per gateway
+     origin: a different origin is a different issuer and a different client. */
+  var CLIENT_KEY = "microagency.portal.client:" + location.origin;
+
+  var state = { token: "", conns: [], templates: [], resource: "", as: null };
+
+  /* ---------- tiny helpers ---------- */
+
+  function $(sel) { return document.querySelector(sel); }
+  function show(sel, on) { $(sel).classList.toggle("hidden", !on); }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function ss(k) { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } }
+  function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+  function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) { /* private mode */ } }
+  function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } }
+
+  function notice(sel, msg, kind) {
+    var slot = $(sel);
+    slot.innerHTML = "";
+    if (!msg) return;
+    slot.appendChild(el("div", "notice" + (kind ? " " + kind : ""), msg));
+  }
+  function flash(msg, kind) { notice("#flash", msg, kind || "good"); }
+
+  function when(ts) {
+    if (!ts) return "not used yet";
+    var d = new Date(ts);
+    return isNaN(d.getTime()) ? String(ts) : "last used " + d.toLocaleString();
+  }
+  function target(u) {
+    try { var x = new URL(u); return x.host + x.pathname; } catch (e) { return u || ""; }
+  }
+  function hostOf(u) {
+    try { return new URL(u).host; } catch (e) { return u || "the provider"; }
+  }
+
+  /* Same-origin normalisation. The gateway serves this page and hosts its own
+     authorization server, so an advertised endpoint is used on the origin the
+     user actually reached — 127.0.0.1 and localhost are the same gateway but
+     not the same browser origin, and no endpoint here answers cross-origin. */
+  function localize(u) {
+    try { var x = new URL(u, location.origin); return x.pathname + x.search; } catch (e) { return u; }
+  }
+
+  /* ---------- HTTP ---------- */
+
+  async function getJSON(url) {
+    var r = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", credentials: "omit" });
+    if (!r.ok) throw new Error("The gateway did not answer " + url + " (" + r.status + ").");
+    return r.json();
+  }
+
+  /* api() carries the user's own bearer. A 401 means the token expired or was
+     revoked; that is a sign-in problem, never a reason to retry silently. */
+  async function api(method, path, body) {
+    var opt = {
+      method: method, cache: "no-store", credentials: "omit",
+      headers: { Authorization: "Bearer " + state.token, Accept: "application/json" }
+    };
+    if (body !== undefined) {
+      opt.headers["Content-Type"] = "application/json";
+      opt.body = JSON.stringify(body);
+    }
+    var r = await fetch(path, opt);
+    if (r.status === 401) {
+      signedOut("Your session ended. Sign in again.");
+      throw new Error("unauthenticated");
+    }
+    var text = (await r.text()).trim();
+    if (!r.ok) throw new Error(text || (method + " " + path + " failed (" + r.status + ")."));
+    return text ? JSON.parse(text) : null;
+  }
+
+  /* ---------- OAuth: discovery, registration, PKCE ---------- */
+
+  function b64url(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function randomB64(n) {
+    var b = new Uint8Array(n);
+    crypto.getRandomValues(b);
+    return b64url(b);
+  }
+  async function challengeFor(verifier) {
+    var digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    return b64url(new Uint8Array(digest));
+  }
+
+  async function discover() {
+    if (state.as) return state.as;
+    var meta = await getJSON(localize(CFG.resource_metadata || "/.well-known/oauth-protected-resource"));
+    state.resource = meta.resource || "";
+    var issuer = (meta.authorization_servers && meta.authorization_servers[0]) || location.origin;
+    state.as = await getJSON(localize(issuer.replace(/\/+$/, "") + "/.well-known/oauth-authorization-server"));
+    return state.as;
+  }
+
+  async function ensureClient(registrationEndpoint, redirect) {
+    var cached = lsGet(CLIENT_KEY);
+    if (cached) return cached;
+    var r = await fetch(localize(registrationEndpoint), {
+      method: "POST", cache: "no-store", credentials: "omit",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [redirect],
+        client_name: "microagency account portal",
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code"],
+        response_types: ["code"]
+      })
+    });
+    if (!r.ok) {
+      throw new Error("This gateway would not register the portal as an OAuth client (" + r.status +
+        "). Reach it over HTTPS, or on a loopback address over HTTP.");
+    }
+    var reg = await r.json();
+    if (!reg.client_id) throw new Error("The gateway's client registration returned no client_id.");
+    lsSet(CLIENT_KEY, reg.client_id);
+    return reg.client_id;
+  }
+
+  async function signIn() {
+    if (!(window.crypto && window.crypto.subtle)) {
+      notice("#signin-notice", "This browser will not run the PKCE exchange on an insecure origin. " +
+        "Reach the gateway over HTTPS, or on a loopback address.", "bad");
+      return;
+    }
+    notice("#signin-notice", "");
+    var as = await discover();
+    var redirect = location.origin + location.pathname;
+    var clientID = await ensureClient(as.registration_endpoint, redirect);
+    var verifier = randomB64(64);
+    var nonce = randomB64(16);
+    ssSet(PKCE_KEY, JSON.stringify({
+      v: verifier, s: nonce, r: redirect,
+      res: state.resource || "", iss: as.issuer || ""
+    }));
+    ssSet(ATTEMPT_KEY, "1");
+    var q = new URLSearchParams({
+      response_type: "code",
+      client_id: clientID,
+      redirect_uri: redirect,
+      code_challenge: await challengeFor(verifier),
+      code_challenge_method: "S256",
+      scope: "mcp",
+      state: nonce
+    });
+    if (state.resource) q.set("resource", state.resource);
+    location.href = localize(as.authorization_endpoint) + "?" + q.toString();
+  }
+
+  async function complete(params) {
+    var pkce = {};
+    try { pkce = JSON.parse(ss(PKCE_KEY) || "{}"); } catch (e) { pkce = {}; }
+    ssDel(PKCE_KEY);
+    ssDel(ATTEMPT_KEY);
+    history.replaceState(null, "", location.pathname);
+
+    if (params.get("error")) {
+      signedOut("Sign-in was not completed: " + params.get("error") + ".");
+      return;
+    }
+    var code = params.get("code");
+    if (!code || !pkce.v) { signedOut("Sign-in did not complete. Try again."); return; }
+    if (params.get("state") !== pkce.s) {
+      signedOut("Sign-in was refused: the reply did not match the request this browser started.");
+      return;
+    }
+    var issued = params.get("iss");
+    if (issued && pkce.iss && issued !== pkce.iss) {
+      signedOut("Sign-in was refused: the reply came from a different authorization server.");
+      return;
+    }
+    var as = await discover();
+    var form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: code,
+      code_verifier: pkce.v,
+      client_id: lsGet(CLIENT_KEY),
+      redirect_uri: pkce.r
+    });
+    if (pkce.res) form.set("resource", pkce.res);
+    var r = await fetch(localize(as.token_endpoint), {
+      method: "POST", cache: "no-store", credentials: "omit",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString()
+    });
+    if (!r.ok) {
+      /* A refused exchange usually means this browser's remembered client is no
+         longer registered here. Drop it so the next attempt registers again. */
+      lsDel(CLIENT_KEY);
+      signedOut("The gateway refused the sign-in exchange. Try again.");
+      return;
+    }
+    var tok = await r.json();
+    if (!tok.access_token) { signedOut("The gateway issued no access token. Try again."); return; }
+    /* Only the access token is kept, and only for this tab. The refresh token is
+       deliberately dropped: a long-lived credential has no place in a browser. */
+    state.token = tok.access_token;
+    ssSet(TOKEN_KEY, state.token);
+    await load();
+  }
+
+  async function signOut() {
+    var tok = state.token;
+    state.token = "";
+    ssDel(TOKEN_KEY);
+    var revoked = false;
+    try {
+      var as = await discover();
+      if (tok && as.revocation_endpoint) {
+        var r = await fetch(localize(as.revocation_endpoint), {
+          method: "POST", cache: "no-store", credentials: "omit",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token: tok }).toString()
+        });
+        revoked = r.ok;
+      }
+    } catch (e) { revoked = false; }
+    signedOut(revoked
+      ? "Signed out. The gateway revoked this session's token."
+      : "Signed out on this device. The token expires on its own.");
+  }
+
+  /* Display only: the subject the gateway signed this token for. */
+  function subjectOf(tok) {
+    try {
+      var part = tok.split(".")[1];
+      if (!part) return "";
+      var padded = part.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((part.length + 3) % 4);
+      var bytes = Uint8Array.from(atob(padded), function (ch) { return ch.charCodeAt(0); });
+      return JSON.parse(new TextDecoder().decode(bytes)).sub || "";
+    } catch (e) { return ""; }
+  }
+
+  /* ---------- data ---------- */
+
+  async function load() {
+    show("#boot", true); show("#signedout", false); show("#app", false); show("#signout", false);
+    try {
+      var both = await Promise.all([api("GET", "/connections/templates"), api("GET", "/connections")]);
+      state.templates = both[0] || [];
+      state.conns = both[1] || [];
+    } catch (e) {
+      if (e && e.message === "unauthenticated") return;
+      show("#boot", false); show("#signedout", true);
+      notice("#signin-notice", e.message, "bad");
+      return;
+    }
+    var who = subjectOf(state.token);
+    $("#who").textContent = who ? "signed in as " + who : "";
+    show("#boot", false); show("#signout", true); show("#app", true);
+    render();
+  }
+
+  function signedOut(msg) {
+    state.token = ""; state.conns = []; state.templates = [];
+    ssDel(TOKEN_KEY);
+    $("#who").textContent = "";
+    closeModal();
+    show("#boot", false); show("#app", false); show("#signout", false); show("#signedout", true);
+    notice("#signin-notice", msg, msg ? "bad" : "");
+  }
+
+  function fail(e) {
+    if (e && e.message === "unauthenticated") return;
+    show("#boot", false); show("#app", false); show("#signout", false); show("#signedout", true);
+    notice("#signin-notice", (e && e.message) || String(e), "bad");
+  }
+
+  /* ---------- rendering ---------- */
+
+  function render() { renderConnections(); renderTemplates(); }
+
+  function templateFor(id) {
+    for (var i = 0; i < state.templates.length; i++) if (state.templates[i].id === id) return state.templates[i];
+    return null;
+  }
+
+  /* The pill shows the gateway's own state word. The sentence under it says what
+     that state means for the user and what to do about it. */
+  function stateOf(conn) {
+    if (conn.state === "enabled") {
+      return { cls: "ok", why: "Your agent can find and call this connection's tools." };
+    }
+    if (conn.state === "revoked") {
+      return { cls: "off", why: "The stored credential is gone and the tools are hidden. Reauthorize to sign in at the provider again." };
+    }
+    return { cls: "warn", why: "The operator has this connection indexed but not invocable. Its credential is intact." };
+  }
+
+  function renderConnections() {
+    var slot = $("#conns");
+    slot.innerHTML = "";
+    if (!state.conns.length) {
+      slot.appendChild(el("div", "empty", state.templates.length
+        ? "No connections yet. Pick a provider below to connect one."
+        : "No connections, and no providers are published on this gateway yet. Your operator decides which providers can be connected here."));
+      return;
+    }
+    var list = el("div", "list");
+    state.conns.forEach(function (conn) { list.appendChild(connectionRow(conn)); });
+    slot.appendChild(list);
+  }
+
+  function connectionRow(conn) {
+    var row = el("div", "item");
+    var main = el("div", "main");
+    var tmpl = templateFor(conn.template);
+
+    var title = el("div", "nm");
+    title.appendChild(el("span", null, (tmpl && tmpl.display_name) || conn.template || conn.name));
+    var st = stateOf(conn);
+    title.appendChild(el("span", "pill " + st.cls, conn.state));
+    if (conn.read_only) title.appendChild(el("span", "pill", "read-only"));
+    main.appendChild(title);
+
+    var meta = el("div", "meta");
+    meta.appendChild(el("div", null, conn.name));
+    meta.appendChild(el("div", null, target(conn.url)));
+    meta.appendChild(el("div", null, conn.tools + (conn.tools === 1 ? " tool" : " tools") + " · " + when(conn.last_ok)));
+    main.appendChild(meta);
+    main.appendChild(el("div", "why", st.why));
+    row.appendChild(main);
+
+    var acts = el("div", "acts");
+    acts.appendChild(button("Refresh", "sm", function () { doRefresh(conn); },
+      "Reload this connection's tool list from the provider."));
+    acts.appendChild(button("Reauthorize", "sm", function () { doReauthorize(conn); },
+      "Sign in at the provider again and replace the stored grant."));
+    acts.appendChild(button("Disconnect", "sm danger", function () { confirmDisconnect(conn); },
+      "Delete this connection and the credential the gateway holds for it."));
+    row.appendChild(acts);
+    return row;
+  }
+
+  function renderTemplates() {
+    var slot = $("#templates");
+    slot.innerHTML = "";
+    if (!state.templates.length) {
+      slot.appendChild(el("div", "empty",
+        "No providers are published on this gateway yet. Your operator decides which providers can be connected here."));
+      return;
+    }
+    var list = el("div", "list");
+    state.templates.forEach(function (tmpl) { list.appendChild(templateRow(tmpl)); });
+    slot.appendChild(list);
+  }
+
+  function usedCount(id) {
+    var n = 0;
+    for (var i = 0; i < state.conns.length; i++) if (state.conns[i].template === id) n++;
+    return n;
+  }
+
+  function templateRow(tmpl) {
+    var row = el("div", "item");
+    var main = el("div", "main");
+
+    var title = el("div", "nm");
+    title.appendChild(el("span", null, tmpl.display_name || tmpl.id));
+    if (tmpl.read_only) title.appendChild(el("span", "pill", "read-only"));
+    main.appendChild(title);
+
+    var used = usedCount(tmpl.id);
+    var quota = tmpl.max_per_user || 0;
+    var meta = el("div", "meta");
+    meta.appendChild(el("div", null, target(tmpl.url)));
+    meta.appendChild(el("div", null, used + " of " + quota + " connected"));
+    if (tmpl.default_scopes && tmpl.default_scopes.length) {
+      meta.appendChild(el("div", null, "scopes: " + tmpl.default_scopes.join(" ")));
+    }
+    main.appendChild(meta);
+    if (tmpl.read_only) {
+      main.appendChild(el("div", "why", "The gateway refuses this provider's write tools, whatever the provider grants."));
+    }
+    row.appendChild(main);
+
+    var acts = el("div", "acts");
+    var atQuota = quota > 0 && used >= quota;
+    var connect = button(atQuota ? "Limit reached" : "Connect", "sm primary",
+      function () { openConnect(tmpl); },
+      atQuota ? "You have used every connection your operator allows for this provider." : "");
+    if (atQuota) connect.disabled = true;
+    acts.appendChild(connect);
+    row.appendChild(acts);
+    return row;
+  }
+
+  function button(label, cls, onClick, title) {
+    var b = el("button", "btn " + cls, label);
+    if (title) b.title = title;
+    b.onclick = onClick;
+    return b;
+  }
+
+  /* ---------- actions ---------- */
+
+  async function reload() {
+    try {
+      var both = await Promise.all([api("GET", "/connections/templates"), api("GET", "/connections")]);
+      state.templates = both[0] || [];
+      state.conns = both[1] || [];
+      render();
+    } catch (e) { fail(e); }
+  }
+
+  async function doRefresh(conn) {
+    try {
+      await api("POST", "/connections/" + encodeURIComponent(conn.name) + "/refresh");
+      flash("Reloaded the tool list for " + conn.name + ".");
+      await reload();
+    } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+  }
+
+  async function doReauthorize(conn) {
+    try {
+      var res = await api("POST", "/connections/" + encodeURIComponent(conn.name) + "/reauthorize", {});
+      if (res && res.authorize_url) { location.href = res.authorize_url; return; }
+      await reload();
+    } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+  }
+
+  /* Disconnect destroys a credential. The prompt names the consequence and what
+     survives it, and the confirm button repeats the verb rather than saying OK. */
+  function confirmDisconnect(conn) {
+    var tmpl = templateFor(conn.template);
+    var name = (tmpl && tmpl.display_name) || conn.template || conn.name;
+    openModal(
+      "Disconnect " + name + "?",
+      "This deletes the connection and the credential the gateway holds for it. Your agent loses its " +
+      conn.tools + (conn.tools === 1 ? " tool" : " tools") + " immediately, and the gateway cannot restore " +
+      "the grant — reconnecting means signing in at the provider again. Nothing at " + hostOf(conn.url) +
+      " is deleted, and the record of your authorization stays in your provider account until you remove it there.",
+      null, "Disconnect", async function () {
+        closeModal();
+        try {
+          await api("DELETE", "/connections/" + encodeURIComponent(conn.name));
+          flash("Disconnected " + conn.name + ". Its credential is gone.");
+          await reload();
+        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+      }, true);
+  }
+
+  /* Connect collects only the parameters the operator curated for this template.
+     Anything else is refused by the gateway, so there is nothing else to offer. */
+  function openConnect(tmpl) {
+    var body = el("div");
+    var params = tmpl.params || [];
+    var inputs = [];
+    params.forEach(function (param) {
+      var wrap = el("div", param.kind === "bool" ? "field check" : "field");
+      var id = "p_" + param.name;
+      var input = document.createElement("input");
+      input.id = id;
+      input.type = param.kind === "bool" ? "checkbox" : "text";
+      if (param.kind !== "bool") input.placeholder = param.name;
+      var label = el("label", null, param.name);
+      label.setAttribute("for", id);
+      if (param.kind === "bool") {
+        var box = el("div");
+        box.appendChild(label);
+        box.appendChild(el("p", "desc", param.description || ""));
+        wrap.appendChild(input);
+        wrap.appendChild(box);
+      } else {
+        wrap.appendChild(label);
+        if (param.description) wrap.appendChild(el("p", "desc", param.description));
+        wrap.appendChild(input);
+      }
+      body.appendChild(wrap);
+      inputs.push({ name: param.name, kind: param.kind, node: input });
+    });
+    if (!params.length) body.appendChild(el("p", "note", "this provider takes no options here"));
+
+    openModal(
+      "Connect " + (tmpl.display_name || tmpl.id),
+      "You will be sent to " + hostOf(tmpl.url) + " to sign in and approve access. The grant comes back to " +
+      "the gateway, which holds it for you — your agent never receives it." +
+      (tmpl.read_only ? " This connection is read-only: the gateway refuses the provider's write tools." : ""),
+      body, "Continue to " + hostOf(tmpl.url), async function () {
+        var values = {};
+        inputs.forEach(function (field) {
+          if (field.kind === "bool") { if (field.node.checked) values[field.name] = "true"; }
+          else { var v = field.node.value.trim(); if (v) values[field.name] = v; }
+        });
+        closeModal();
+        try {
+          var res = await api("POST", "/connections", { template: tmpl.id, params: values });
+          if (res && res.authorize_url) { location.href = res.authorize_url; return; }
+          await reload();
+        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+      });
+  }
+
+  /* ---------- modal ---------- */
+
+  function openModal(title, desc, bodyNode, confirmLabel, onConfirm, danger) {
+    var modal = $("#modal");
+    modal.innerHTML = "";
+    modal.appendChild(el("h3", null, title));
+    if (desc) modal.appendChild(el("p", "lead", desc));
+    if (bodyNode) modal.appendChild(bodyNode);
+    var foot = el("div", "foot");
+    var cancel = el("button", "btn sm", "Cancel");
+    cancel.onclick = closeModal;
+    var ok = el("button", "btn sm " + (danger ? "danger" : "primary"), confirmLabel);
+    ok.onclick = onConfirm;
+    foot.appendChild(cancel);
+    foot.appendChild(ok);
+    modal.appendChild(foot);
+    $("#scrim").classList.add("show");
+    var first = modal.querySelector("input");
+    (first || cancel).focus();
+  }
+  function closeModal() { $("#scrim").classList.remove("show"); }
+
+  $("#scrim").onclick = function (ev) { if (ev.target === this) closeModal(); };
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeModal(); });
+  $("#signin").onclick = function () { signIn().catch(fail); };
+  $("#signout").onclick = function () { signOut().catch(fail); };
+
+  /* ---------- start ---------- */
+
+  $("#foot").textContent = "microagency" + (CFG.version ? " " + CFG.version : "");
+
+  var query = new URLSearchParams(location.search);
+  if (query.get("code") || query.get("error")) {
+    complete(query).catch(fail);
+  } else if (ss(TOKEN_KEY)) {
+    state.token = ss(TOKEN_KEY);
+    load().catch(fail);
+  } else if (ss(ATTEMPT_KEY)) {
+    /* We left for the authorization server and came back without a result — the
+       user went back, or the gateway rejected this browser's remembered client.
+       Forget it so the next attempt registers cleanly. */
+    ssDel(ATTEMPT_KEY); ssDel(PKCE_KEY); lsDel(CLIENT_KEY);
+    signedOut("Sign-in did not complete. Try again.");
+  } else {
+    signedOut("");
+  }
+})();
+</script>

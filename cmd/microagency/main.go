@@ -35,6 +35,7 @@ import (
 	"microagency/internal/gateway"
 	"microagency/internal/mcp"
 	"microagency/internal/optoken"
+	"microagency/internal/portal"
 	"microagency/internal/tunnel"
 )
 
@@ -570,6 +571,9 @@ func daemonize(cfg httpConfig) {
 	}
 	fmt.Fprintf(os.Stderr, "\n  microagency is up in the background (pid %d).\n\n", pid)
 	fmt.Fprintf(os.Stderr, "    MCP endpoint   http://%s/mcp   (in Claude Code: /mcp → Authenticate)\n", cfg.addr)
+	if servesPortal(cfg) {
+		fmt.Fprintf(os.Stderr, "    Account portal http://%s%s\n", cfg.addr, portal.Path)
+	}
 	fmt.Fprintf(os.Stderr, "    Console        http://%s/console\n", consoleAddr(cfg))
 	if ra := remoteAdminAddr(cfg); ra != "" {
 		fmt.Fprintf(os.Stderr, "    WARNING        /admin + /console are reachable beyond loopback on %s (--allow-remote-admin)\n", ra)
@@ -1052,6 +1056,12 @@ func consoleAddr(cfg httpConfig) string {
 	return cfg.addr
 }
 
+// servesPortal reports whether this configuration mounts the account portal. It
+// tracks the condition in buildMuxes: the portal signs users in against the
+// built-in authorization server, which runs only when issuance has not been
+// handed to an external issuer or replaced by a static bearer.
+func servesPortal(cfg httpConfig) bool { return cfg.issuer == "" && cfg.token == "" }
+
 // buildMuxes constructs the agent-plane mux (everything cfg.addr — and any
 // tunnel in front of it — serves: /mcp plus the OAuth discovery/authorization
 // endpoints its auth mode needs) and the operator mux (/admin + /console).
@@ -1204,6 +1214,17 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		}
 		mcpMux.Handle("/connections", connections)
 		mcpMux.Handle("/connections/", connections)
+		// The account portal is a browser client of the routes just mounted. It
+		// signs in against the gateway's own authorization server, so it is served
+		// only when this process runs one: with --issuer, issuance and its consent
+		// screens belong to the operator's identity provider, and there is no
+		// registration endpoint here for a browser to obtain a client from.
+		if builtInAS != nil {
+			mcpMux.Handle(portal.Path, portal.Handler(portal.Config{
+				ResourceMetadata: connectionMetadata,
+				Version:          version,
+			}))
+		}
 	}
 
 	// The operator surface binds a SEPARATE listener whenever effectiveAdminAddr
@@ -1475,6 +1496,10 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 		} else {
 			printManualConnect(endpoint)
 		}
+	}
+	if servesPortal(cfg) {
+		fmt.Fprintf(os.Stderr, "  Account portal %s   (each signed-in user connects their own providers here)\n",
+			strings.TrimSuffix(endpoint, "/mcp")+portal.Path)
 	}
 	fmt.Fprintf(os.Stderr, "  Console        http://%s/console   (operator token: cat %s)\n", consoleAddr(cfg), opTokenFile)
 	if cfg.tunnel != "" && consoleAddr(cfg) != cfg.addr {

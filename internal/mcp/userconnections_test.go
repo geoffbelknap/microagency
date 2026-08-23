@@ -593,3 +593,123 @@ func TestPrincipalTokenRotationPersistsDuringReloadBeforeRegistration(t *testing
 		t.Fatalf("removed durable registration accepted a stale token write: %v %s", err, raw)
 	}
 }
+
+func listUserTemplates(t *testing.T, fixture *selfServiceFixture, subject string) []userConnectionTemplate {
+	t.Helper()
+	resp := userRequest(t, http.DefaultClient, http.MethodGet, fixture.users.URL+"/connections/templates", subject, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list templates = %d", resp.StatusCode)
+	}
+	var out []userConnectionTemplate
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A user choosing provider parameters needs to know what each one means, so the
+// published template carries the curated catalog entry for every parameter the
+// operator allowed — and nothing beyond it. The operator's OAuth client for the
+// template stays a bool: the client_id and secret are only ever in the secret
+// store.
+func TestUserTemplatesCarryCuratedParamsAndNoClientSecret(t *testing.T) {
+	fixture := newSelfServiceFixture(t, 2)
+	template, _ := json.Marshal(map[string]any{
+		"id": "supabase", "display_name": "Supabase", "url": "https://mcp.supabase.com/mcp",
+		"allowed_scopes": []string{"mcp"}, "default_scopes": []string{"mcp"},
+		"allowed_params": []string{"read_only", "project_ref"},
+		"read_only":      true, "max_per_user": 1,
+		"client_id": "public-client", "client_secret": "s3cret",
+	})
+	if rec := adminReq(t, fixture.admin, http.MethodPost, "/admin/connection-templates", "operator", string(template)); rec.Code != http.StatusOK {
+		t.Fatalf("create template: %d %s", rec.Code, rec.Body.String())
+	}
+
+	published := listUserTemplates(t, fixture, "alice")
+	var supabase *userConnectionTemplate
+	for i := range published {
+		if published[i].ID == "supabase" {
+			supabase = &published[i]
+		}
+	}
+	if supabase == nil {
+		t.Fatal("published template missing from the user template list")
+	}
+	if len(supabase.Params) != 2 {
+		t.Fatalf("params = %+v, want the two allowed parameters", supabase.Params)
+	}
+	// Catalog order, not the operator's request order: the surface renders the
+	// provider's own ordering.
+	if supabase.Params[0].Name != "project_ref" || supabase.Params[1].Name != "read_only" {
+		t.Errorf("params not in catalog order: %+v", supabase.Params)
+	}
+	if supabase.Params[0].Kind != ParamString || supabase.Params[1].Kind != ParamBool {
+		t.Errorf("parameter kinds not published: %+v", supabase.Params)
+	}
+	for _, param := range supabase.Params {
+		if param.Description == "" {
+			t.Errorf("parameter %q published without its description", param.Name)
+		}
+	}
+	if !supabase.ClientConfigured {
+		t.Error("client_configured should report that the operator configured a client")
+	}
+	raw, _ := json.Marshal(supabase)
+	for _, secret := range []string{"s3cret", "public-client", "client_secret"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("template response leaked OAuth client material %q: %s", secret, raw)
+		}
+	}
+}
+
+// templateParams publishes only what the operator allowed AND the catalog still
+// declares. A parameter the catalog dropped is omitted rather than rendered with
+// no meaning, and an unknown provider publishes none at all.
+func TestTemplateParamsAreBoundedByOperatorAndCatalog(t *testing.T) {
+	supabase := ConnectionTemplate{URL: "https://mcp.supabase.com/mcp", AllowedParams: []string{"read_only"}}
+	if got := templateParams(supabase); len(got) != 1 || got[0].Name != "read_only" {
+		t.Fatalf("templateParams = %+v, want just read_only", got)
+	}
+	stale := ConnectionTemplate{URL: "https://mcp.supabase.com/mcp", AllowedParams: []string{"no_such_param"}}
+	if got := templateParams(stale); len(got) != 0 {
+		t.Fatalf("templateParams published an uncurated parameter: %+v", got)
+	}
+	unknown := ConnectionTemplate{URL: "https://mcp.example.com/mcp", AllowedParams: []string{"read_only"}}
+	if got := templateParams(unknown); len(got) != 0 {
+		t.Fatalf("templateParams published parameters for an unknown provider: %+v", got)
+	}
+}
+
+// The connection list is what a user manages their own connections from, so it
+// carries the target it points at and when it last worked — and still only ever
+// the caller's own connections.
+func TestUserConnectionListCarriesTargetAndLastUse(t *testing.T) {
+	fixture := newSelfServiceFixture(t, 2)
+	name := authorizeSelfServiceConnection(t, fixture, "alice")
+
+	listed := listUserConnections(t, fixture, "alice")
+	if len(listed) != 1 {
+		t.Fatalf("connections = %+v, want one", listed)
+	}
+	if listed[0].URL != fixture.upstreamURL {
+		t.Errorf("url = %q, want the connection's target %q", listed[0].URL, fixture.upstreamURL)
+	}
+	if listed[0].LastOK != "" {
+		t.Errorf("last_ok = %q on a connection that has never been called", listed[0].LastOK)
+	}
+
+	if out, _ := fixture.server.invokeUpstream(withPrincipal("alice"), name+nsSep+"query", json.RawMessage(`{}`)); out["isError"] == true {
+		t.Fatalf("call through the connection failed: %+v", out)
+	}
+	after := listUserConnections(t, fixture, "alice")
+	if len(after) != 1 || after[0].LastOK == "" {
+		t.Fatalf("last_ok not reported after a successful call: %+v", after)
+	}
+	if _, err := time.Parse(time.RFC3339, after[0].LastOK); err != nil {
+		t.Errorf("last_ok is not RFC 3339: %q", after[0].LastOK)
+	}
+	if other := listUserConnections(t, fixture, "bob"); len(other) != 0 {
+		t.Fatalf("another principal saw the connection: %+v", other)
+	}
+}

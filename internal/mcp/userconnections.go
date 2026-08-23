@@ -683,16 +683,62 @@ func (s *Server) UserConnectionsHandler(a Authenticator, callbackBase, resourceM
 	return mux, nil
 }
 
+// userConnectionTemplate is the published shape of a template. It carries the
+// template itself plus the curated provider parameters resolved for its URL, so
+// a client can render a labelled field per parameter instead of guessing what
+// "project_ref" means. Params is exactly AllowedParams — the operator's choice —
+// expanded with each one's description and kind. It never carries a credential:
+// a template's configured OAuth client is a bool, and the client_id and secret
+// live only in the secret store.
+type userConnectionTemplate struct {
+	ConnectionTemplate
+	Params []ProviderParam `json:"params,omitempty"`
+}
+
+// templateParams resolves the operator-allowed parameter names to the curated
+// catalog entries for the template's URL, in catalog order. Names the catalog
+// no longer declares are dropped rather than rendered without meaning.
+func templateParams(template ConnectionTemplate) []ProviderParam {
+	if len(template.AllowedParams) == 0 {
+		return nil
+	}
+	provider, ok := providerForURL(template.URL)
+	if !ok {
+		return nil
+	}
+	allowed := make(map[string]bool, len(template.AllowedParams))
+	for _, name := range template.AllowedParams {
+		allowed[name] = true
+	}
+	out := make([]ProviderParam, 0, len(template.AllowedParams))
+	for _, param := range provider.Params {
+		if allowed[param.Name] {
+			out = append(out, param)
+		}
+	}
+	return out
+}
+
 func (s *Server) userListConnectionTemplates(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.listConnectionTemplates(false))
+	templates := s.listConnectionTemplates(false)
+	out := make([]userConnectionTemplate, 0, len(templates))
+	for _, template := range templates {
+		out = append(out, userConnectionTemplate{ConnectionTemplate: template, Params: templateParams(template)})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type userConnectionInfo struct {
 	Name     string `json:"name"`
 	Template string `json:"template"`
+	URL      string `json:"url"`
 	State    string `json:"state"`
 	ReadOnly bool   `json:"read_only"`
 	Tools    int    `json:"tools"`
+	// LastOK is the RFC 3339 time of this connection's last successful call, or
+	// empty when it has not been used since the gateway started. It is the
+	// caller's own usage, on the caller's own connection.
+	LastOK string `json:"last_ok,omitempty"`
 }
 
 func (s *Server) userListConnections(w http.ResponseWriter, r *http.Request) {
@@ -701,7 +747,11 @@ func (s *Server) userListConnections(w http.ResponseWriter, r *http.Request) {
 	out := make([]userConnectionInfo, 0, len(all))
 	for _, connection := range all {
 		if connection.SelfService && connection.Owner == owner {
-			out = append(out, userConnectionInfo{Name: connection.Name, Template: connection.Template, State: connection.State, ReadOnly: connection.ReadOnly, Tools: connection.Tools})
+			out = append(out, userConnectionInfo{
+				Name: connection.Name, Template: connection.Template, URL: connection.URL,
+				State: connection.State, ReadOnly: connection.ReadOnly,
+				Tools: connection.Tools, LastOK: connection.LastOK,
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
