@@ -129,7 +129,7 @@ func (s *Server) secretsComponent(ctx context.Context) InfraComponent {
 		// permission isolation rather than encryption at rest, so warn rather than
 		// report a healthy "ok".
 		c.Status = "warn"
-		c.Detail["note"] = "OpenBao unavailable — using the degraded mode-0600 plaintext file store. Configure MICROAGENCY_SECRET_KEY_FILE with a separately held key for encrypted fallback storage."
+		c.Detail["note"] = "OpenBao unavailable — running on the unencrypted mode-0600 file store, accepted by an explicit operator opt-in. Configure MICROAGENCY_SECRET_KEY_FILE with a separately held key for encrypted fallback storage."
 	default:
 		c.Status = "ok"
 	}

@@ -51,12 +51,38 @@ plaintext registration index. On startup `up` picks one:
   an operator KMS helper. Without one, the bootstrap stays beside the data
   under `~/.microagency/openbao/` and is reported as same-disk degraded.
   `restart` keeps this OpenBao up; `down` stops it.
-- If neither is available, it falls back to a mode-0600 **plaintext file** at
-  `~/.microagency/upstream-tokens.json`. This is permission isolation, not
-  encryption at rest, and both the startup log and `doctor` report it as
-  degraded.
+- If neither is available and you have supplied a key file (below), it uses the
+  **encrypted file store**. This needs no opt-in: it is a supported posture,
+  not a downgrade.
+- If neither is available and there is no key file, the only store left is a
+  mode-0600 **unencrypted file** at `~/.microagency/upstream-tokens.json` —
+  permission isolation, not encryption at rest. `up` **refuses to start**
+  rather than put credentials there. To accept it anyway, pass
+  `up --allow-plaintext-credentials` (or set
+  `MICROAGENCY_ALLOW_PLAINTEXT_CREDENTIALS=1` for a unit file). The startup
+  banner, the log, and `doctor` all report it as degraded.
 
-To encrypt that fallback, supply a separate 32-byte key file outside
+`up` records the store it actually opened in
+`~/.microagency/credential-store.json` and prints it on startup, so the store
+in effect is never inferred from configuration. When the two differ — a
+configured OpenBao that could not be reached, say — `doctor` names both, and
+which one holds your credentials:
+
+```
+  secret store      ✗ the configured store is NOT the one holding credentials
+                    configured: managed OpenBao
+                    in effect:  unencrypted mode-0600 file in the state directory (running gateway, pid 4711)
+                    why:        another process holds http://127.0.0.1:8200, so microagency's own instance was never reached
+                    fix:        restore the configured store, then `microagency restart`
+                    until then credentials are NOT encrypted at rest
+```
+
+A common cause of that "another process holds" line is an OpenBao left over
+from an earlier run: it answers on `127.0.0.1:8200`, but it is not the instance
+microagency recorded, so adopting it is refused. Stop whatever holds the port
+and start again.
+
+To encrypt the fallback, supply a separate 32-byte key file outside
 `~/.microagency`:
 
 ```sh

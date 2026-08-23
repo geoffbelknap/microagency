@@ -3,6 +3,7 @@ package baomanager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -465,8 +466,84 @@ func TestStartRefusesReachableUnmanagedOpenBao(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	m := &Manager{Dir: t.TempDir(), Addr: srv.URL, client: srv.Client()}
-	if err := m.start(); err == nil || !strings.Contains(err.Error(), "not the instance recorded") {
-		t.Fatalf("reachable unmanaged OpenBao was accepted: %v", err)
+	dir := t.TempDir()
+	m := &Manager{Dir: dir, Addr: srv.URL, client: srv.Client()}
+	err := m.start()
+	if err == nil {
+		t.Fatal("reachable unmanaged OpenBao was accepted")
+	}
+	// A foreign listener on the managed port is its own recoverable condition,
+	// not a generic outage: it must be identifiable by type so the caller can
+	// name the port and say what to do, rather than surfacing a pid-file errno.
+	if !IsStaleListener(err) {
+		t.Fatalf("refusal is not typed as a stale listener: %v", err)
+	}
+	var stale *StaleListenerError
+	if !errors.As(err, &stale) {
+		t.Fatalf("no StaleListenerError in %v", err)
+	}
+	if stale.Addr != srv.URL || stale.Dir != dir || stale.Remediation() == "" {
+		t.Fatalf("stale listener does not name the port, the state dir, and a next action: %+v", stale)
+	}
+	if !strings.Contains(err.Error(), "not the instance microagency manages") {
+		t.Fatalf("refusal does not say the listener is not microagency's: %v", err)
+	}
+
+	// A recorded-but-dead instance is the same condition: whatever answers now
+	// is not the one microagency started.
+	if err := os.WriteFile(filepath.Join(dir, "bao.pid"), []byte("2147483646"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.start(); !IsStaleListener(err) {
+		t.Fatalf("a dead recorded pid was not reported as a stale listener: %v", err)
+	}
+}
+
+// ProbeManaged is what a diagnostic uses to answer "which store would a start
+// actually use". It must observe, not act: no instance started, no vault
+// initialized, nothing written.
+func TestProbeManagedObservesWithoutActing(t *testing.T) {
+	dir := t.TempDir()
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ProbeManaged(dir, func(string) string { return "" })
+	if p.Addr != ManagedAddr {
+		t.Fatalf("probe addr = %q, want %q", p.Addr, ManagedAddr)
+	}
+	if p.Configured {
+		t.Fatal("an empty state directory reported managed custody as configured")
+	}
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("probing created state: %d entries, was %d", len(after), len(before))
+	}
+}
+
+// A foreign listener makes the managed store unusable, and the probe must say
+// so with the typed condition — this is exactly the case where a diagnostic
+// that reports the CONFIGURED store sends an operator to fix the wrong thing.
+func TestProbeManagedReportsAStaleListener(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	m := &Manager{Dir: dir, Addr: srv.URL, client: srv.Client()}
+	if !m.reachable() {
+		t.Fatal("test listener is not reachable")
+	}
+	// Same adoption check ProbeManaged runs, against the test's own address.
+	err := adoptManaged(dir, srv.URL)
+	if !IsStaleListener(err) {
+		t.Fatalf("a listener with no recorded instance was adopted: %v", err)
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Fatalf("the diagnosis does not name the port: %v", err)
 	}
 }

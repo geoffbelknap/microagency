@@ -200,7 +200,11 @@ func reportDelegatedConnectionsAt(out io.Writer, stateDir, posturePath string) {
 		return
 	}
 	fmt.Fprintln(out, "  delegated access  per-caller upstream identity (google-dwd)")
-	store, storeErr := secretstore.Open(stateDir, os.Getenv, nil)
+	// AllowPlaintext here is a read: doctor inspects whatever store already
+	// exists to answer "is the key present". The opt-in gates a gateway that
+	// would PERSIST credentials in the clear, and refusing to look would only
+	// cost this check its answer.
+	store, storeErr := secretstore.Open(stateDir, os.Getenv, secretstore.Options{AllowPlaintext: true})
 	for _, reg := range delegated {
 		email := ""
 		scopes := 0
@@ -468,72 +472,219 @@ func reportBypasses(out *os.File) int {
 }
 
 // reportSecretPosture tells the operator where upstream credentials are held —
-// the posture `up` selects — so "where are my secrets" has an answer up front.
+// so "where are my secrets" has an answer up front.
+//
+// It reports the store in EFFECT, not the store the configuration asks for.
+// Those two agree right up until something goes wrong, which is exactly when
+// this line gets read: a configured vault that a start never reaches leaves
+// credentials somewhere else entirely, and an operator told the configured
+// store will go and fix the wrong thing.
 func reportSecretPosture(out io.Writer) {
-	reportSecretPostureWith(out, os.Getenv, baomanager.Available, microagencyDir())
+	reportSecretPostureWith(out, os.Getenv, microagencyDir(), runningPID(), baomanager.ProbeManaged)
 }
 
-func reportSecretPostureWith(out io.Writer, getenv func(string) string, baoAvailable func() bool, stateDir string) {
+// managedProbeFunc is the read-only managed-OpenBao probe, injected so tests can
+// pin the case where configuration and effect disagree.
+type managedProbeFunc func(dir string, getenv func(string) string) baomanager.ManagedProbe
+
+func reportSecretPostureWith(out io.Writer, getenv func(string) string, stateDir string, gatewayPID int, probe managedProbeFunc) {
+	if p, ok := livePosture(stateDir, gatewayPID); ok {
+		renderLivePosture(out, p)
+		return
+	}
+	renderResolvedPosture(out, getenv, stateDir, probe)
+}
+
+// livePosture returns the record a RUNNING gateway wrote when it opened its
+// store. A running gateway is the authority on which store holds its
+// credentials; anything derived from configuration is second-hand. The pid must
+// match the live gateway, so a record left behind by an exited one is never
+// mistaken for the current posture.
+func livePosture(stateDir string, gatewayPID int) (secretstore.Posture, bool) {
+	if gatewayPID == 0 {
+		return secretstore.Posture{}, false
+	}
+	p, err := secretstore.LoadPosture(stateDir)
+	if err != nil || p.PID != gatewayPID {
+		return secretstore.Posture{}, false
+	}
+	return p, true
+}
+
+func renderLivePosture(out io.Writer, p secretstore.Posture) {
+	if p.Disagrees() {
+		// Severity follows the store that actually holds the credentials, not
+		// the fact of the disagreement. Credentials safely encrypted in a store
+		// nobody configured is worth a warning; credentials in the clear is a
+		// failure. Ranking both the same trains operators to skip the line.
+		glyph := "⚠"
+		if p.Degraded {
+			glyph = "✗"
+		}
+		fmt.Fprintf(out, "  secret store      %s the configured store is NOT the one holding credentials\n", glyph)
+		fmt.Fprintf(out, "                    configured: %s\n", p.Configured)
+		fmt.Fprintf(out, "                    in effect:  %s (running gateway, pid %d)\n", p.Effective, p.PID)
+		if p.Reason != "" {
+			fmt.Fprintf(out, "                    why:        %s\n", p.Reason)
+		}
+		fmt.Fprintln(out, "                    fix:        restore the configured store, then `microagency restart`")
+		if p.Degraded {
+			fmt.Fprintln(out, "                    until then credentials are NOT encrypted at rest")
+		}
+		return
+	}
+	glyph := "✓"
+	if p.Degraded {
+		glyph = "⚠"
+	}
+	fmt.Fprintf(out, "  secret store      %s %s\n", glyph, p.Effective)
+	fmt.Fprintf(out, "                    (in effect in the running gateway, pid %d)\n", p.PID)
+	if p.Degraded {
+		fmt.Fprintln(out, "                    (credentials stay out of the agent, but are NOT encrypted at rest;")
+		fmt.Fprintln(out, "                     install OpenBao or configure "+secretstore.FileKeyEnv+")")
+	}
+}
+
+// renderResolvedPosture answers "which store would a start right now use" by
+// resolving the same way `up` does — probing the managed instance rather than
+// trusting that a configured one is reachable.
+func renderResolvedPosture(out io.Writer, getenv func(string) string, stateDir string, probe managedProbeFunc) {
 	addr, token := getenv("VAULT_ADDR"), getenv("VAULT_TOKEN")
-	baoDir := filepath.Join(stateDir, "openbao")
-	baoOK := baoAvailable()
 	switch {
 	case addr != "" && token == "":
 		fmt.Fprintln(out, "  secret store      ✗ VAULT_ADDR is set but VAULT_TOKEN is missing")
 		fmt.Fprintln(out, "                    (startup will fail closed; provide the token or unset VAULT_ADDR)")
+		return
 	case addr == "" && token != "":
 		fmt.Fprintln(out, "  secret store      ✗ VAULT_TOKEN is set but VAULT_ADDR is missing")
 		fmt.Fprintln(out, "                    (startup will fail closed; provide the address or unset VAULT_TOKEN)")
+		return
 	case addr != "":
 		fmt.Fprintf(out, "  secret store      ✓ external Vault/OpenBao (VAULT_ADDR=%s)\n", addr)
-	case baoOK || baomanager.ManagedConfigured(baoDir, getenv):
-		posture := baomanager.InspectCustody(context.Background(), baoDir, getenv)
-		switch {
-		case !baoOK && posture.Protected:
-			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s; OpenBao binary unavailable)\n", posture.Label)
-			fmt.Fprintln(out, "                    (startup will fail closed; reinstall OpenBao and keep the protector configured)")
-		case !baoOK:
-			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao state exists, but the OpenBao binary is unavailable")
-			fmt.Fprintln(out, "                    (startup will evaluate the configured local credential-store fallback)")
-		case !posture.Available:
-			fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s unavailable)\n", posture.Label)
-			fmt.Fprintf(out, "                    (%s; startup will fail closed)\n", posture.Detail)
-		case posture.Protected:
-			fmt.Fprintf(out, "  secret store      ✓ managed protected OpenBao (%s)\n", posture.Label)
-			fmt.Fprintf(out, "                    (%s; loopback 127.0.0.1:8200)\n", posture.Detail)
-		default:
-			fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao with same-disk degraded bootstrap custody")
-			fmt.Fprintln(out, "                    (OpenBao data, unseal material, and bootstrap login share ~/.microagency;")
-			fmt.Fprintln(out, "                     set MICROAGENCY_OPENBAO_PROTECTOR and migrate to protected custody)")
-		}
-	case strings.TrimSpace(getenv(secretstore.FileKeyEnv)) != "":
-		keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv))
+		return
+	}
+	pr := probe(filepath.Join(stateDir, "openbao"), getenv)
+	if pr.Configured || pr.Binary {
+		reportManagedPosture(out, getenv, stateDir, pr)
+		return
+	}
+	renderLocalStore(out, inspectLocalStore(getenv, stateDir))
+}
+
+func reportManagedPosture(out io.Writer, getenv func(string) string, stateDir string, pr baomanager.ManagedProbe) {
+	baoDir := filepath.Join(stateDir, "openbao")
+	posture := baomanager.InspectCustody(context.Background(), baoDir, getenv)
+
+	// A foreign listener on the managed port is VERIFIED evidence that the
+	// managed store will not be the one in effect: a start never reaches
+	// microagency's own instance. Say so, and name the store that would
+	// actually hold the credentials.
+	var stale *baomanager.StaleListenerError
+	if errors.As(pr.Err, &stale) {
+		fmt.Fprintln(out, "  secret store      ✗ managed OpenBao is configured but CANNOT be used")
+		fmt.Fprintf(out, "                    why:        %s\n", stale.Error())
+		fmt.Fprintf(out, "                    fix:        %s\n", stale.Remediation())
+		renderEffectiveStore(out, inspectLocalStore(getenv, stateDir))
+		return
+	}
+
+	switch {
+	case !pr.Binary && posture.Protected:
+		fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s; OpenBao binary unavailable)\n", posture.Label)
+		fmt.Fprintln(out, "                    (startup will fail closed; reinstall OpenBao and keep the protector configured)")
+	case !pr.Binary:
+		fmt.Fprintln(out, "  secret store      ✗ managed OpenBao state exists, but the OpenBao binary is unavailable")
+		fmt.Fprintln(out, "                    fix:        reinstall OpenBao (e.g. `brew install openbao`)")
+		renderEffectiveStore(out, inspectLocalStore(getenv, stateDir))
+	case !posture.Available:
+		fmt.Fprintf(out, "  secret store      ✗ managed protected OpenBao (%s unavailable)\n", posture.Label)
+		fmt.Fprintf(out, "                    (%s; startup will fail closed)\n", posture.Detail)
+	case posture.Protected:
+		fmt.Fprintf(out, "  secret store      ✓ managed protected OpenBao (%s)\n", posture.Label)
+		fmt.Fprintf(out, "                    (%s)\n", posture.Detail)
+		fmt.Fprintf(out, "                    %s\n", managedReachability(pr))
+	default:
+		fmt.Fprintln(out, "  secret store      ⚠ managed OpenBao with same-disk degraded bootstrap custody")
+		fmt.Fprintln(out, "                    (OpenBao data, unseal material, and bootstrap login share ~/.microagency;")
+		fmt.Fprintln(out, "                     set "+baomanager.ProtectorEnv+" and migrate to protected custody)")
+		fmt.Fprintf(out, "                    %s\n", managedReachability(pr))
+	}
+}
+
+// managedReachability separates what was observed from what is predicted. A
+// managed instance that is not running yet may still fail to start; saying
+// "verified" of a store nobody opened is the claim this avoids.
+func managedReachability(pr baomanager.ManagedProbe) string {
+	switch {
+	case pr.Adopted:
+		return fmt.Sprintf("(verified: microagency's own instance is answering at %s)", pr.Addr)
+	case pr.Running:
+		return fmt.Sprintf("(unverified: something answers at %s but was not confirmed as microagency's instance)", pr.Addr)
+	default:
+		return fmt.Sprintf("(not running yet: `microagency up` starts it at %s — unverified until then)", pr.Addr)
+	}
+}
+
+// localStore is the file-backed store this state directory would use, resolved
+// by inspecting the files rather than reading intent from configuration.
+type localStore struct {
+	glyph  string
+	head   string
+	detail []string
+}
+
+func inspectLocalStore(getenv func(string) string, stateDir string) localStore {
+	path := filepath.Join(stateDir, "upstream-tokens.json")
+	if keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv)); keyPath != "" {
 		key, err := secretstore.LoadFileKey(stateDir, keyPath)
 		if err == nil {
-			_, err = secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), key)
+			_, err = secretstore.InspectFile(path, key)
 		}
 		if err != nil {
-			fmt.Fprintf(out, "  secret store      ✗ encrypted file store is misconfigured: %v\n", err)
-			fmt.Fprintln(out, "                    (startup will fail closed; fix or unset MICROAGENCY_SECRET_KEY_FILE)")
-			return
+			return localStore{"✗", fmt.Sprintf("encrypted file store is misconfigured: %v", err),
+				[]string{"startup will fail closed; fix or unset " + secretstore.FileKeyEnv}}
 		}
-		fmt.Fprintln(out, "  secret store      ✓ AES-256-GCM file store with a separately supplied key")
-		fmt.Fprintf(out, "                    (key: %s; credentials: %s)\n", keyPath, filepath.Join(stateDir, "upstream-tokens.json"))
-	default:
-		kind, err := secretstore.InspectFile(filepath.Join(stateDir, "upstream-tokens.json"), nil)
-		if errors.Is(err, secretstore.ErrKeyRequired) || kind == "encrypted-file" {
-			fmt.Fprintln(out, "  secret store      ✗ encrypted file store exists but MICROAGENCY_SECRET_KEY_FILE is not configured")
-			fmt.Fprintln(out, "                    (startup will fail closed; restore the separately held key setting)")
-			return
-		}
-		if err != nil {
-			fmt.Fprintf(out, "  secret store      ✗ local credential store cannot be read: %v\n", err)
-			fmt.Fprintln(out, "                    (startup will fail closed; repair or restore the credential store)")
-			return
-		}
-		fmt.Fprintln(out, "  secret store      ⚠ degraded mode-0600 plaintext file under ~/.microagency")
-		fmt.Fprintln(out, "                    (credentials stay out of the agent, but are not encrypted at rest;")
-		fmt.Fprintln(out, "                     install OpenBao or configure MICROAGENCY_SECRET_KEY_FILE)")
+		return localStore{"✓", "AES-256-GCM file store with a separately supplied key",
+			[]string{fmt.Sprintf("(key: %s; credentials: %s)", keyPath, path)}}
+	}
+	kind, err := secretstore.InspectFile(path, nil)
+	if errors.Is(err, secretstore.ErrKeyRequired) || kind == "encrypted-file" {
+		return localStore{"✗", "encrypted file store exists but " + secretstore.FileKeyEnv + " is not configured",
+			[]string{"startup will fail closed; restore the separately held key setting"}}
+	}
+	if err != nil {
+		return localStore{"✗", fmt.Sprintf("local credential store cannot be read: %v", err),
+			[]string{"startup will fail closed; repair or restore the credential store"}}
+	}
+	if envEnabled(getenv(secretstore.AllowPlaintextEnv)) {
+		return localStore{"⚠", "unencrypted mode-0600 plaintext file under ~/.microagency",
+			[]string{
+				"(opted in with " + secretstore.AllowPlaintextEnv + "; credentials stay out of the agent,",
+				" but are NOT encrypted at rest — install OpenBao or configure " + secretstore.FileKeyEnv + ")",
+			}}
+	}
+	return localStore{"✗", "the only local store left is an unencrypted mode-0600 plaintext file",
+		[]string{
+			"a start without `--allow-plaintext-credentials` will refuse rather than",
+			"store credentials in the clear; configure " + secretstore.FileKeyEnv + " to",
+			"encrypt the fallback instead",
+		}}
+}
+
+func renderLocalStore(out io.Writer, ls localStore) {
+	fmt.Fprintf(out, "  secret store      %s %s\n", ls.glyph, ls.head)
+	for _, d := range ls.detail {
+		fmt.Fprintf(out, "                    %s\n", d)
+	}
+}
+
+// renderEffectiveStore names the store that would actually hold credentials
+// when the configured one is unavailable. Reporting "a fallback" without
+// naming WHICH one is how a plaintext file gets mistaken for a vault.
+func renderEffectiveStore(out io.Writer, ls localStore) {
+	fmt.Fprintf(out, "                    in effect:  %s %s\n", ls.glyph, ls.head)
+	for _, d := range ls.detail {
+		fmt.Fprintf(out, "                                %s\n", d)
 	}
 }
 

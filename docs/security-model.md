@@ -10,13 +10,18 @@ The guarantees, and where each one is enforced:
 
 - **Credential custody.** Upstream tokens and OAuth refresh tokens live in
   the gateway's secret store — OpenBao/Vault when available, else an
-  operator-key encrypted file or an explicitly degraded mode-0600 plaintext
-  fallback (see
+  operator-key encrypted file (see
   [where credentials live](connect-clients.md#where-credentials-live)).
+  With neither, startup stops rather than keeping credentials in an
+  unencrypted file; `up --allow-plaintext-credentials` is the only way to
+  accept that store, and it is reported as degraded wherever the posture
+  appears.
   Managed OpenBao can keep its unseal and AppRole bootstrap in macOS Keychain,
   Linux Secret Service, or an operator KMS helper. The initial root token is
   revoked after narrow AppRole provisioning; protected-provider failure stops
-  startup instead of selecting another credential store.
+  startup instead of selecting another credential store. The store `up`
+  actually opened is recorded and reported, so a configured store that could
+  not be reached is never mistaken for the one holding credentials.
   A [delegated connection](delegated-access.md)'s service-account key lives
   in the same store, is accepted only through the operator API, and is never
   echoed back; the registry keeps only non-secret configuration. The

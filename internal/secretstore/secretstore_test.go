@@ -109,7 +109,7 @@ func TestEncryptedFileMigratesPlaintextAtomically(t *testing.T) {
 			return keyPath
 		}
 		return ""
-	}, nil)
+	}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestEncryptedFileRejectsWrongOrMissingKey(t *testing.T) {
 	if _, err := NewEncryptedFile(path, bytes.Repeat([]byte{0x22}, 32)); err == nil || !strings.Contains(err.Error(), "wrong key") {
 		t.Fatalf("wrong key error = %v", err)
 	}
-	if _, err := Open(stateDir, func(string) string { return "" }, nil); !errors.Is(err, ErrKeyRequired) {
+	if _, err := Open(stateDir, func(string) string { return "" }, Options{AllowPlaintext: true}); !errors.Is(err, ErrKeyRequired) {
 		t.Fatalf("missing key error = %v, want ErrKeyRequired", err)
 	}
 }
@@ -269,14 +269,14 @@ func TestVaultStore(t *testing.T) {
 
 func TestOpenPrefersVault(t *testing.T) {
 	env := map[string]string{"VAULT_ADDR": "http://127.0.0.1:8200", "VAULT_TOKEN": "t"}
-	s, err := Open(t.TempDir(), func(k string) string { return env[k] }, nil)
+	s, err := Open(t.TempDir(), func(k string) string { return env[k] }, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.Kind() != "vault" {
 		t.Fatalf("with VAULT_* set, want vault, got %s", s.Kind())
 	}
-	s, err = Open(t.TempDir(), func(string) string { return "" }, nil)
+	s, err = Open(t.TempDir(), func(string) string { return "" }, Options{AllowPlaintext: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,8 +290,111 @@ func TestOpenRejectsPartialVaultConfig(t *testing.T) {
 		{"VAULT_ADDR": "http://127.0.0.1:8200"},
 		{"VAULT_TOKEN": "token"},
 	} {
-		if _, err := Open(t.TempDir(), func(name string) string { return env[name] }, nil); err == nil {
+		if _, err := Open(t.TempDir(), func(name string) string { return env[name] }, Options{}); err == nil {
 			t.Fatalf("partial Vault config was accepted: %#v", env)
 		}
+	}
+}
+
+// The unencrypted fallback is a downgrade, not a default. A vault that fails to
+// come up must not be able to move credentials into the clear on its own; that
+// takes an operator saying so.
+func TestOpenRefusesPlaintextWithoutOptIn(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Open(dir, func(string) string { return "" }, Options{}); !errors.Is(err, ErrPlaintextNotAllowed) {
+		t.Fatalf("plaintext fallback was selected without an opt-in: %v", err)
+	}
+	// Refusing must not leave the store behind as a side effect.
+	if _, err := os.Stat(filepath.Join(dir, "upstream-tokens.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused start created the credential file anyway: %v", err)
+	}
+	s, err := Open(dir, func(string) string { return "" }, Options{AllowPlaintext: true})
+	if err != nil {
+		t.Fatalf("explicit opt-in was still refused: %v", err)
+	}
+	if s.Kind() != KindFile {
+		t.Fatalf("kind = %q, want %q", s.Kind(), KindFile)
+	}
+}
+
+// The ENCRYPTED file store is not a degradation, so it must keep working with
+// no opt-in at all. Gating it would push operators toward the opt-in flag for a
+// posture that never needed one.
+func TestOpenAllowsEncryptedFileWithoutOptIn(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	keyPath := filepath.Join(root, "key")
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x7}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := func(name string) string {
+		if name == FileKeyEnv {
+			return keyPath
+		}
+		return ""
+	}
+	s, err := Open(stateDir, env, Options{})
+	if err != nil {
+		t.Fatalf("encrypted file store required an opt-in: %v", err)
+	}
+	if s.Kind() != KindEncryptedFile {
+		t.Fatalf("kind = %q, want %q", s.Kind(), KindEncryptedFile)
+	}
+	if err := s.Save(context.Background(), "up/example", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A store that IS encrypted but has lost its key setting must say so. The
+// coarser "you did not opt in to plaintext" would send an operator to add the
+// opt-in, which is the one action that must not fix this.
+func TestOpenPrefersTheMissingKeyDiagnosisOverThePlaintextGate(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := NewEncryptedFile(filepath.Join(stateDir, "upstream-tokens.json"), bytes.Repeat([]byte{0x11}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), "up/example", []byte("sentinel")); err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []Options{{}, {AllowPlaintext: true}} {
+		if _, err := Open(stateDir, func(string) string { return "" }, opts); !errors.Is(err, ErrKeyRequired) {
+			t.Fatalf("AllowPlaintext=%v: got %v, want ErrKeyRequired", opts.AllowPlaintext, err)
+		}
+	}
+}
+
+// The record exists so a diagnostic can report the store in effect. It must
+// round-trip, and it must never be a place secrets end up.
+func TestPostureRecordRoundTripsAndHoldsNoSecret(t *testing.T) {
+	dir := t.TempDir()
+	want := Posture{
+		PID: 1234, Kind: KindFile, Effective: "unencrypted mode-0600 file",
+		Configured: "managed OpenBao", Reason: "port held by another process", Degraded: true,
+	}
+	if err := SavePosture(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadPosture(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PID != want.PID || got.Kind != want.Kind || got.Effective != want.Effective ||
+		got.Configured != want.Configured || got.Reason != want.Reason || !got.Degraded {
+		t.Fatalf("record round-trip lost fields: %+v", got)
+	}
+	if !got.Disagrees() {
+		t.Fatal("a record naming two different stores must report a disagreement")
+	}
+	info, err := os.Stat(PosturePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("record permissions %04o are broader than the state directory's", info.Mode().Perm())
+	}
+	ClearPosture(dir)
+	if _, err := LoadPosture(dir); err == nil {
+		t.Fatal("a cleared record still loads")
 	}
 }

@@ -81,13 +81,14 @@ Everything lives under `~/.microagency`:
 | `audit-key` | the per-gateway ES256 audit signing key |
 | `audit.jsonl` | the append-only, signed audit log |
 | `decision-ledger.jsonl` | fail-closed signed authorization and refusal decisions for governed calls |
-| `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise degraded mode-0600 plaintext |
+| `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise the mode-0600 unencrypted store that `--allow-plaintext-credentials` gates |
 | `refs/` | parked reference payloads (encrypted; 24h TTL with `--persist-refs`) |
 | `refs.key` | the refs encryption key |
 | `openbao/data/` | encrypted storage for the managed OpenBao |
 | `openbao/bootstrap.json` | same-disk degraded bootstrap only; absent with protected custody |
 | `openbao/custody.json` | non-secret protected-provider kind, record ID, and helper path |
 | `microagency.log` | the backgrounded server's log, including the secret-store posture line |
+| `credential-store.json` | non-secret record of the store `up` actually opened: kind, the store in effect, and the configured store when it differs |
 | `microagency.pid` | the running server's pid file |
 
 An encrypted fallback key configured through

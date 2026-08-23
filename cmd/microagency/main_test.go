@@ -6,7 +6,24 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"microagency/internal/mcp"
 )
+
+// testServer builds a gateway the way a test needs one: its own state
+// directory, because buildServer resolves ~/.microagency and a test must never
+// read or overwrite a real deployment's credential state; and the unencrypted
+// local store accepted out loud, because a test brings up no vault and the
+// gateway now refuses that store without an explicit opt-in.
+func testServer(t *testing.T, consoleAddr string) *mcp.Server {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	return buildServer(
+		upOptions{wasmMaxMemMB: 512, maxInlineBytes: 2048},
+		consoleAddr,
+		credentialIntent{allowPlaintext: true},
+	)
+}
 
 func TestServeInitializeAndToolsList(t *testing.T) {
 	in := strings.NewReader(
@@ -14,7 +31,7 @@ func TestServeInitializeAndToolsList(t *testing.T) {
 			`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n",
 	)
 	var out bytes.Buffer
-	if err := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8765").Serve(context.Background(), in, &out); err != nil {
+	if err := testServer(t, "127.0.0.1:8765").Serve(context.Background(), in, &out); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")

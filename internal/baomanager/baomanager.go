@@ -90,7 +90,7 @@ func Ensure(ctx context.Context, dir string, getenv func(string) string) (addr, 
 		return fail(err)
 	}
 	m := &Manager{
-		Dir: dir, Addr: "http://127.0.0.1:8200", binary: bin,
+		Dir: dir, Addr: ManagedAddr, binary: bin,
 		client: &http.Client{Timeout: 10 * time.Second}, custody: custody,
 	}
 	if err := m.start(); err != nil {
@@ -161,6 +161,89 @@ func Available() bool {
 	return err == nil
 }
 
+// ManagedAddr is the loopback address the managed instance binds.
+const ManagedAddr = "http://127.0.0.1:8200"
+
+// StaleListenerError reports that something already answers on the managed
+// OpenBao address but is not the instance microagency recorded. It is a
+// distinct, recoverable condition rather than a generic outage: the managed
+// store is unusable only until the port is freed, and adopting whatever is
+// listening would hand the gateway's credentials to a process it does not
+// manage.
+type StaleListenerError struct {
+	Addr   string // where the foreign listener answers
+	Dir    string // the managed state directory whose instance was expected
+	Detail string // what made the listener unrecognizable
+}
+
+func (e *StaleListenerError) Error() string {
+	return fmt.Sprintf("another process is already serving OpenBao at %s and it is not the instance microagency manages under %s (%s)",
+		e.Addr, e.Dir, e.Detail)
+}
+
+// Remediation is the operator's next action for a stale listener.
+func (e *StaleListenerError) Remediation() string {
+	return fmt.Sprintf("stop whatever holds %s (it was not started by microagency), then start microagency again", e.Addr)
+}
+
+// IsStaleListener reports whether err is the "someone else holds the managed
+// OpenBao port" condition, which has its own diagnosis and remediation.
+func IsStaleListener(err error) bool {
+	var stale *StaleListenerError
+	return errors.As(err, &stale)
+}
+
+// adoptManaged reports whether the OpenBao answering at addr is the instance
+// microagency started. Both startup (through start) and the read-only probe
+// call it, so what doctor reports and what `up` does cannot drift.
+func adoptManaged(dir, addr string) error {
+	pid, err := managedPID(dir)
+	if err != nil {
+		detail := "microagency has no managed instance recorded here"
+		if !errors.Is(err, os.ErrNotExist) {
+			detail = "microagency's record of its managed instance is unreadable: " + err.Error()
+		}
+		return &StaleListenerError{Addr: addr, Dir: dir, Detail: detail}
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return &StaleListenerError{Addr: addr, Dir: dir,
+			Detail: fmt.Sprintf("microagency's managed instance (pid %d) is no longer running", pid)}
+	}
+	return nil
+}
+
+// ManagedProbe is the read-only answer to "which credential store would a start
+// right now actually use". It starts nothing, initializes nothing, and writes
+// nothing, so `doctor` can call it. Running+Adopted is an observation; a probe
+// that finds nothing bound reports Running=false, and whether `up` could then
+// start an instance is a prediction the caller must present as one.
+type ManagedProbe struct {
+	Addr       string // the managed loopback address
+	Configured bool   // managed custody exists, or a protector was selected
+	Binary     bool   // an OpenBao binary is on PATH
+	Running    bool   // something answers at Addr
+	Adopted    bool   // ...and it is the instance recorded under the state dir
+	Err        error  // why the managed store cannot be used right now
+}
+
+// ProbeManaged inspects the managed instance without touching it.
+func ProbeManaged(dir string, getenv func(string) string) ManagedProbe {
+	p := ManagedProbe{Addr: ManagedAddr, Configured: ManagedConfigured(dir, getenv), Binary: Available()}
+	m := &Manager{Dir: dir, Addr: ManagedAddr, client: &http.Client{Timeout: 2 * time.Second}}
+	p.Running = m.reachable()
+	switch {
+	case p.Running:
+		if err := adoptManaged(dir, ManagedAddr); err != nil {
+			p.Err = err
+			return p
+		}
+		p.Adopted = true
+	case !p.Binary:
+		p.Err = errors.New("openbao is not on PATH — install it (e.g. `brew install openbao`)")
+	}
+	return p
+}
+
 const configTmpl = `storage "file" { path = "%s/data" }
 listener "tcp" { address = "127.0.0.1:8200" tls_disable = 1 }
 disable_mlock = true
@@ -171,14 +254,7 @@ api_addr = "http://127.0.0.1:8200"
 // instance is already reachable at Addr (idempotent across restarts).
 func (m *Manager) start() error {
 	if m.reachable() {
-		pid, err := managedPID(m.Dir)
-		if err != nil {
-			return fmt.Errorf("openbao is already reachable at %s but is not the instance recorded under %s: %w", m.Addr, m.Dir, err)
-		}
-		if err := syscall.Kill(pid, 0); err != nil {
-			return fmt.Errorf("openbao is already reachable at %s but managed pid %d is not live: %w", m.Addr, pid, err)
-		}
-		return nil
+		return adoptManaged(m.Dir, m.Addr)
 	}
 	if err := os.MkdirAll(filepath.Join(m.Dir, "data"), 0o700); err != nil {
 		return err

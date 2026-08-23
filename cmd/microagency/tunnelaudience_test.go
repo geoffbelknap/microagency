@@ -112,7 +112,7 @@ func discoverAdvertisedResource(t *testing.T, mux *http.ServeMux) (resource stri
 // so every client that followed discovery got a 401.
 func TestTunnelExternalIssuerAdvertisedResourceValidates(t *testing.T) {
 	issuer, key := newExternalIssuer(t)
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "cloudflare",
 		publicURL: "https://gateway.example", issuer: issuer.URL,
@@ -157,7 +157,7 @@ func TestTunnelExternalIssuerAdvertisedResourceValidates(t *testing.T) {
 // audience and the advertised resource together.
 func TestTunnelExternalIssuerExplicitAudienceIsAdvertised(t *testing.T) {
 	issuer, key := newExternalIssuer(t)
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "ngrok",
 		publicURL: "https://gateway.example", issuer: issuer.URL,

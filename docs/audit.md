@@ -97,8 +97,8 @@ This is strongest when the secret store is OpenBao or Vault, where a log-file
 attacker cannot reach the anchor. The encrypted file fallback prevents an
 attacker who has only `~/.microagency` from reading or forging the anchor, because
 its key is held separately. It cannot prevent replay of a previously copied,
-valid ciphertext. The degraded plaintext fallback keeps the anchor readable on
-the same disk. The signature detects edits, but not replay of an older valid
+valid ciphertext. The opted-in unencrypted fallback keeps the anchor readable
+on the same disk. The signature detects edits, but not replay of an older valid
 anchor. The residual window under the normal posture is the 64 most-recent lines
 since the last anchor.
 

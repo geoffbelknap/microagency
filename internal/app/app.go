@@ -10,6 +10,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -46,6 +47,17 @@ type Config struct {
 	EngineSpecs            []string          // extra `name=path` query engines to load/override
 	BundledEngines         map[string][]byte // embedded query-engine modules by name
 	BundledMinimizers      map[string][]byte // embedded field-minimizer modules by name
+
+	// AllowPlaintextCredentials opts in to the unencrypted mode-0600 credential
+	// fallback. Without it, a build that would land there fails closed instead
+	// of persisting upstream credentials in the clear.
+	AllowPlaintextCredentials bool
+	// PreferredStore names the store the caller tried before this build (e.g.
+	// "managed OpenBao"), and PreferredStoreUnavailable says why it could not
+	// be used. Both feed the credential-store record and the fail-closed error,
+	// so an operator is told what was unavailable rather than only what was
+	// refused. Empty when nothing was tried first.
+	PreferredStore, PreferredStoreUnavailable string
 }
 
 // BuildServer constructs the gateway server from cfg. Unlike the old package-main
@@ -83,18 +95,37 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	}
 
 	// Acquired secrets (upstream OAuth refresh tokens) persist in OpenBao/Vault when
-	// VAULT_ADDR + VAULT_TOKEN are set. The emergency file fallback is encrypted
-	// only with a separately supplied operator key; otherwise it is explicitly
-	// degraded mode-0600 plaintext.
-	secStore, err := secretstore.Open(cfg.StateDir, os.Getenv, http.DefaultClient)
+	// VAULT_ADDR + VAULT_TOKEN are set. The file fallback is encrypted with a
+	// separately supplied operator key; the unencrypted form is a downgrade and
+	// needs AllowPlaintextCredentials, so a vault outage cannot quietly move
+	// credentials into the clear.
+	secStore, err := secretstore.Open(cfg.StateDir, os.Getenv, secretstore.Options{
+		AllowPlaintext: cfg.AllowPlaintextCredentials,
+		Client:         http.DefaultClient,
+	})
 	if err != nil {
+		if errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
+			return nil, plaintextRefusal(cfg)
+		}
 		return nil, fmt.Errorf("open credential store: %w", err)
 	}
-	switch secStore.Kind() {
-	case "encrypted-file":
-		slog.Info("credential store selected", "backend", "encrypted file", "dir", cfg.StateDir)
-	case "file":
-		slog.Warn("OpenBao unavailable; credentials use the degraded mode-0600 plaintext fallback", "dir", cfg.StateDir, "encrypt_with", secretstore.FileKeyEnv)
+	// Record what was actually opened, so `doctor` and the startup banner report
+	// the store in effect rather than the one the configuration asks for. A
+	// silent downgrade is the failure this closes: everything keeps working, so
+	// nothing prompts the second look that would find the credentials in the
+	// clear.
+	posture := resolvedPosture(cfg, secStore.Kind())
+	if err := secretstore.SavePosture(cfg.StateDir, posture); err != nil {
+		slog.Warn("could not record the credential-store posture", "err", err)
+	}
+	switch {
+	case posture.Disagrees():
+		slog.Warn("credential store in effect is not the one configured",
+			"in_effect", posture.Effective, "configured", posture.Configured, "reason", posture.Reason)
+	case posture.Degraded:
+		slog.Warn("credential store is degraded", "in_effect", posture.Effective, "encrypt_with", secretstore.FileKeyEnv)
+	default:
+		slog.Info("credential store selected", "backend", posture.Effective)
 	}
 	opts := []mcp.Option{
 		mcp.WithSecretStore(secStore),
@@ -169,6 +200,49 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 		}
 	}
 	return mcp.NewServer(rt, opts...), nil
+}
+
+// resolvedPosture turns the store that was actually opened, plus what the
+// caller tried first, into the non-secret record `doctor` reads.
+func resolvedPosture(cfg Config, kind string) secretstore.Posture {
+	effective := secretstore.Describe(kind)
+	if kind == secretstore.KindVault {
+		// A vault store is reached either through a managed instance the caller
+		// brought up or through an operator-run one; only the caller knows
+		// which, and "OpenBao/Vault" alone would not tell an operator where to
+		// look.
+		effective = "external Vault/OpenBao (VAULT_ADDR)"
+		if cfg.PreferredStore != "" {
+			effective = cfg.PreferredStore
+		}
+	}
+	p := secretstore.Posture{
+		PID:       os.Getpid(),
+		Kind:      kind,
+		Effective: effective,
+		Degraded:  kind == secretstore.KindFile,
+	}
+	if cfg.PreferredStore != "" && cfg.PreferredStore != effective {
+		p.Configured, p.Reason = cfg.PreferredStore, cfg.PreferredStoreUnavailable
+	}
+	return p
+}
+
+// plaintextRefusal explains a fail-closed startup in terms of what was
+// unavailable, not only what was refused. Consumers with their own vocabulary
+// (the CLI has a flag; an embedder has neither) override the wording; the
+// sentinel stays wrapped so they can still branch on it.
+func plaintextRefusal(cfg Config) error {
+	msg := "refusing to persist upstream credentials in the unencrypted mode-0600 fallback"
+	if cfg.PreferredStore != "" {
+		msg += fmt.Sprintf(": %s is unavailable", cfg.PreferredStore)
+		if cfg.PreferredStoreUnavailable != "" {
+			msg += fmt.Sprintf(" (%s)", cfg.PreferredStoreUnavailable)
+		}
+	}
+	msg += fmt.Sprintf("; restore that store, set %s to a separately held key, or opt in with %s=1",
+		secretstore.FileKeyEnv, secretstore.AllowPlaintextEnv)
+	return fmt.Errorf("%s: %w", msg, secretstore.ErrPlaintextNotAllowed)
 }
 
 // orderEngineNames returns bundled engine names in a deterministic registration
