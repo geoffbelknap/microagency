@@ -72,13 +72,18 @@ form{margin:20px 0 0}
 
 const markSVG = `<span class="mark"><i></i><i></i><i></i><i></i></span>`
 
-// shell wraps a body fragment in the full document with the shared stylesheet.
-// extraHead is injected into <head> (used for the callback's meta-refresh).
-func shell(title, extraHead, body string) string {
+// Shell wraps a body fragment in the full document with the shared stylesheet.
+// extraHead is injected into <head> after that stylesheet, so a page that needs
+// more than the single-card screens do — the account portal's list layout — can
+// add rules that extend these without restating the tokens. It is exported so
+// every served page carries one design system instead of a second copy of it
+// that drifts.
+func Shell(title, extraHead, body string) string {
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
-		`<title>` + title + `</title>` + extraHead +
-		`<style>` + css + `</style></head><body>` + body + `</body></html>`
+		`<title>` + title + `</title>` +
+		`<style>` + css + `</style>` + extraHead +
+		`</head><body>` + body + `</body></html>`
 }
 
 // --- 1. Client consent -------------------------------------------------------
@@ -87,7 +92,7 @@ func shell(title, extraHead, body string) string {
 // microagency's own AS that is a single-use request ID binding the decision to
 // the pending grant — never replayed authorize parameters, which a cross-site
 // form could fabricate.
-var consentTmpl = template.Must(template.New("consent").Parse(shell(
+var consentTmpl = template.Must(template.New("consent").Parse(Shell(
 	"microagency — Approve", "", `
 <div class="card">
  <div class="head">`+markSVG+`<div><div class="word">microagency</div><div class="sub">authorize a client</div></div></div>
@@ -133,7 +138,7 @@ func WriteConnected(w http.ResponseWriter, name string) {
  <p class="lead" style="margin-top:10px">The credential is held by microagency — your agent never sees it. Returning to the console…</p>
  <div class="bar"><i></i></div>
 </div></div>`
-	_, _ = w.Write([]byte(shell("microagency",
+	_, _ = w.Write([]byte(Shell("microagency",
 		`<meta http-equiv="refresh" content="2;url=/console">`, body)))
 }
 
@@ -148,7 +153,7 @@ func WriteUserConnected(w http.ResponseWriter, name string) {
  <div class="title" style="font-size:25px">Connected ` + html.EscapeString(name) + `</div>
  <p class="lead" style="margin-top:10px">The credential is held by microagency — your agent never sees it. You can close this tab.</p>
 </div></div>`
-	_, _ = w.Write([]byte(shell("microagency", "", body)))
+	_, _ = w.Write([]byte(Shell("microagency", "", body)))
 }
 
 // --- 3. Generic notice ------------------------------------------------------
@@ -167,7 +172,7 @@ func WriteMessage(w http.ResponseWriter, msg string) {
    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
  </div>
 </div>`
-	_, _ = w.Write([]byte(shell("microagency", "", body)))
+	_, _ = w.Write([]byte(Shell("microagency", "", body)))
 }
 
 // WriteUserMessage renders a public authorization notice without linking to the
@@ -183,5 +188,5 @@ func WriteUserMessage(w http.ResponseWriter, msg string) {
   <p class="note">Return to your account to start again.</p>
  </div>
 </div>`
-	_, _ = w.Write([]byte(shell("microagency", "", body)))
+	_, _ = w.Write([]byte(Shell("microagency", "", body)))
 }

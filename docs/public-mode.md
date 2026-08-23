@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -171,10 +171,11 @@ Built-in public OAuth serves these routes on the tunneled listener:
 - `/oauth/jwks`
 - `/oauth/sso/callback` (federated sign-in only)
 - `/connections` and `/connections/*`
+- `/account` (built-in OAuth only)
 - `/mcp`
 
-The tunnel exposes `/mcp`, the OAuth endpoints, and the principal-authenticated
-self-service connection API. The operator
+The tunnel exposes `/mcp`, the OAuth endpoints, the principal-authenticated
+self-service connection API, and the account portal that drives it. The operator
 surface (`/admin` and the console) moves to its own loopback listener,
 `127.0.0.1:8766` by default or wherever `--admin-addr` points, so it
 isn't network-reachable from the public bind. The operator token gates that
@@ -270,8 +271,40 @@ Providers without dynamic client registration need an operator-configured
 those values only to the secret store. The template file and every API response
 contain only `client_configured: true`.
 
-The authenticated account portal or integration uses the same principal token
-as `/mcp`:
+### The account portal
+
+Users do not need the API to add a provider. A gateway running the built-in
+authorization server serves an account portal at `/account`, on the same
+listener as `/mcp`:
+
+```
+http://127.0.0.1:8765/account          # local
+https://gateway.example/account        # tunnel
+```
+
+The startup banner prints the address. The page lists the templates you
+published, shows each user their own connections, and offers connect, refresh,
+reauthorize, and disconnect. Connecting sends the user to the provider and the
+grant comes back to the gateway, exactly as the API flow does.
+
+The portal signs a user in the same way an MCP client does. It registers itself
+as a public OAuth client, runs an authorization code flow with PKCE, and keeps
+the resulting access token in the browser tab. With `--sso-issuer` the sign-in
+is your identity provider's, so each corporate account is its own principal and
+sees only its own connections. There is no cookie and no server-side session.
+Signing out revokes the token at the gateway.
+
+The portal is a client of the routes above and holds no operator authority. It
+never reaches `/admin`, and the token it obtains cannot: the operator surface
+stays on its own listener behind the operator token. A user can create only what
+their templates and quotas allow.
+
+`--issuer` and `--token` do not serve the portal. Issuance belongs to your
+authorization server in the first case and there is no interactive sign-in in
+the second, so `/account` returns 404 and the API above stays available.
+
+The portal drives these routes, and an integration or script can call them
+directly with the same principal token as `/mcp`:
 
 ```sh
 curl -fsS https://gateway.example/connections/templates \
