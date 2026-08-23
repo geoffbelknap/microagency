@@ -4,14 +4,19 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 The guarantees, and where each one is enforced:
 
 - **Credential custody.** Upstream tokens and OAuth refresh tokens live in
   the gateway's secret store — OpenBao/Vault when available, else an
-  operator-key encrypted file (see
-  [where credentials live](connect-clients.md#where-credentials-live)).
+  AES-256-GCM file whose data key a protector holds outside the state
+  directory: macOS Keychain, Linux Secret Service, an operator KMS helper, or
+  a key file the operator places (see
+  [where credentials live](connect-clients.md#where-credentials-live) and
+  [protecting the credential store key](secret-store-custody.md)).
+  A configured protector that cannot supply the key stops startup rather than
+  opening a second store.
   With neither, startup stops rather than keeping credentials in an
   unencrypted file; `up --allow-plaintext-credentials` is the only way to
   accept that store, and it is reported as degraded wherever the posture

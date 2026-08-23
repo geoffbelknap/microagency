@@ -96,6 +96,8 @@ func main() {
 		runDoctor(args[1:])
 	case "openbao":
 		runOpenBao(args[1:])
+	case "secret-store":
+		runSecretStore(args[1:])
 	case "hook":
 		runHook(args[1:])
 	case "mediation":
@@ -119,7 +121,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "openbao", "hook", "mediation", "token"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "secret-store", "openbao", "hook", "mediation", "token"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -187,6 +189,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency restart [flags]  restart the background server (keeps OpenBao up)")
 	fmt.Fprintln(w, "  microagency purge [--full] delete your data (--full wipes everything; both confirm)")
 	fmt.Fprintln(w, "  microagency doctor        check runtime + engine health")
+	fmt.Fprintln(w, "  microagency secret-store  inspect or migrate credential-store data-key custody")
 	fmt.Fprintln(w, "  microagency openbao       inspect or migrate managed OpenBao custody")
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
@@ -238,7 +241,8 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "                          mode-0600 file store when no vault is reachable (or set")
 	fmt.Fprintln(w, "                          "+secretstore.AllowPlaintextEnv+"=1). Without it,")
 	fmt.Fprintln(w, "                          a start that would land there refuses. Encrypting the")
-	fmt.Fprintln(w, "                          fallback with "+secretstore.FileKeyEnv+" needs no opt-in.")
+	fmt.Fprintln(w, "                          fallback with "+secretstore.ProtectorEnv+" or")
+	fmt.Fprintln(w, "                          "+secretstore.FileKeyEnv+" needs no opt-in.")
 	fmt.Fprintln(w, "    --engine name=path    add a query engine (a wasip1 module)")
 	fmt.Fprintln(w, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
 	fmt.Fprintln(w, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
@@ -882,6 +886,14 @@ func runPurge(args []string) {
 			fmt.Fprintln(os.Stderr, "The state directory was kept so the protector record can still be located; restore protector access and retry.")
 			os.Exit(1)
 		}
+		// The credential store's data key lives outside this directory too, and
+		// the locator that finds it lives inside. Delete the record first, or
+		// removing the directory strands it in the keyring or KMS forever.
+		if err := secretstore.DeleteKeyCustody(context.Background(), dir, os.Getenv); err != nil {
+			fmt.Fprintf(os.Stderr, "microagency: purge: the protected credential-store data key was not deleted: %v\n", err)
+			fmt.Fprintln(os.Stderr, "The state directory was kept so the protector record can still be located; restore protector access and retry.")
+			os.Exit(1)
+		}
 	}
 	if err := doPurge(dir, full); err != nil {
 		fmt.Fprintf(os.Stderr, "microagency: purge: %v\n", err)
@@ -1432,8 +1444,10 @@ func refusePlaintextCredentials(w io.Writer, cred credentialIntent) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "  Choose one:")
 	fmt.Fprintln(w, "    - restore the store named above, then start again")
-	fmt.Fprintf(w, "    - encrypt the fallback: point %s at a separately held\n", secretstore.FileKeyEnv)
-	fmt.Fprintf(w, "      32-byte key outside %s, then start again\n", microagencyDir())
+	fmt.Fprintf(w, "    - encrypt the fallback with a data-key protector: set %s to\n", secretstore.ProtectorEnv)
+	fmt.Fprintln(w, "      keychain, secret-service, or command, then start again")
+	fmt.Fprintf(w, "    - encrypt the fallback with your own key file: point %s at a\n", secretstore.FileKeyEnv)
+	fmt.Fprintf(w, "      separately held 32-byte key outside %s, then start again\n", microagencyDir())
 	fmt.Fprintln(w, "    - accept unencrypted credentials, knowing what that means:")
 	fmt.Fprintf(w, "      `microagency up --allow-plaintext-credentials` (or %s=1)\n", secretstore.AllowPlaintextEnv)
 	os.Exit(1)

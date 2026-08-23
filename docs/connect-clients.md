@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 ## Built-in OAuth (the default)
 
@@ -51,11 +51,11 @@ plaintext registration index. On startup `up` picks one:
   an operator KMS helper. Without one, the bootstrap stays beside the data
   under `~/.microagency/openbao/` and is reported as same-disk degraded.
   `restart` keeps this OpenBao up; `down` stops it.
-- If neither is available and you have supplied a key file (below), it uses the
-  **encrypted file store**. This needs no opt-in: it is a supported posture,
-  not a downgrade.
-- If neither is available and there is no key file, the only store left is a
-  mode-0600 **unencrypted file** at `~/.microagency/upstream-tokens.json` —
+- If neither is available and a data-key protector is configured (below), it
+  uses the **encrypted file store**. This needs no opt-in: it is a supported
+  posture, not a downgrade.
+- If neither is available and no protector is configured, the only store left
+  is a mode-0600 **unencrypted file** at `~/.microagency/upstream-tokens.json` —
   permission isolation, not encryption at rest. `up` **refuses to start**
   rather than put credentials there. To accept it anyway, pass
   `up --allow-plaintext-credentials` (or set
@@ -82,8 +82,26 @@ from an earlier run: it answers on `127.0.0.1:8200`, but it is not the instance
 microagency recorded, so adopting it is refused. Stop whatever holds the port
 and start again.
 
-To encrypt the fallback, supply a separate 32-byte key file outside
-`~/.microagency`:
+### Encrypting the file store
+
+The encrypted file store uses AES-256-GCM under a 32-byte data key that a
+**protector** supplies. Pick the one that matches where the gateway runs:
+
+```sh
+export MICROAGENCY_SECRET_PROTECTOR=keychain        # macOS login Keychain
+export MICROAGENCY_SECRET_PROTECTOR=secret-service  # Linux Secret Service
+export MICROAGENCY_SECRET_PROTECTOR=command         # your KMS or secret manager
+microagency up
+```
+
+On the first start with a protector configured, microagency generates the data
+key, stores it through the protector, and verifies it reads back before using
+it. Later starts retrieve it. Nothing under `~/.microagency` can decrypt the
+store on its own, so a copy of that directory is not a copy of your
+credentials. `microagency secret-store status` reports which protector holds
+the key.
+
+You can also hold the key yourself in a file outside `~/.microagency`:
 
 ```sh
 install -d -m 700 ~/.config/microagency
@@ -93,12 +111,18 @@ export MICROAGENCY_SECRET_KEY_FILE=~/.config/microagency/secret-store.key
 microagency up
 ```
 
-The encrypted file uses AES-256-GCM. On first startup with the key, microagency
-migrates an existing plaintext `upstream-tokens.json` through a mode-0600
-temporary ciphertext file and an atomic rename. It refuses a key inside
-`~/.microagency`, a key accessible to group or other users, a wrong key, or a
-restart without the configured key. Back up the key separately: losing it makes
-the encrypted credentials unrecoverable.
+On first startup with a key, microagency migrates an existing plaintext
+`upstream-tokens.json` through a mode-0600 temporary ciphertext file and an
+atomic rename. It refuses a key inside `~/.microagency`, a key accessible to
+group or other users, a wrong key, or a restart without the configured key.
+Back up the key separately: losing it makes the encrypted credentials
+unrecoverable.
+
+A configured protector that cannot be reached stops startup. It never falls
+back to another store, because a second store beside the one you believe holds
+your credentials is the failure nobody notices. See
+[protecting the credential store key](secret-store-custody.md) for the helper
+protocol, moving the key between protectors, and recovery.
 
 The managed OpenBao runs with `tls_disable` on the loopback bind; it never
 leaves localhost. On its first protected start, microagency uses the initial

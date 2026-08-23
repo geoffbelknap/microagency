@@ -95,10 +95,11 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	}
 
 	// Acquired secrets (upstream OAuth refresh tokens) persist in OpenBao/Vault when
-	// VAULT_ADDR + VAULT_TOKEN are set. The file fallback is encrypted with a
-	// separately supplied operator key; the unencrypted form is a downgrade and
-	// needs AllowPlaintextCredentials, so a vault outage cannot quietly move
-	// credentials into the clear.
+	// VAULT_ADDR + VAULT_TOKEN are set. The file fallback is encrypted under a data
+	// key a protector supplies — an OS keyring, a KMS-backed helper, or an operator
+	// key file; the unencrypted form is a downgrade and needs
+	// AllowPlaintextCredentials, so a vault outage cannot quietly move credentials
+	// into the clear.
 	secStore, err := secretstore.Open(cfg.StateDir, os.Getenv, secretstore.Options{
 		AllowPlaintext: cfg.AllowPlaintextCredentials,
 		Client:         http.DefaultClient,
@@ -114,7 +115,7 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	// silent downgrade is the failure this closes: everything keeps working, so
 	// nothing prompts the second look that would find the credentials in the
 	// clear.
-	posture := resolvedPosture(cfg, secStore.Kind())
+	posture := resolvedPosture(cfg, secStore.Kind(), keyCustodyOf(secStore))
 	if err := secretstore.SavePosture(cfg.StateDir, posture); err != nil {
 		slog.Warn("could not record the credential-store posture", "err", err)
 	}
@@ -123,7 +124,8 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 		slog.Warn("credential store in effect is not the one configured",
 			"in_effect", posture.Effective, "configured", posture.Configured, "reason", posture.Reason)
 	case posture.Degraded:
-		slog.Warn("credential store is degraded", "in_effect", posture.Effective, "encrypt_with", secretstore.FileKeyEnv)
+		slog.Warn("credential store is degraded", "in_effect", posture.Effective,
+			"encrypt_with", secretstore.ProtectorEnv+" or "+secretstore.FileKeyEnv)
 	default:
 		slog.Info("credential store selected", "backend", posture.Effective)
 	}
@@ -202,10 +204,19 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	return mcp.NewServer(rt, opts...), nil
 }
 
+// keyCustodyOf reports which protector supplies an encrypted store's data key.
+// Only the file store has one; a vault holds no local key.
+func keyCustodyOf(store secretstore.Store) string {
+	if c, ok := store.(interface{ KeyCustody() string }); ok {
+		return c.KeyCustody()
+	}
+	return ""
+}
+
 // resolvedPosture turns the store that was actually opened, plus what the
 // caller tried first, into the non-secret record `doctor` reads.
-func resolvedPosture(cfg Config, kind string) secretstore.Posture {
-	effective := secretstore.Describe(kind)
+func resolvedPosture(cfg Config, kind, keyCustody string) secretstore.Posture {
+	effective := secretstore.DescribeStore(kind, keyCustody)
 	if kind == secretstore.KindVault {
 		// A vault store is reached either through a managed instance the caller
 		// brought up or through an operator-run one; only the caller knows
@@ -217,10 +228,11 @@ func resolvedPosture(cfg Config, kind string) secretstore.Posture {
 		}
 	}
 	p := secretstore.Posture{
-		PID:       os.Getpid(),
-		Kind:      kind,
-		Effective: effective,
-		Degraded:  kind == secretstore.KindFile,
+		PID:        os.Getpid(),
+		Kind:       kind,
+		Effective:  effective,
+		KeyCustody: keyCustody,
+		Degraded:   kind == secretstore.KindFile,
 	}
 	if cfg.PreferredStore != "" && cfg.PreferredStore != effective {
 		p.Configured, p.Reason = cfg.PreferredStore, cfg.PreferredStoreUnavailable
@@ -240,8 +252,8 @@ func plaintextRefusal(cfg Config) error {
 			msg += fmt.Sprintf(" (%s)", cfg.PreferredStoreUnavailable)
 		}
 	}
-	msg += fmt.Sprintf("; restore that store, set %s to a separately held key, or opt in with %s=1",
-		secretstore.FileKeyEnv, secretstore.AllowPlaintextEnv)
+	msg += fmt.Sprintf("; restore that store, encrypt the fallback with %s or %s, or opt in with %s=1",
+		secretstore.ProtectorEnv, secretstore.FileKeyEnv, secretstore.AllowPlaintextEnv)
 	return fmt.Errorf("%s: %w", msg, secretstore.ErrPlaintextNotAllowed)
 }
 

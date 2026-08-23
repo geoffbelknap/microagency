@@ -377,3 +377,99 @@ func TestPathWhenMissing(t *testing.T) {
 		t.Errorf("no path known should stay empty: %q", got)
 	}
 }
+
+// stubProtectorHelper writes a `command` protector helper backed by a file.
+func stubProtectorHelper(t *testing.T, recordPath string) func(string) string {
+	t.Helper()
+	helper := filepath.Join(t.TempDir(), "protector")
+	script := "#!/bin/sh\nstore=" + recordPath + "\ncase \"$1\" in\n" +
+		"  get) test -f \"$store\" || exit 3; cat \"$store\" ;;\n" +
+		"  put) cat > \"$store\" ;;\n" +
+		"  delete) rm -f \"$store\" ;;\n" +
+		"  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return func(name string) string {
+		switch name {
+		case secretstore.ProtectorEnv:
+			return "command"
+		case secretstore.ProtectorCommandEnv:
+			return helper
+		default:
+			return ""
+		}
+	}
+}
+
+// TestReportSecretPostureNamesTheDataKeyProtector: "encrypted" is only half the
+// answer. An operator whose KMS access lapsed needs the page to name what to
+// restore, and must never be told a store it cannot open is healthy.
+func TestReportSecretPostureNamesTheDataKeyProtector(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	recordPath := filepath.Join(t.TempDir(), "protected-record")
+	env := stubProtectorHelper(t, recordPath)
+
+	// Configured, reachable, nothing stored yet: the key is created on first start.
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, env, stateDir, 0, noManagedBao)
+	if !strings.Contains(buf.String(), "✓") || !strings.Contains(buf.String(), "external protector helper") {
+		t.Fatalf("configured protector posture is not explicit: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "first startup") {
+		t.Fatalf("posture did not say the key is not created yet: %q", buf.String())
+	}
+	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+		t.Fatal("doctor created the data key it was only asked to report on")
+	}
+
+	// After a real start the page reports a key that opens the store.
+	store, err := secretstore.Open(stateDir, env, secretstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), "up/example", []byte("sentinel")); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, env, stateDir, 0, noManagedBao)
+	if !strings.Contains(buf.String(), "✓") || !strings.Contains(buf.String(), "data key: external protector helper") {
+		t.Fatalf("in-effect protector posture is not explicit: %q", buf.String())
+	}
+
+	// An unreachable protector is never healthy.
+	if err := os.Remove(recordPath); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	reportSecretPostureWith(&buf, env, stateDir, 0, noManagedBao)
+	out := buf.String()
+	if strings.Contains(out, "✓") {
+		t.Fatalf("a store whose data key is gone was reported healthy: %q", out)
+	}
+	if !strings.Contains(out, "✗") || !strings.Contains(out, "UNVERIFIED") || !strings.Contains(out, "fail closed") {
+		t.Fatalf("unavailable protector posture is not explicit: %q", out)
+	}
+	if !strings.Contains(out, "restore its record from backup") {
+		t.Fatalf("posture carries no remediation: %q", out)
+	}
+}
+
+// TestReportSecretPostureTrustsARunningGatewaysProtector: a live gateway's own
+// record is the authority, and it names the protector holding its key.
+func TestReportSecretPostureTrustsARunningGatewaysProtector(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := secretstore.SavePosture(stateDir, secretstore.Posture{
+		PID:        4242,
+		Kind:       secretstore.KindEncryptedFile,
+		Effective:  secretstore.DescribeStore(secretstore.KindEncryptedFile, "keychain"),
+		KeyCustody: "keychain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	reportSecretPostureWith(&buf, func(string) string { return "" }, stateDir, 4242, noManagedBao)
+	if !strings.Contains(buf.String(), "macOS Keychain") || !strings.Contains(buf.String(), "pid 4242") {
+		t.Fatalf("live protector posture is not explicit: %q", buf.String())
+	}
+}
