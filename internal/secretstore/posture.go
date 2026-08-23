@@ -35,8 +35,13 @@ type Posture struct {
 	Reason string `json:"reason,omitempty"`
 	// Degraded marks a store that protects credentials less than the
 	// deployment's configuration intends.
-	Degraded bool   `json:"degraded,omitempty"`
-	Recorded string `json:"recorded"`
+	Degraded bool `json:"degraded,omitempty"`
+	// KeyCustody names the protector supplying an encrypted file store's data
+	// key ("file", "keychain", "secret-service", "command"). An operator whose
+	// keyring is locked after a reboot needs to know which one to unlock, and
+	// "encrypted-file" alone does not say.
+	KeyCustody string `json:"key_custody,omitempty"`
+	Recorded   string `json:"recorded"`
 }
 
 // Disagrees reports whether the configured store is not the one in effect.

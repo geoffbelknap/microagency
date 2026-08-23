@@ -4,7 +4,7 @@ description: One MCP connection for every server, with credentials, datasets, an
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 microagency is an MCP gateway. Point Claude Code, Claude Desktop, Cursor, or
 any MCP client at it and put your servers behind it; one connection replaces
@@ -39,6 +39,8 @@ the conceptual overview. These pages cover each mechanism:
   and one shared connection acting as each caller's own provider identity.
 - [Direct-upstream mediation](mediation.md) — advisory local checks and a
   gateway-only locked egress policy for governed workspaces.
+- [Protecting the credential store key](secret-store-custody.md) — where the
+  encrypted store's data key lives, and what happens when it cannot be reached.
 - [The security model](security-model.md) — each guarantee and where it is
   enforced.
 - [Operating the gateway](operations.md) — the CLI surface, state files,

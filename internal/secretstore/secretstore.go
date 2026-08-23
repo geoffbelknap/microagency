@@ -1,11 +1,12 @@
 // Package secretstore persists the small secrets microagency *acquires* — OAuth
 // refresh-token records for aggregated upstreams — in OpenBao/Vault (KV v2) when
-// configured, otherwise in a local file. The local file is encrypted only when an
-// operator supplies a separately held key; without one it is an explicitly
-// degraded, mode-0600 plaintext fallback. When a vault is present microagency
-// holds no durable secret itself; it reads the refresh token only to mint a fresh
-// access token. (This is the write side; microagent's secret resolver is the read
-// side for operator-placed `vault:` refs.)
+// configured, otherwise in a local file. The local file is encrypted whenever a
+// data-key protector supplies its key: an OS keyring, an operator helper
+// fronting a KMS, or a key file the operator places. Without one it is an
+// explicitly degraded, mode-0600 plaintext fallback. When a vault is present
+// microagency holds no durable secret itself; it reads the refresh token only to
+// mint a fresh access token. (This is the write side; microagent's secret
+// resolver is the read side for operator-placed `vault:` refs.)
 package secretstore
 
 import (
@@ -24,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"microagency/internal/custody"
 )
 
 const (
@@ -39,7 +42,13 @@ const (
 
 	fileFormat = "microagency-secretstore-v1"
 	fileCipher = "AES-256-GCM"
+
+	// storeFileName is the file fallback's name under the state directory.
+	storeFileName = "upstream-tokens.json"
 )
+
+// StorePath is where the file fallback lives under a state directory.
+func StorePath(stateDir string) string { return filepath.Join(stateDir, storeFileName) }
 
 // ErrNotFound is returned by Load when the key is absent.
 var ErrNotFound = errors.New("secretstore: not found")
@@ -88,6 +97,16 @@ func Describe(kind string) string {
 	}
 }
 
+// DescribeStore is Describe, naming the data-key protector when one supplies
+// the key. "Encrypted" is only half the answer an operator needs: the other
+// half is what has to be available and unlocked for the store to open at all.
+func DescribeStore(kind, keyCustody string) string {
+	if kind != KindEncryptedFile || keyCustody == "" || keyCustody == custody.KindFile {
+		return Describe(kind)
+	}
+	return "AES-256-GCM file store (data key: " + custody.Label(keyCustody) + ")"
+}
+
 // Store persists secret blobs by key.
 type Store interface {
 	Save(ctx context.Context, key string, value []byte) error
@@ -97,10 +116,16 @@ type Store interface {
 }
 
 // Open returns a Vault-backed store when VAULT_ADDR + VAULT_TOKEN are set (the
-// preferred path). Otherwise it opens the file fallback, encrypting it when
-// MICROAGENCY_SECRET_KEY_FILE names a separately held 32-byte key. Existing
-// plaintext fallback state is migrated atomically when encryption is enabled.
-// Landing on the unencrypted fallback requires opts.AllowPlaintext.
+// preferred path). Otherwise it opens the file fallback, encrypting it whenever
+// a data-key protector supplies the AES-256-GCM key: an OS keyring, an operator
+// helper fronting a KMS, or MICROAGENCY_SECRET_KEY_FILE. Existing plaintext
+// fallback state is migrated atomically when encryption is enabled. Landing on
+// the unencrypted fallback requires opts.AllowPlaintext.
+//
+// A protector that is configured and cannot supply the key fails the open. It
+// never degrades to another store: creating a second credential store beside
+// one the operator believes is authoritative is the failure that goes unnoticed
+// precisely because everything keeps working.
 func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 	client := opts.Client
 	if client == nil {
@@ -117,16 +142,27 @@ func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 		}
 		return &Vault{Addr: addr, Token: tok, Mount: mount, Prefix: "microagency", Client: client}, nil
 	}
-	path := filepath.Join(dir, "upstream-tokens.json")
+	path := StorePath(dir)
 	if err := protectExistingFile(path); err != nil {
 		return nil, err
 	}
-	if keyPath := strings.TrimSpace(getenv(FileKeyEnv)); keyPath != "" {
-		key, err := LoadFileKey(dir, keyPath)
+	src, err := resolveKeySource(dir, getenv)
+	if err != nil {
+		return nil, err
+	}
+	if src != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), dataKeyTimeout)
+		defer cancel()
+		key, err := src.dataKey(ctx, path)
 		if err != nil {
 			return nil, err
 		}
-		return NewEncryptedFile(path, key)
+		f, err := NewEncryptedFile(path, key)
+		if err != nil {
+			return nil, err
+		}
+		f.keyCustody = src.manifest.Kind
+		return f, nil
 	}
 	f := &File{Path: path}
 	// Validate existing state now, rather than discovering after startup that an
@@ -238,9 +274,10 @@ type fileEnvelope struct {
 type File struct {
 	Path string
 
-	mu       sync.Mutex
-	aead     cipher.AEAD
-	renameFn func(string, string) error // test seam for interrupted atomic writes
+	mu         sync.Mutex
+	aead       cipher.AEAD
+	keyCustody string                     // protector kind supplying the data key
+	renameFn   func(string, string) error // test seam for interrupted atomic writes
 }
 
 func (f *File) Kind() string {
@@ -248,6 +285,18 @@ func (f *File) Kind() string {
 		return "encrypted-file"
 	}
 	return "file"
+}
+
+// KeyCustody names the protector supplying an encrypted store's data key
+// ("file", "keychain", "secret-service", "command"), or "" when the store is
+// not encrypted. Reporting the store kind alone would tell an operator their
+// credentials are encrypted without saying what they must keep available to
+// read them back.
+func (f *File) KeyCustody() string {
+	if f.aead == nil {
+		return ""
+	}
+	return f.keyCustody
 }
 
 // NewEncryptedFile opens an AES-256-GCM file store. If path contains the legacy
@@ -372,16 +421,11 @@ func LoadFileKey(stateDir, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secretstore: read %s: %w", FileKeyEnv, err)
 	}
-	if len(b) == 32 {
-		return b, nil
+	key, err := parseDataKey(b)
+	if err != nil {
+		return nil, fmt.Errorf("secretstore: %s must contain 32 raw bytes or their base64 encoding", FileKeyEnv)
 	}
-	encoded := strings.TrimSpace(string(b))
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
-		if key, err := enc.DecodeString(encoded); err == nil && len(key) == 32 {
-			return key, nil
-		}
-	}
-	return nil, fmt.Errorf("secretstore: %s must contain 32 raw bytes or their base64 encoding", FileKeyEnv)
+	return key, nil
 }
 
 func insidePath(stateDir, path string) bool {

@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -176,9 +175,8 @@ func TestCustodyMigrationCommitsBeforeDeletingSource(t *testing.T) {
 	secret, _ := json.Marshal(bootstrap{UnsealKey: "unseal", RoleID: "role", SecretID: "secret"})
 	source := &memoryProtector{kind: "file", value: secret}
 	target := &memoryProtector{kind: "command", protected: true}
-	sourceManifest := custodyManifest{Format: custodyFormat, Kind: "file", ID: custodyID(dir)}
 	targetManifest := custodyManifest{Format: custodyFormat, Kind: "command", ID: custodyID(dir), Command: "/test/helper"}
-	if err := migrateCustodyRecord(context.Background(), dir, secret, sourceManifest, source, targetManifest, target); err != nil {
+	if err := migrateCustodyRecord(context.Background(), dir, secret, source, targetManifest, target); err != nil {
 		t.Fatal(err)
 	}
 	if !source.deleted || !bytes.Equal(target.value, secret) {
@@ -192,7 +190,7 @@ func TestCustodyMigrationCommitsBeforeDeletingSource(t *testing.T) {
 	dir2 := t.TempDir()
 	source = &memoryProtector{kind: "file", value: secret}
 	target = &memoryProtector{kind: "command", protected: true, corruptLoad: true}
-	if err := migrateCustodyRecord(context.Background(), dir2, secret, sourceManifest, source, targetManifest, target); err == nil {
+	if err := migrateCustodyRecord(context.Background(), dir2, secret, source, targetManifest, target); err == nil {
 		t.Fatal("round-trip mismatch was accepted")
 	}
 	if source.deleted {
@@ -246,59 +244,6 @@ esac
 	}
 	if _, err := os.Stat(store); !os.IsNotExist(err) {
 		t.Fatalf("old helper record remains after migration: %v", err)
-	}
-}
-
-func TestProtectorCommandProtocols(t *testing.T) {
-	ctx := context.Background()
-	secret := []byte(`{"unseal_key":"not-on-disk"}`)
-	var calls []struct {
-		stdin []byte
-		name  string
-		args  []string
-	}
-	runner := func(_ context.Context, stdin []byte, name string, args ...string) commandResult {
-		calls = append(calls, struct {
-			stdin []byte
-			name  string
-			args  []string
-		}{append([]byte(nil), stdin...), name, append([]string(nil), args...)})
-		if slices.Contains(args, "get") || slices.Contains(args, "lookup") || slices.Contains(args, "find-generic-password") {
-			return commandResult{stdout: append(secret, '\n')}
-		}
-		return commandResult{}
-	}
-
-	linux := &osKeyringProtector{kind: "secret-service", binary: "/usr/bin/secret-tool", account: "instance", run: runner}
-	if err := linux.Save(ctx, secret); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(calls[0].stdin, secret) || strings.Contains(strings.Join(calls[0].args, " "), string(secret)) {
-		t.Fatalf("Secret Service did not receive the value only on stdin: %+v", calls[0])
-	}
-	if got, err := linux.Load(ctx); err != nil || !bytes.Equal(got, secret) {
-		t.Fatalf("Secret Service load = %q err=%v", got, err)
-	}
-
-	calls = nil
-	helper := &helperProtector{binary: "/usr/local/bin/protect", id: "instance", run: runner}
-	if err := helper.Save(ctx, secret); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(calls[0].stdin, secret) || strings.Contains(strings.Join(calls[0].args, " "), string(secret)) {
-		t.Fatalf("helper did not receive the value only on stdin: %+v", calls[0])
-	}
-	if got, err := helper.Load(ctx); err != nil || !bytes.Equal(got, secret) {
-		t.Fatalf("helper load = %q err=%v", got, err)
-	}
-
-	calls = nil
-	mac := &osKeyringProtector{kind: "keychain", binary: "/usr/bin/security", account: "instance", run: runner}
-	if err := mac.Save(ctx, secret); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(calls[0].args, string(secret)) {
-		t.Fatal("security(1) compatibility path did not receive the Keychain value")
 	}
 }
 

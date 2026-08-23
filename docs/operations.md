@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-23_
 
 ## The CLI
 
@@ -14,6 +14,7 @@ microagency down           # stop the background server
 microagency restart        # restart with new flags; keeps OpenBao up
 microagency purge [--full] # delete your data (both tiers confirm first)
 microagency doctor         # check runtime + engine health
+microagency secret-store   # inspect or migrate the credential-store data key
 microagency openbao        # inspect or migrate managed OpenBao custody
 microagency hook install   # print the Claude Code egress-guard hook setup
 microagency mediation      # configure or inspect enforced workspace mediation
@@ -89,11 +90,13 @@ Everything lives under `~/.microagency`:
 | `openbao/custody.json` | non-secret protected-provider kind, record ID, and helper path |
 | `microagency.log` | the backgrounded server's log, including the secret-store posture line |
 | `credential-store.json` | non-secret record of the store `up` actually opened: kind, the store in effect, and the configured store when it differs |
+| `credential-key-custody.json` | non-secret locator naming the protector that holds the credential store's data key, its record ID, and the helper path |
 | `microagency.pid` | the running server's pid file |
 
-An encrypted fallback key configured through
-`MICROAGENCY_SECRET_KEY_FILE` must live outside this directory. It is not
-deleted by `purge --full`.
+The credential store's data key never lives in this directory. A key file
+configured through `MICROAGENCY_SECRET_KEY_FILE` must live outside it and is
+not deleted by `purge --full`; a key held by a protector lives in that
+provider, and `purge --full` deletes that record first.
 
 ## What purge deletes
 
@@ -105,20 +108,25 @@ deleted by `purge --full`.
 - **`--full`**: deletes everything under `~/.microagency` — parked data,
   history, stored upstream credentials (you will re-authenticate every
   connection), the operator tokens (legacy and named), and the local OAuth
-  keys (Claude Code will re-consent). With protected OpenBao custody, it deletes the external
-  bootstrap record first and keeps the state directory if that deletion fails.
+  keys (Claude Code will re-consent). It deletes any externally held record
+  first — the protected OpenBao bootstrap, the credential store's data key —
+  and keeps the state directory if either deletion fails, so nothing is
+  stranded in a keyring or KMS with no locator left.
 
 `--yes`/`-y` skips the confirmation for scripted use.
 
-See [protecting managed OpenBao](openbao-custody.md) for protector setup,
-copy-then-switch migration, restart requirements, backup, and recovery.
+See [protecting the credential store key](secret-store-custody.md) for
+data-key protector setup, the helper protocol, migration, and recovery, and
+[protecting managed OpenBao](openbao-custody.md) for the same for managed
+OpenBao's bootstrap.
 
 ## Doctor
 
 `microagency doctor` reports what it can verify:
 
 - Whether the server is running.
-- The secret-store posture, meaning where your credentials are.
+- The secret-store posture, meaning where your credentials are and which
+  protector holds the key that opens them.
 - The active OAuth mode, issuer, resource, and public consent location.
 - Whether the operator surface (`/admin` + console) is reachable beyond
   loopback, warned on every run while that posture holds.

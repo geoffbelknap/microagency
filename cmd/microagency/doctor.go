@@ -541,7 +541,7 @@ func renderLivePosture(out io.Writer, p secretstore.Posture) {
 	fmt.Fprintf(out, "                    (in effect in the running gateway, pid %d)\n", p.PID)
 	if p.Degraded {
 		fmt.Fprintln(out, "                    (credentials stay out of the agent, but are NOT encrypted at rest;")
-		fmt.Fprintln(out, "                     install OpenBao or configure "+secretstore.FileKeyEnv+")")
+		fmt.Fprintln(out, "                     install OpenBao or set "+secretstore.ProtectorEnv+")")
 	}
 }
 
@@ -634,18 +634,11 @@ type localStore struct {
 }
 
 func inspectLocalStore(getenv func(string) string, stateDir string) localStore {
-	path := filepath.Join(stateDir, "upstream-tokens.json")
-	if keyPath := strings.TrimSpace(getenv(secretstore.FileKeyEnv)); keyPath != "" {
-		key, err := secretstore.LoadFileKey(stateDir, keyPath)
-		if err == nil {
-			_, err = secretstore.InspectFile(path, key)
-		}
-		if err != nil {
-			return localStore{"✗", fmt.Sprintf("encrypted file store is misconfigured: %v", err),
-				[]string{"startup will fail closed; fix or unset " + secretstore.FileKeyEnv}}
-		}
-		return localStore{"✓", "AES-256-GCM file store with a separately supplied key",
-			[]string{fmt.Sprintf("(key: %s; credentials: %s)", keyPath, path)}}
+	path := secretstore.StorePath(stateDir)
+	// A data-key protector is probed read-only: doctor must not create the key a
+	// start would create, or a green page here would be the thing that made it green.
+	if kc := secretstore.InspectKeyCustody(context.Background(), stateDir, getenv); kc.Kind != "" {
+		return renderKeyCustody(kc, getenv, path)
 	}
 	kind, err := secretstore.InspectFile(path, nil)
 	if errors.Is(err, secretstore.ErrKeyRequired) || kind == "encrypted-file" {
@@ -666,9 +659,36 @@ func inspectLocalStore(getenv func(string) string, stateDir string) localStore {
 	return localStore{"✗", "the only local store left is an unencrypted mode-0600 plaintext file",
 		[]string{
 			"a start without `--allow-plaintext-credentials` will refuse rather than",
-			"store credentials in the clear; configure " + secretstore.FileKeyEnv + " to",
-			"encrypt the fallback instead",
+			"store credentials in the clear; configure " + secretstore.ProtectorEnv + " or",
+			secretstore.FileKeyEnv + " to encrypt the fallback instead",
 		}}
+}
+
+// renderKeyCustody turns the data-key custody probe into a check line. An
+// unreachable protector is never rendered healthy: what is known is that a
+// start right now would refuse, and the operator needs told which provider to
+// restore, not reassured that the store is "encrypted".
+func renderKeyCustody(kc secretstore.KeyCustodyPosture, getenv func(string) string, path string) localStore {
+	if !kc.Protected {
+		// The operator key file keeps its own wording: it is the same posture,
+		// the same setting, and the same remediation it has always had.
+		if !kc.Available {
+			return localStore{"✗", fmt.Sprintf("encrypted file store is misconfigured: %s", kc.Detail),
+				[]string{"startup will fail closed; fix or unset " + secretstore.FileKeyEnv}}
+		}
+		return localStore{"✓", "AES-256-GCM file store with a separately supplied key",
+			[]string{fmt.Sprintf("(key: %s; credentials: %s)", strings.TrimSpace(getenv(secretstore.FileKeyEnv)), path)}}
+	}
+	head := fmt.Sprintf("AES-256-GCM file store (data key: %s)", kc.Label)
+	if !kc.Available {
+		// The store may well be intact; what is known is that a start right now
+		// would refuse. Claiming the protector "did not answer" would be wrong
+		// for a custody disagreement, where it answered and the settings did not
+		// agree — so state the consequence and let Detail carry the cause.
+		return localStore{"✗", head + " — UNVERIFIED",
+			[]string{kc.Detail, "startup will fail closed until this is resolved"}}
+	}
+	return localStore{"✓", head, []string{fmt.Sprintf("(%s; credentials: %s)", kc.Detail, path)}}
 }
 
 func renderLocalStore(out io.Writer, ls localStore) {

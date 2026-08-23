@@ -62,25 +62,25 @@ func Ensure(ctx context.Context, dir string, getenv func(string) string) (addr, 
 	if getenv("VAULT_TOKEN") != "" {
 		return "", "", fmt.Errorf("VAULT_TOKEN is set but VAULT_ADDR is missing")
 	}
-	custody, err := selectCustody(dir, getenv)
+	sel, err := selectCustody(dir, getenv)
 	if err != nil {
 		if protectedRequested(dir, getenv) {
 			return "", "", &ProtectedError{Err: err}
 		}
 		return "", "", err
 	}
-	if custody.manifest.protected() {
+	if sel.manifest.Protected() {
 		if _, statErr := os.Stat(custodyPath(dir)); os.IsNotExist(statErr) {
 			// Persist the non-secret locator before OpenBao can initialize. If the
 			// first protected write then fails, every later start still knows it
 			// must fail closed rather than reset or select a disk fallback.
-			if err := saveCustodyManifest(dir, custody.manifest); err != nil {
+			if err := saveCustodyManifest(dir, sel.manifest); err != nil {
 				return "", "", &ProtectedError{Err: fmt.Errorf("persist protected custody metadata: %w", err)}
 			}
 		}
 	}
 	fail := func(err error) (string, string, error) {
-		if err != nil && custody.manifest.protected() {
+		if err != nil && sel.manifest.Protected() {
 			err = &ProtectedError{Err: err}
 		}
 		return "", "", err
@@ -91,7 +91,7 @@ func Ensure(ctx context.Context, dir string, getenv func(string) string) (addr, 
 	}
 	m := &Manager{
 		Dir: dir, Addr: ManagedAddr, binary: bin,
-		client: &http.Client{Timeout: 10 * time.Second}, custody: custody,
+		client: &http.Client{Timeout: 10 * time.Second}, custody: sel,
 	}
 	if err := m.start(); err != nil {
 		return fail(err)
@@ -118,15 +118,15 @@ func RotateLogin(ctx context.Context, dir string, getenv func(string) string) er
 	if err != nil {
 		return err
 	}
-	custody, err := selectCustody(dir, getenv)
+	sel, err := selectCustody(dir, getenv)
 	if err != nil {
 		if protectedRequested(dir, getenv) {
 			return &ProtectedError{Err: err}
 		}
 		return err
 	}
-	m := &Manager{Dir: dir, Addr: addr, client: &http.Client{Timeout: 10 * time.Second}, custody: custody}
-	if err := m.rotateAppRoleCredential(ctx, token); err != nil && custody.manifest.protected() {
+	m := &Manager{Dir: dir, Addr: addr, client: &http.Client{Timeout: 10 * time.Second}, custody: sel}
+	if err := m.rotateAppRoleCredential(ctx, token); err != nil && sel.manifest.Protected() {
 		return &ProtectedError{Err: err}
 	} else {
 		return err
