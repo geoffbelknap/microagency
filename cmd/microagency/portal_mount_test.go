@@ -21,7 +21,7 @@ func portalStatus(t *testing.T, mux *http.ServeMux, path string) *httptest.Respo
 // it drives. It must never appear on the operator listener, and mounting it must
 // not put an operator route on the public one.
 func TestPortalIsOnTheAgentPlaneOnly(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "cloudflare",
 		publicURL: "https://gateway.example", authDir: t.TempDir(),
@@ -54,7 +54,7 @@ func TestPortalIsOnTheAgentPlaneOnly(t *testing.T) {
 // for a browser to obtain a client from and no consent screen this gateway
 // serves, so the portal is not mounted rather than served broken.
 func TestPortalNeedsTheBuiltInAuthorizationServer(t *testing.T) {
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{addr: "127.0.0.1:8765", token: "static-bearer", authDir: t.TempDir()}
 	mcpMux, _, mode, _, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {

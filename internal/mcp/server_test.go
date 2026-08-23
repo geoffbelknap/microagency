@@ -26,7 +26,7 @@ func newTestServer(t *testing.T, r Runner, opts ...Option) *Server {
 
 func openTestSecretStore(t *testing.T, dir string) secretstore.Store {
 	t.Helper()
-	s, err := secretstore.Open(dir, func(string) string { return "" }, nil)
+	s, err := secretstore.Open(dir, func(string) string { return "" }, secretstore.Options{AllowPlaintext: true})
 	if err != nil {
 		t.Fatal(err)
 	}

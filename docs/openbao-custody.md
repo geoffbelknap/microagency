@@ -111,6 +111,24 @@ step in the error. It never resets protected OpenBao and never starts a parallel
 plaintext store. Keep `custody.json` and the OpenBao data in place while fixing
 the provider.
 
+### Something else is on port 8200
+
+If another process already answers on `127.0.0.1:8200` — an OpenBao left over
+from an earlier run, or an unrelated one you started yourself — microagency
+refuses to adopt it. It has no way to tell that instance is the one holding
+your credentials, and handing them to a process it does not manage would be
+worse than not starting:
+
+```
+WARN managed OpenBao is unavailable: its port is held by another process
+  addr=http://127.0.0.1:8200
+  remediation="stop whatever holds http://127.0.0.1:8200 (it was not started by
+  microagency), then start microagency again"
+```
+
+`doctor` reports the same condition, and names the store that would hold
+credentials instead. Free the port and start again; nothing needs repairing.
+
 ## Rotate custody
 
 Move the record between protectors with a verified copy-then-switch:

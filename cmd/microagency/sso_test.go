@@ -113,7 +113,7 @@ func TestUpHelpListsSSOFlags(t *testing.T) {
 
 func TestResolveSSOClientSecret(t *testing.T) {
 	dir := t.TempDir()
-	store, err := secretstore.Open(dir, func(string) string { return "" }, nil)
+	store, err := secretstore.Open(dir, func(string) string { return "" }, secretstore.Options{AllowPlaintext: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestLocalFederatedFlowThroughMuxes(t *testing.T) {
 	t.Setenv(ssoClientSecretEnv, "gw-secret")
 	provider := newTestOIDCProvider(t)
 
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", authDir: t.TempDir(),
 		ssoIssuer: provider.ts.URL, ssoClientID: "gw-client",
@@ -400,7 +400,7 @@ func TestFederatedTunnelMountsNoOperatorConsent(t *testing.T) {
 	t.Setenv(ssoClientSecretEnv, "gw-secret")
 	provider := newTestOIDCProvider(t)
 
-	srv := buildServer(nil, 512, 2048, false, false, false, "127.0.0.1:8766")
+	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", tunnel: "cloudflare", publicURL: "https://gateway.example",
 		authDir: t.TempDir(), ssoIssuer: provider.ts.URL, ssoClientID: "gw-client",

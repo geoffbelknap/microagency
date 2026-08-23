@@ -28,8 +28,10 @@ state (add `--full` to wipe everything; both confirm first).
 Your upstream credentials stay in the gateway's secret store and never enter
 the agent's configuration or context. OpenBao/Vault is preferred, and managed
 OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
-is unavailable, the local fallback is encrypted only when you supply a separate
-key; otherwise `doctor` reports the mode-0600 plaintext fallback as degraded.
+is unavailable, the local fallback is encrypted when you supply a separate key.
+Without one, `up` refuses to start rather than keep credentials in an
+unencrypted file; `--allow-plaintext-credentials` accepts that posture
+explicitly, and `doctor` reports it as degraded.
 See [where credentials live](connect-clients.md#where-credentials-live).
 
 ## Add your servers

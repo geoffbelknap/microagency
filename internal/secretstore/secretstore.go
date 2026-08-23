@@ -32,6 +32,11 @@ const (
 	// copying that directory alone never copies both ciphertext and key.
 	FileKeyEnv = "MICROAGENCY_SECRET_KEY_FILE"
 
+	// AllowPlaintextEnv opts in to the unencrypted mode-0600 fallback for
+	// deployments that start the gateway from a unit file rather than a
+	// terminal. `up --allow-plaintext-credentials` is the flag form.
+	AllowPlaintextEnv = "MICROAGENCY_ALLOW_PLAINTEXT_CREDENTIALS"
+
 	fileFormat = "microagency-secretstore-v1"
 	fileCipher = "AES-256-GCM"
 )
@@ -43,6 +48,45 @@ var ErrNotFound = errors.New("secretstore: not found")
 // configured. It is deliberately distinct from ErrNotFound: startup must not
 // silently replace an encrypted posture with plaintext after a restart.
 var ErrKeyRequired = errors.New("secretstore: encrypted file exists but no key is configured")
+
+// ErrPlaintextNotAllowed means resolution landed on the unencrypted fallback
+// and the operator did not opt in. Storing upstream credentials in the clear is
+// a downgrade, not a default, so it is a decision an operator makes out loud
+// rather than one a failed vault makes for them.
+var ErrPlaintextNotAllowed = errors.New("secretstore: the unencrypted credential fallback requires an explicit operator opt-in")
+
+// Store kinds, as returned by Store.Kind.
+const (
+	KindVault         = "vault"
+	KindEncryptedFile = "encrypted-file"
+	KindFile          = "file"
+)
+
+// Options control how Open resolves the store.
+type Options struct {
+	// AllowPlaintext permits the unencrypted mode-0600 fallback. A caller that
+	// will PERSIST credentials sets it only on an explicit operator opt-in;
+	// without it Open returns ErrPlaintextNotAllowed rather than writing
+	// upstream credentials to disk in the clear. The encrypted file store is
+	// not a downgrade and needs no opt-in.
+	AllowPlaintext bool
+	// Client overrides the HTTP client used for a Vault/OpenBao store.
+	Client *http.Client
+}
+
+// Describe returns the operator-facing phrase for a store kind.
+func Describe(kind string) string {
+	switch kind {
+	case KindVault:
+		return "OpenBao/Vault"
+	case KindEncryptedFile:
+		return "AES-256-GCM file store with a separately supplied key"
+	case KindFile:
+		return "unencrypted mode-0600 file in the state directory"
+	default:
+		return "unknown credential store"
+	}
+}
 
 // Store persists secret blobs by key.
 type Store interface {
@@ -56,7 +100,9 @@ type Store interface {
 // preferred path). Otherwise it opens the file fallback, encrypting it when
 // MICROAGENCY_SECRET_KEY_FILE names a separately held 32-byte key. Existing
 // plaintext fallback state is migrated atomically when encryption is enabled.
-func Open(dir string, getenv func(string) string, client *http.Client) (Store, error) {
+// Landing on the unencrypted fallback requires opts.AllowPlaintext.
+func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
+	client := opts.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -84,9 +130,14 @@ func Open(dir string, getenv func(string) string, client *http.Client) (Store, e
 	}
 	f := &File{Path: path}
 	// Validate existing state now, rather than discovering after startup that an
-	// encrypted store cannot be opened because its key setting disappeared.
+	// encrypted store cannot be opened because its key setting disappeared. This
+	// runs before the opt-in gate so a store that is actually encrypted reports
+	// the missing key, never the coarser "you did not opt in to plaintext".
 	if _, _, err := f.read(); err != nil {
 		return nil, err
+	}
+	if !opts.AllowPlaintext {
+		return nil, ErrPlaintextNotAllowed
 	}
 	return f, nil
 }

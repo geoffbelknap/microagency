@@ -36,7 +36,7 @@ func delegatedRegistry(t *testing.T) string {
 // key material in the secret store and federated sign-in for verified emails.
 func TestDoctorReportsDelegatedConnections(t *testing.T) {
 	dir := delegatedRegistry(t)
-	store, err := secretstore.Open(dir, func(string) string { return "" }, nil)
+	store, err := secretstore.Open(dir, func(string) string { return "" }, secretstore.Options{AllowPlaintext: true})
 	if err != nil {
 		t.Fatal(err)
 	}

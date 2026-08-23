@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +37,7 @@ import (
 	"microagency/internal/mcp"
 	"microagency/internal/optoken"
 	"microagency/internal/portal"
+	"microagency/internal/secretstore"
 	"microagency/internal/tunnel"
 )
 
@@ -232,6 +234,11 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --allow-remote-admin  serve /admin + /console on a non-loopback bind (cleartext HTTP,")
 	fmt.Fprintln(w, "                          operator token only — required when --http or --admin-addr leaves")
 	fmt.Fprintln(w, "                          loopback; prefer a loopback bind reached over SSH forwarding)")
+	fmt.Fprintln(w, "    --allow-plaintext-credentials  keep upstream credentials in the UNENCRYPTED")
+	fmt.Fprintln(w, "                          mode-0600 file store when no vault is reachable (or set")
+	fmt.Fprintln(w, "                          "+secretstore.AllowPlaintextEnv+"=1). Without it,")
+	fmt.Fprintln(w, "                          a start that would land there refuses. Encrypting the")
+	fmt.Fprintln(w, "                          fallback with "+secretstore.FileKeyEnv+" needs no opt-in.")
 	fmt.Fprintln(w, "    --engine name=path    add a query engine (a wasip1 module)")
 	fmt.Fprintln(w, "    --max-inline-bytes N  results larger than N bytes return as a reference (default 8192)")
 	fmt.Fprintln(w, "    --persist-refs        keep reffed data across restart (encrypted at rest, 24h TTL)")
@@ -275,6 +282,11 @@ type upOptions struct {
 	// /console) on a non-loopback bind. Without it, such a bind refuses to
 	// start (see validateHTTPConfig).
 	allowRemoteAdmin bool
+	// allowPlaintextCredentials acknowledges keeping upstream credentials in the
+	// unencrypted mode-0600 file store. Without it — or MICROAGENCY_ALLOW_
+	// PLAINTEXT_CREDENTIALS — a start that would land there refuses, so an
+	// unreachable OpenBao cannot silently move credentials into the clear.
+	allowPlaintextCredentials bool
 	// SSO federation: the built-in OAuth server stays the authorization server
 	// toward MCP clients, but sign-in is delegated to this OIDC provider, so
 	// each person is a distinct principal. The client secret never rides argv:
@@ -359,6 +371,8 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.singleUser = true
 		case args[i] == "--allow-remote-admin":
 			o.allowRemoteAdmin = true
+		case args[i] == "--allow-plaintext-credentials":
+			o.allowPlaintextCredentials = true
 		case args[i] == "--no-register":
 			o.noRegister = true
 		case args[i] == "--foreground":
@@ -433,13 +447,7 @@ func run(args []string) {
 	httpAddr, token := o.httpAddr, o.token
 	issuer, audience, tunnelProvider, adminAddr := o.issuer, o.audience, o.tunnel, o.adminAddr
 	requireScope := o.requireScope
-	wasmMaxMemMB := o.wasmMaxMemMB
-	maxInlineBytes := o.maxInlineBytes
 	stdio, public, noRegister, foreground := o.stdio, o.public, o.noRegister, o.foreground
-	persistRefs := o.persistRefs
-	reduceEnginesOnly := o.reduceEnginesOnly
-	highAssuranceMultiUser := o.highAssuranceMultiUser
-	engineSpecs := o.engineSpecs
 
 	if (public || o.tunnelName != "") && tunnelProvider == "" {
 		tunnelProvider = "cloudflare"
@@ -481,20 +489,27 @@ func run(args []string) {
 	// an external one via VAULT_ADDR) and point the secret store at it. stdio
 	// doesn't aggregate upstreams, so it skips this. If Bao can't come up, the
 	// server builder selects the configured local posture: operator-key encrypted,
-	// or an explicitly degraded mode-0600 plaintext fallback.
+	// or — only on an explicit opt-in — the unencrypted mode-0600 fallback.
+	cred := credentialIntent{allowPlaintext: o.allowPlaintextCredentials || envEnabled(os.Getenv(secretstore.AllowPlaintextEnv))}
 	if !stdio {
-		if addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv); err != nil {
-			if baomanager.FailClosed(err) {
-				fatal("managed OpenBao protected custody is unavailable; refusing a credential-store downgrade", "err", err)
-			}
-			slog.Warn("OpenBao unavailable; evaluating the configured local credential-store fallback", "err", err)
-		} else {
+		cred.preferred = "managed OpenBao"
+		if os.Getenv("VAULT_ADDR") != "" {
+			cred.preferred = "external Vault/OpenBao (VAULT_ADDR)"
+		}
+		addr, vaultTok, err := baomanager.Ensure(context.Background(), filepath.Join(microagencyDir(), "openbao"), os.Getenv)
+		switch {
+		case err == nil:
 			_ = os.Setenv("VAULT_ADDR", addr)
 			_ = os.Setenv("VAULT_TOKEN", vaultTok)
+		case baomanager.FailClosed(err):
+			fatal("managed OpenBao protected custody is unavailable; refusing a credential-store downgrade", "err", err)
+		default:
+			cred.unavailable = credentialStoreUnavailable(err)
+			reportOpenBaoUnavailable(err)
 		}
 	}
 
-	srv := buildServer(engineSpecs, wasmMaxMemMB, maxInlineBytes, persistRefs, reduceEnginesOnly, highAssuranceMultiUser, consoleAddr(cfg))
+	srv := buildServer(o, consoleAddr(cfg), cred)
 
 	if stdio {
 		if err := srv.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
@@ -552,6 +567,9 @@ func daemonize(cfg httpConfig) {
 		fatal("open log file", "err", err)
 	}
 	defer func() { _ = logf.Close() }()
+	// Where this run's output starts, so a child that exits on startup can have
+	// its own reason shown here rather than in a log file nobody opens.
+	logStart, _ := logf.Seek(0, io.SeekEnd)
 
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), "MICROAGENCY_DAEMON=1")
@@ -563,10 +581,12 @@ func daemonize(cfg httpConfig) {
 	pid := cmd.Process.Pid
 	_ = os.WriteFile(pidPath(), []byte(strconv.Itoa(pid)), 0o600)
 
-	// Give it a moment to bind; surface an immediate exit (e.g. port in use).
+	// Give it a moment to bind; surface an immediate exit (a port already in
+	// use, a credential store the gateway refuses to open).
 	time.Sleep(700 * time.Millisecond)
-	if syscall.Kill(pid, 0) != nil {
+	if childExited(pid) {
 		fmt.Fprintf(os.Stderr, "microagency: server exited on startup — see %s\n", logPath)
+		writeChildOutput(os.Stderr, logPath, logStart)
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "\n  microagency is up in the background (pid %d).\n\n", pid)
@@ -602,9 +622,78 @@ func daemonize(cfg httpConfig) {
 			fmt.Fprintln(os.Stderr, "                   consent stays on the loopback operator listener")
 		}
 	}
+	startupCredentialLine(os.Stderr, microagencyDir(), pid, 2*time.Second)
 	fmt.Fprintf(os.Stderr, "    Logs           %s\n", logPath)
 	fmt.Fprintf(os.Stderr, "    Stop           microagency down\n\n")
 	upgradeNudge()
+}
+
+// childExited reports whether the daemon child is already gone. A plain
+// `kill(pid, 0)` is not enough: an unreaped child is a zombie, which still
+// accepts signal 0, so a start that refused in under a second was reported as
+// "up in the background". Reaping without blocking answers the real question.
+func childExited(pid int) bool {
+	var ws syscall.WaitStatus
+	reaped, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+	if err == nil && reaped == pid {
+		return true
+	}
+	return syscall.Kill(pid, 0) != nil
+}
+
+// writeChildOutput replays what the child wrote before exiting. Pointing at a
+// log file costs the operator a second command to learn something already
+// written; a refusal that explains itself should reach the terminal that asked.
+func writeChildOutput(w io.Writer, logPath string, from int64) {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return
+	}
+	// Bounded: a crash loop can write a lot, and the log stays authoritative.
+	b, err := io.ReadAll(io.LimitReader(f, 8192))
+	if err != nil || len(b) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	_, _ = w.Write(b)
+}
+
+// startupCredentialLine prints where this gateway's credentials actually
+// landed. A store downgrade that reaches only the log file is a downgrade
+// nobody reads: the gateway starts, every call keeps working, and nothing
+// prompts the second look that would find the credentials in the clear. The
+// child records the store as it opens it, so the parent reports that record
+// rather than re-deriving an answer that could differ from the child's.
+func startupCredentialLine(w io.Writer, stateDir string, pid int, wait time.Duration) {
+	deadline := time.Now().Add(wait)
+	for {
+		if p, err := secretstore.LoadPosture(stateDir); err == nil && p.PID == pid {
+			switch {
+			case p.Disagrees():
+				fmt.Fprintf(w, "    Credentials    ⚠ %s\n", p.Effective)
+				fmt.Fprintf(w, "                   NOT the configured %s", p.Configured)
+				if p.Reason != "" {
+					fmt.Fprintf(w, " — %s", p.Reason)
+				}
+				fmt.Fprintln(w, "")
+				fmt.Fprintln(w, "                   run `microagency doctor` for the full posture")
+			case p.Degraded:
+				fmt.Fprintf(w, "    Credentials    ⚠ %s (NOT encrypted at rest)\n", p.Effective)
+			default:
+				fmt.Fprintf(w, "    Credentials    %s\n", p.Effective)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintln(w, "    Credentials    still resolving — `microagency doctor` reports the store in effect")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // upgradeNudge prints a one-line hint if the Homebrew tap has a newer build than
@@ -675,6 +764,10 @@ func runDown(args []string) {
 			fmt.Fprintf(os.Stderr, "microagency: stopped (pid %d)\n", pid)
 		}
 		_ = os.Remove(pidPath())
+		// The credential-store record describes a gateway that is now gone; a
+		// record outliving its run is exactly the stale state that makes a
+		// diagnostic lie.
+		secretstore.ClearPosture(microagencyDir())
 	} else {
 		fmt.Fprintln(os.Stderr, "microagency: not running")
 	}
@@ -1250,24 +1343,100 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 // the URL, approve once, no token handed over. --token forces a static bearer (for
 // clients that can't do OAuth); --issuer uses an external authorization server.
 // /admin + /console always sit behind a persistent operator token.
-func buildServer(engineSpecs []string, wasmMaxMemMB, maxInlineBytes int, persistRefs, reduceEnginesOnly, highAssuranceMultiUser bool, consoleAddr string) *mcp.Server {
+func buildServer(o upOptions, consoleAddr string, cred credentialIntent) *mcp.Server {
 	srv, err := app.BuildServer(app.Config{
-		StateDir:               microagencyDir(),
-		Version:                version,
-		ConsoleAddr:            consoleAddr,
-		MaxInlineBytes:         maxInlineBytes,
-		WasmMaxMemMB:           wasmMaxMemMB,
-		PersistRefs:            persistRefs,
-		ReduceEnginesOnly:      reduceEnginesOnly,
-		HighAssuranceMultiUser: highAssuranceMultiUser,
-		EngineSpecs:            engineSpecs,
-		BundledEngines:         bundledEngines(),
-		BundledMinimizers:      bundledMinimizers(),
+		StateDir:                  microagencyDir(),
+		Version:                   version,
+		ConsoleAddr:               consoleAddr,
+		MaxInlineBytes:            o.maxInlineBytes,
+		WasmMaxMemMB:              o.wasmMaxMemMB,
+		PersistRefs:               o.persistRefs,
+		ReduceEnginesOnly:         o.reduceEnginesOnly,
+		HighAssuranceMultiUser:    o.highAssuranceMultiUser,
+		EngineSpecs:               o.engineSpecs,
+		BundledEngines:            bundledEngines(),
+		BundledMinimizers:         bundledMinimizers(),
+		AllowPlaintextCredentials: cred.allowPlaintext,
+		PreferredStore:            cred.preferred,
+		PreferredStoreUnavailable: cred.unavailable,
 	})
 	if err != nil {
+		if errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
+			refusePlaintextCredentials(os.Stderr, cred)
+		}
 		fatal("build server", "err", err)
 	}
 	return srv
+}
+
+// credentialIntent is what `up` aimed at for credential custody before the
+// server was built: the store it tried, why that store was unavailable, and
+// whether the operator opted in to the unencrypted fallback.
+type credentialIntent struct {
+	preferred      string
+	unavailable    string
+	allowPlaintext bool
+}
+
+// envEnabled reads an opt-in environment variable. Anything but an explicit
+// off-value enables, so a unit file that sets the variable at all is honored.
+func envEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// reportOpenBaoUnavailable diagnoses why the managed store could not be used.
+// A stale listener on the managed port is its own recoverable condition — some
+// other process answers there, so microagency's own instance was never reached
+// — and it gets a named diagnosis and remediation instead of a pid-file errno
+// buried inside a generic unavailability warning.
+func reportOpenBaoUnavailable(err error) {
+	var stale *baomanager.StaleListenerError
+	if errors.As(err, &stale) {
+		slog.Warn("managed OpenBao is unavailable: its port is held by another process",
+			"addr", stale.Addr, "detail", stale.Detail, "remediation", stale.Remediation())
+		return
+	}
+	slog.Warn("OpenBao unavailable; evaluating the configured local credential-store fallback", "err", err)
+}
+
+// credentialStoreUnavailable is the short phrase recorded in the credential
+// store posture and quoted in the fail-closed refusal.
+func credentialStoreUnavailable(err error) string {
+	var stale *baomanager.StaleListenerError
+	if errors.As(err, &stale) {
+		return fmt.Sprintf("another process holds %s, so microagency's own instance was never reached", stale.Addr)
+	}
+	return err.Error()
+}
+
+// refusePlaintextCredentials states the fail-closed refusal in the CLI's own
+// vocabulary: what was unavailable, what the gateway will not do about it, and
+// every way forward. Exits non-zero — this is an operational failure, not a
+// usage error.
+func refusePlaintextCredentials(w io.Writer, cred credentialIntent) {
+	fmt.Fprintln(w, "microagency: refusing to start — upstream credentials would be stored UNENCRYPTED.")
+	switch {
+	case cred.preferred != "" && cred.unavailable != "":
+		fmt.Fprintf(w, "  %s is unavailable: %s\n", cred.preferred, cred.unavailable)
+	case cred.preferred != "":
+		fmt.Fprintf(w, "  %s is unavailable.\n", cred.preferred)
+	}
+	fmt.Fprintf(w, "  The only store left is the mode-0600 file at %s,\n", filepath.Join(microagencyDir(), "upstream-tokens.json"))
+	fmt.Fprintln(w, "  which is not encrypted at rest. Every upstream credential the gateway holds")
+	fmt.Fprintln(w, "  would sit there in the clear.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  Choose one:")
+	fmt.Fprintln(w, "    - restore the store named above, then start again")
+	fmt.Fprintf(w, "    - encrypt the fallback: point %s at a separately held\n", secretstore.FileKeyEnv)
+	fmt.Fprintf(w, "      32-byte key outside %s, then start again\n", microagencyDir())
+	fmt.Fprintln(w, "    - accept unencrypted credentials, knowing what that means:")
+	fmt.Fprintf(w, "      `microagency up --allow-plaintext-credentials` (or %s=1)\n", secretstore.AllowPlaintextEnv)
+	os.Exit(1)
 }
 
 func serveHTTP(srv *mcp.Server, cfg httpConfig) {
