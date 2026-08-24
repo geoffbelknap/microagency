@@ -198,6 +198,7 @@ func TestDescribeAudience(t *testing.T) {
 		{"rules only", "", false, AudienceSummary{Groups: 2, Identities: 1}, "accounts matching 2 groups + 1 identity"},
 		{"both", "corp.example", false, AudienceSummary{Groups: 1}, "accounts with hd=corp.example that also match 1 group"},
 		{"undeclared", "", false, AudienceSummary{}, "UNDECLARED — no account can sign in"},
+		{"unreadable beats a hosted domain", "corp.example", false, AudienceSummary{Unreadable: true}, "UNDECLARED — the audience rule set is unreadable, so no account can sign in"},
 	} {
 		if got := DescribeAudience(issuer, tc.hd, tc.anyAccount, tc.rules); got != tc.want {
 			t.Errorf("%s: DescribeAudience = %q, want %q", tc.name, got, tc.want)
@@ -392,5 +393,43 @@ func TestAudienceRulesPathEmptyStateDir(t *testing.T) {
 	}
 	if _, err := nilRules.Add(AudienceRule{Kind: AudienceGroup, Value: "x"}); err == nil {
 		t.Error("adding to a rule set with no file should fail rather than silently vanish")
+	}
+}
+
+// TestUnreadableRulesFailClosedRatherThanDecay is the edge that matters most
+// here. With a hosted domain AND rules configured, the audience is the two
+// together. If the rule file becomes unparseable, treating it as "no rules"
+// would silently widen the audience back to the whole domain — a weakening
+// nobody asked for, at the moment nobody is looking. It refuses instead.
+func TestUnreadableRulesFailClosedRatherThanDecay(t *testing.T) {
+	dir := t.TempDir()
+	path := AudienceRulesPath(dir)
+	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules := NewAudienceRules(path)
+
+	if _, _, err := rules.Match(&FederatedIdentity{Subject: "s"}); err == nil {
+		t.Fatal("Match hid the read error; callers cannot then fail closed")
+	}
+	if !rules.Summary().Unreadable {
+		t.Error("Summary did not report the rule set as unreadable")
+	}
+
+	inDomain := &FederatedIdentity{Subject: "user-alpha", Email: "alpha@corp.example", HostedDomain: "corp.example"}
+	f := &Federation{cfg: FederationConfig{HostedDomain: "corp.example", Audience: rules}}
+	if f.Permits(inDomain) {
+		t.Error("an unreadable rule set decayed into a hosted-domain-only audience")
+	}
+
+	// Repairing the file restores service with no restart.
+	if err := os.WriteFile(path, []byte(`[{"kind":"email","value":"alpha@corp.example"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Permits(inDomain) {
+		t.Error("a repaired rule set did not take effect")
+	}
+	if rules.Summary().Unreadable {
+		t.Error("Summary still reports the repaired rule set as unreadable")
 	}
 }

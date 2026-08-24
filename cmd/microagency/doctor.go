@@ -322,6 +322,11 @@ func reportFederatedSignIn(out io.Writer, posture authPosture, optedUp []string,
 		if inert := auth.InertAudienceRules(true, audienceRules); inert != "" {
 			fmt.Fprintf(out, "                    ⚠ %s configured but not applied — every account at the issuer is admitted\n", inert)
 		}
+	case audienceRules.Unreadable:
+		// Sign-in fails closed here, so the page must not render the hosted
+		// domain alone as though it were still the whole audience.
+		fmt.Fprintf(out, "    audience        ⚠ %s\n", audience)
+		fmt.Fprintf(out, "                    repair or remove %s\n", ssoAudienceRulesPath(""))
 	case posture.SSOHostedDomain == "" && audienceRules.Total() == 0:
 		// Reachable only by removing every rule from a running gateway that had
 		// no other bound: a start in this state is refused. Nobody can sign in,

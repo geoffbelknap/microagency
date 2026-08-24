@@ -332,6 +332,11 @@ func (a *AudienceRules) writeLocked(rules []AudienceRule) error {
 type AudienceSummary struct {
 	Groups     int `json:"groups"`
 	Identities int `json:"identities"`
+	// Unreadable records that the rule file exists but could not be parsed.
+	// Sign-in fails closed in that state, so every surface describing the
+	// audience has to say so rather than render the remaining bounds as if
+	// they were the whole story.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // Total reports how many rules bound the audience.
@@ -340,6 +345,9 @@ func (s AudienceSummary) Total() int { return s.Groups + s.Identities }
 // String renders the summary for a human, pluralized and omitting kinds that
 // have no rules: "2 groups", "1 identity", "2 groups + 1 identity".
 func (s AudienceSummary) String() string {
+	if s.Unreadable {
+		return "an unreadable rule set"
+	}
 	var parts []string
 	if s.Groups > 0 {
 		parts = append(parts, plural(s.Groups, "group", "groups"))
@@ -367,7 +375,7 @@ func plural(n int, one, many string) string {
 func (a *AudienceRules) Summary() AudienceSummary {
 	rules, err := a.List()
 	if err != nil {
-		return AudienceSummary{}
+		return AudienceSummary{Unreadable: true}
 	}
 	var s AudienceSummary
 	for _, rule := range rules {
@@ -381,23 +389,35 @@ func (a *AudienceRules) Summary() AudienceSummary {
 	return s
 }
 
+// Match reports whether any rule matches this validated identity, how many
+// rules were considered, and any error reading them.
+//
+// The count and the error are returned separately on purpose. An unreadable
+// rule set is not an empty one, and a caller that cannot tell them apart will
+// treat "I could not read the bounds" as "there are no bounds" — which widens
+// the audience at exactly the moment the operator can least see it.
+func (a *AudienceRules) Match(id *FederatedIdentity) (matched bool, count int, err error) {
+	if a == nil || id == nil {
+		return false, 0, nil
+	}
+	rules, err := a.List()
+	if err != nil {
+		return false, 0, err
+	}
+	for _, rule := range rules {
+		if rule.matches(id) {
+			return true, len(rules), nil
+		}
+	}
+	return false, len(rules), nil
+}
+
 // Permits reports whether any rule matches this validated identity. An empty
 // rule set matches nothing — it is the caller's job to know whether the
 // audience is bounded some other way.
 func (a *AudienceRules) Permits(id *FederatedIdentity) bool {
-	if a == nil || id == nil {
-		return false
-	}
-	rules, err := a.List()
-	if err != nil {
-		return false
-	}
-	for _, rule := range rules {
-		if rule.matches(id) {
-			return true
-		}
-	}
-	return false
+	matched, _, err := a.Match(id)
+	return matched && err == nil
 }
 
 func (r AudienceRule) matches(id *FederatedIdentity) bool {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -322,8 +323,17 @@ func (f *Federation) Permits(id *FederatedIdentity) bool {
 	if f.cfg.AnyAccount {
 		return true
 	}
-	if f.cfg.Audience.Summary().Total() > 0 {
-		return f.cfg.Audience.Permits(id)
+	matched, count, err := f.cfg.Audience.Match(id)
+	if err != nil {
+		// An unreadable rule set must not decay into a weaker bound. Falling
+		// back to the hosted domain here would quietly turn "the domain AND
+		// these rules" into "the domain", so the sign-in is refused instead
+		// and doctor reports the rule set as unreadable.
+		slog.Error("sso audience rules unreadable; refusing sign-in", "err", err)
+		return false
+	}
+	if count > 0 {
+		return matched
 	}
 	return f.cfg.HostedDomain != ""
 }
@@ -342,6 +352,8 @@ func DescribeAudience(issuer, hostedDomain string, anyAccount bool, rules Audien
 	switch {
 	case anyAccount:
 		return "any account at " + issuer
+	case rules.Unreadable:
+		return "UNDECLARED — the audience rule set is unreadable, so no account can sign in"
 	case hostedDomain != "" && rules.Total() > 0:
 		return "accounts with hd=" + hostedDomain + " that also match " + rules.String()
 	case hostedDomain != "":
