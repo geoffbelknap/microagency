@@ -53,15 +53,22 @@ var ErrCustodyConflict = errors.New("secretstore: the configured data-key custod
 // which keyring identifiers its record uses. The format tag, Keychain service,
 // and Secret Service attribute are a compatibility surface: changing one
 // orphans every existing record.
-// hostRunner overrides how this package runs keyring tools and protector
-// helpers. Production leaves it nil, which means custody.Run. Tests set it so a
-// unit test's answer never depends on — and never touches — the keyring of
-// whoever happens to be running it.
-var hostRunner custody.Runner
+// newProtector builds the protector a manifest names. Production asks custody
+// for the real one; this is the single point every protector in this package is
+// built through, so nothing can quietly reach a real keyring around it.
+//
+// It is a variable so tests can supply a stand-in. The zero-configuration path
+// is what every standalone install takes, and it has to be covered on a build
+// machine with no desktop keyring — which is most of them. Seaming the *runner*
+// underneath is not enough: custody looks for `secret-tool` on PATH, and for
+// /usr/bin/security, before it ever runs anything, so a headless host fails at
+// construction and a runner stand-in is never consulted.
+var newProtector = func(records custody.Records, m custody.Manifest, getenv func(string) string, file custody.Protector) (custody.Protector, error) {
+	return records.New(m, getenv, file)
+}
 
 func keyRecords(stateDir string) custody.Records {
 	return custody.Records{
-		Runner:     hostRunner,
 		Path:       filepath.Join(stateDir, CustodyFile),
 		Format:     keyCustodyFormat,
 		Noun:       "credential-store key custody",
@@ -224,7 +231,7 @@ func resolveKeySource(stateDir string, getenv func(string) string, allowPlaintex
 		return nil, fmt.Errorf("%w: %v", ErrProtectorUnavailable, err)
 	}
 
-	p, err := records.New(manifest, getenv, &keyFileProtector{stateDir: stateDir, path: keyFile})
+	p, err := newProtector(records, manifest, getenv, &keyFileProtector{stateDir: stateDir, path: keyFile})
 	if err != nil {
 		if manifest.Protected() {
 			return nil, fmt.Errorf("%w: %s: %v", ErrProtectorUnavailable, custody.Label(manifest.Kind), err)
@@ -276,7 +283,7 @@ func InspectAutoProtector(ctx context.Context, stateDir string, getenv func(stri
 	a := AutoProtector{Kind: kind, Label: custody.Label(kind)}
 	records := keyRecords(stateDir)
 	manifest := custody.Manifest{Format: keyCustodyFormat, Kind: kind, ID: custody.ID(stateDir)}
-	p, err := records.New(manifest, getenv, nil)
+	p, err := newProtector(records, manifest, getenv, nil)
 	if err != nil {
 		a.Detail = err.Error()
 		return a
@@ -315,7 +322,7 @@ func autoKeySource(stateDir string, records custody.Records, getenv func(string)
 		return nil
 	}
 	manifest := custody.Manifest{Format: keyCustodyFormat, Kind: auto.Kind, ID: custody.ID(stateDir)}
-	p, err := records.New(manifest, getenv, nil)
+	p, err := newProtector(records, manifest, getenv, nil)
 	if err != nil {
 		return nil
 	}
@@ -558,7 +565,7 @@ func DeleteKeyCustody(ctx context.Context, stateDir string, getenv func(string) 
 	if !manifest.Protected() {
 		return nil
 	}
-	p, err := records.New(manifest, func(name string) string {
+	p, err := newProtector(records, manifest, func(name string) string {
 		if name == ProtectorCommandEnv && manifest.Command != "" {
 			return manifest.Command
 		}
@@ -613,7 +620,7 @@ func MigrateKeyCustody(ctx context.Context, stateDir string, getenv func(string)
 	}
 
 	file := &keyFileProtector{stateDir: stateDir, path: keyFile}
-	source, err := records.New(sourceManifest, func(name string) string {
+	source, err := newProtector(records, sourceManifest, func(name string) string {
 		if name == ProtectorCommandEnv && sourceManifest.Command != "" {
 			return sourceManifest.Command
 		}
@@ -635,7 +642,7 @@ func MigrateKeyCustody(ctx context.Context, stateDir string, getenv func(string)
 	if targetKind == custody.KindCommand {
 		targetManifest.Command = targetCommand
 	}
-	targetProtector, err := records.New(targetManifest, getenv, file)
+	targetProtector, err := newProtector(records, targetManifest, getenv, file)
 	if err != nil {
 		return fmt.Errorf("open target protector: %w", err)
 	}

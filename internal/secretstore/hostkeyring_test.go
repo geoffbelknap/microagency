@@ -3,64 +3,106 @@ package secretstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"microagency/internal/custody"
 )
 
-// withoutHostKeyring makes this host's own keyring answer as unreachable, so a
-// test that is about the refusal path gets the refusal on every machine — a
-// developer laptop with an unlocked login keyring included.
+// The zero-configuration path is what every standalone install takes, so it has
+// to be covered on a build machine with no desktop keyring. These tests supply a
+// stand-in protector for that reason: what is under test is microagency's
+// selection, creation, recording, and refusal logic, none of which is a property
+// of Keychain or the Secret Service. The real backends are exercised by
+// TestZeroConfigurationOnTheRealHostKeyring below, and by custody's own tests.
+
+// fakeProtector is a protected protector with no host behind it. It answers the
+// same three ways a real keyring does: with the record, with "nothing stored
+// yet", or with a failure.
+type fakeProtector struct {
+	kind    string
+	value   []byte
+	failure error
+	saves   int
+}
+
+func (p *fakeProtector) Kind() string    { return p.kind }
+func (p *fakeProtector) Protected() bool { return true }
+
+func (p *fakeProtector) Load(context.Context) ([]byte, error) {
+	if p.failure != nil {
+		return nil, p.failure
+	}
+	if p.value == nil {
+		return nil, custody.ErrNotFound
+	}
+	return bytes.Clone(p.value), nil
+}
+
+func (p *fakeProtector) Save(_ context.Context, record []byte) error {
+	if p.failure != nil {
+		return p.failure
+	}
+	p.value = bytes.Clone(record)
+	p.saves++
+	return nil
+}
+
+func (p *fakeProtector) Delete(context.Context) error {
+	if p.failure != nil {
+		return p.failure
+	}
+	p.value = nil
+	return nil
+}
+
+// withHostKeyring puts an empty, reachable stand-in where the host keyring would
+// be, and returns it so a test can see what was stored through it.
+func withHostKeyring(t *testing.T) *fakeProtector {
+	t.Helper()
+	requireHostKeyringConcept(t)
+	fake := &fakeProtector{}
+	prev := newProtector
+	newProtector = func(records custody.Records, m custody.Manifest, getenv func(string) string, file custody.Protector) (custody.Protector, error) {
+		// The operator's own key file is plain filesystem work and behaves the
+		// same everywhere, so it stays real: a test about precedence should be
+		// comparing against the actual key-file protector, not a second fake.
+		if m.Kind == custody.KindFile {
+			return records.New(m, getenv, file)
+		}
+		fake.kind = m.Kind
+		return fake, nil
+	}
+	t.Cleanup(func() { newProtector = prev })
+	return fake
+}
+
+// withoutHostKeyring makes the host keyring answer as unreachable — no keyring
+// tool installed, no session bus, a locked collection. All three arrive here as
+// a construction failure, which is what a headless machine actually produces.
 func withoutHostKeyring(t *testing.T) {
 	t.Helper()
-	prev := hostRunner
-	hostRunner = func(context.Context, []byte, string, ...string) custody.Result {
-		return custody.Result{ExitCode: 1, Stderr: []byte("no session bus")}
-	}
-	t.Cleanup(func() { hostRunner = prev })
-}
-
-// withHostKeyring makes this host's own keyring answer as an empty, reachable
-// one, so the auto-selected posture is exercised on every machine.
-func withHostKeyring(t *testing.T) *map[string][]byte {
-	t.Helper()
-	stored := map[string][]byte{}
-	prev := hostRunner
-	hostRunner = func(_ context.Context, stdin []byte, _ string, args ...string) custody.Result {
-		switch {
-		case len(args) > 0 && (args[0] == "store" || args[0] == "add-generic-password"):
-			stored["k"] = stdin
-			return custody.Result{}
-		case len(args) > 0 && (args[0] == "lookup" || args[0] == "find-generic-password"):
-			v, ok := stored["k"]
-			if !ok {
-				return custody.Result{ExitCode: 1} // secret-tool "absent" shape
-			}
-			return custody.Result{Stdout: v}
-		default:
-			return custody.Result{}
+	prev := newProtector
+	newProtector = func(records custody.Records, m custody.Manifest, getenv func(string) string, file custody.Protector) (custody.Protector, error) {
+		if m.Kind == custody.KindFile {
+			return records.New(m, getenv, file)
 		}
+		return nil, errors.New("linux Secret Service protector requires secret-tool (libsecret-tools/libsecret)")
 	}
-	t.Cleanup(func() { hostRunner = prev })
-	return &stored
+	t.Cleanup(func() { newProtector = prev })
 }
 
-// A host that offers no usable keyring must still reach the plaintext gate, and
-// must not write a key beside the ciphertext to avoid it.
-func TestNoUsableHostKeyringRefusesRatherThanKeyingBesideTheData(t *testing.T) {
-	withoutHostKeyring(t)
-	dir := t.TempDir()
-	if _, err := Open(dir, func(string) string { return "" }, Options{}); err == nil {
-		t.Fatal("a host with no usable keyring started anyway")
-	}
-	auto := InspectAutoProtector(context.Background(), dir, func(string) string { return "" })
-	if auto.Available {
-		t.Fatalf("keyring reported available with no runner behind it: %+v", auto)
-	}
-	if auto.Detail == "" {
-		t.Fatal("an unavailable keyring must say why")
+// requireHostKeyringConcept fails rather than skips on a platform where
+// microagency names no default keyring at all. Linux and macOS both do, and they
+// are what this ships on; anywhere else the stand-in would never be reached and
+// a silent skip would hide that the test proved nothing.
+func requireHostKeyringConcept(t *testing.T) {
+	t.Helper()
+	if autoProtectorKind() == "" {
+		t.Fatalf("no default host keyring is defined for %s, so the zero-configuration path cannot be exercised here", runtime.GOOS)
 	}
 }
 
@@ -68,7 +110,7 @@ func TestNoUsableHostKeyringRefusesRatherThanKeyingBesideTheData(t *testing.T) {
 // file. The store must come up encrypted, under a key the host keyring holds,
 // and the locator must record that so the next start does not re-decide.
 func TestZeroConfigurationEncryptsUnderTheHostKeyring(t *testing.T) {
-	withHostKeyring(t)
+	fake := withHostKeyring(t)
 	dir := t.TempDir()
 	none := func(string) string { return "" }
 
@@ -86,8 +128,16 @@ func TestZeroConfigurationEncryptsUnderTheHostKeyring(t *testing.T) {
 	if !f.KeyCreated() {
 		t.Fatal("the first start did not report generating the data key")
 	}
+	if fake.saves == 0 || len(fake.value) == 0 {
+		t.Fatal("nothing was stored through the protector")
+	}
 	if err := store.Save(context.Background(), "probe", []byte("v")); err != nil {
 		t.Fatal(err)
+	}
+	// The key is the protector's, not the state directory's. A copy of the
+	// directory alone must not be able to open this store.
+	if bytes.Contains(readFile(t, StorePath(dir)), fake.value) {
+		t.Fatal("the data key was written into the state directory beside the ciphertext")
 	}
 
 	// The second start retrieves the same key through the recorded locator and
@@ -105,13 +155,42 @@ func TestZeroConfigurationEncryptsUnderTheHostKeyring(t *testing.T) {
 	}
 }
 
+// A host that offers no usable keyring must still reach the plaintext gate, and
+// must not write a key beside the ciphertext to avoid refusing.
+func TestNoUsableHostKeyringRefusesRatherThanKeyingBesideTheData(t *testing.T) {
+	withoutHostKeyring(t)
+	dir := t.TempDir()
+	none := func(string) string { return "" }
+
+	if _, err := Open(dir, none, Options{}); !errors.Is(err, ErrPlaintextNotAllowed) {
+		t.Fatalf("want ErrPlaintextNotAllowed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, CustodyFile)); !os.IsNotExist(err) {
+		t.Fatalf("a refused start recorded a locator anyway: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a refused start left state behind: %v", entries)
+	}
+
+	auto := InspectAutoProtector(context.Background(), dir, none)
+	if auto.Available {
+		t.Fatalf("keyring reported available with nothing behind it: %+v", auto)
+	}
+	if auto.Detail == "" {
+		t.Fatal("an unavailable keyring must say why")
+	}
+}
+
 // Auto-selection is what happens when the operator has said nothing. Every
 // explicit choice outranks it, and an already-encrypted store is never re-keyed
 // under a keyring on the strength of a setting that went missing.
 func TestHostKeyringNeverOverridesAnExplicitChoice(t *testing.T) {
-	withHostKeyring(t)
-
 	t.Run("plaintext opt-in", func(t *testing.T) {
+		fake := withHostKeyring(t)
 		store, err := Open(t.TempDir(), func(string) string { return "" }, Options{AllowPlaintext: true})
 		if err != nil {
 			t.Fatal(err)
@@ -119,10 +198,13 @@ func TestHostKeyringNeverOverridesAnExplicitChoice(t *testing.T) {
 		if store.Kind() != KindFile {
 			t.Fatalf("the explicit unencrypted opt-in was overridden: kind = %q", store.Kind())
 		}
+		if fake.saves != 0 {
+			t.Fatal("a key was put in the keyring for a deployment that opted out of encryption")
+		}
 	})
 
 	t.Run("operator key file", func(t *testing.T) {
-		dir := t.TempDir()
+		fake := withHostKeyring(t)
 		keyFile := writeKeyFile(t, bytes.Repeat([]byte{7}, 32))
 		env := func(name string) string {
 			if name == FileKeyEnv {
@@ -130,18 +212,22 @@ func TestHostKeyringNeverOverridesAnExplicitChoice(t *testing.T) {
 			}
 			return ""
 		}
-		store, err := Open(dir, env, Options{})
+		store, err := Open(t.TempDir(), env, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := store.(*File).KeyCustody(); got != custody.KindFile {
 			t.Fatalf("the operator's key file was overridden: custody = %q", got)
 		}
+		if fake.saves != 0 {
+			t.Fatal("a second key was put in the keyring beside the operator's own")
+		}
 	})
 
 	t.Run("already-encrypted store with no setting", func(t *testing.T) {
+		fake := withHostKeyring(t)
 		dir := t.TempDir()
-		keyFile := writeKeyFile(t, bytes.Repeat([]byte{7}, 32))
+		keyFile := writeKeyFile(t, bytes.Repeat([]byte{9}, 32))
 		withKey := func(name string) string {
 			if name == FileKeyEnv {
 				return keyFile
@@ -159,6 +245,9 @@ func TestHostKeyringNeverOverridesAnExplicitChoice(t *testing.T) {
 		// existing credentials permanently unreadable.
 		if _, err := Open(dir, func(string) string { return "" }, Options{}); err == nil {
 			t.Fatal("an encrypted store was re-keyed under the host keyring")
+		}
+		if fake.saves != 0 {
+			t.Fatal("a key was minted over ciphertext it cannot open")
 		}
 	})
 }
@@ -193,4 +282,53 @@ func TestProtectedCustodyAlwaysLeavesALocator(t *testing.T) {
 	if _, err := os.Stat(locator); err != nil {
 		t.Fatalf("a start that found an existing key recorded no locator: %v", err)
 	}
+}
+
+// TestZeroConfigurationOnTheRealHostKeyring runs the same path against the
+// keyring this machine actually has. It is the only test in this file that needs
+// one; the others prove the same behavior with a stand-in, so a machine without
+// a keyring still gets the coverage.
+func TestZeroConfigurationOnTheRealHostKeyring(t *testing.T) {
+	dir := t.TempDir()
+	none := func(string) string { return "" }
+	ctx := context.Background()
+
+	if auto := InspectAutoProtector(ctx, dir, none); !auto.Available {
+		t.Skipf("no reachable host keyring here (%s: %s); the stand-in tests in this file cover the same path",
+			CustodyLabel(autoProtectorKind()), auto.Detail)
+	}
+	// Whatever this leaves in a real keyring is removed again, pass or fail.
+	t.Cleanup(func() {
+		if err := DeleteKeyCustody(context.Background(), dir, none); err != nil {
+			t.Errorf("could not remove the data key this test put in the host keyring: %v", err)
+		}
+	})
+
+	store, err := Open(dir, none, Options{})
+	if err != nil {
+		t.Fatalf("zero-configuration start refused with a reachable keyring: %v", err)
+	}
+	if store.Kind() != KindEncryptedFile {
+		t.Fatalf("kind = %q, want %q", store.Kind(), KindEncryptedFile)
+	}
+	if err := store.Save(ctx, "probe", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(dir, none, Options{})
+	if err != nil {
+		t.Fatalf("second start refused: %v", err)
+	}
+	got, err := again.Load(ctx, "probe")
+	if err != nil || string(got) != "v" {
+		t.Fatalf("the real keyring did not return a key that reopens the store: %q %v", got, err)
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

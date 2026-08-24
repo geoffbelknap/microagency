@@ -3,12 +3,39 @@ package app
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"microagency/internal/secretstore"
 )
+
+// withLocalProtector points the credential store's data key at a helper script
+// in a temp directory.
+//
+// Without it, a build with no opt-in resolves to whatever keyring the machine
+// running the test happens to have: a developer desktop encrypts (and leaves a
+// key in that developer's real keyring), while a headless build machine refuses.
+// A test that takes a different code path in the two places is not testing the
+// same thing in the two places, and the build machine is the one that catches
+// regressions.
+func withLocalProtector(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir() // 0700, so it satisfies the helper's substitution checks
+	key := filepath.Join(dir, "key")
+	helper := filepath.Join(dir, "protector")
+	script := "#!/bin/sh\ncase \"$1\" in\n" +
+		"  put) cat > " + key + " ;;\n" +
+		"  get) [ -f " + key + " ] || exit 3; cat " + key + " ;;\n" +
+		"  delete) rm -f " + key + " ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(secretstore.ProtectorEnv, "command")
+	t.Setenv(secretstore.ProtectorCommandEnv, helper)
+}
 
 // The default reduce engine is "the first one registered", so registration order
 // must be deterministic (not Go map iteration) and must prefer jq. These pin both.
@@ -61,37 +88,49 @@ func TestBuildServerFromConfig(t *testing.T) {
 }
 
 // A bad --engine spec is returned as an error, not an os.Exit — the whole point of
-// the importable seam.
+// the importable seam. The store has to open for the build to reach engine
+// parsing at all, so this names a protector: otherwise the credential gate
+// returns first and the test passes without ever exercising what it describes.
 func TestBuildServerReturnsErrorOnBadEngineSpec(t *testing.T) {
-	if _, err := BuildServer(Config{StateDir: t.TempDir(), EngineSpecs: []string{"noequals"}}); err == nil {
+	withLocalProtector(t)
+	_, err := BuildServer(Config{StateDir: t.TempDir(), EngineSpecs: []string{"noequals"}})
+	if err == nil {
 		t.Fatal("a malformed --engine spec must return an error, not exit")
+	}
+	if errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
+		t.Fatalf("the build stopped at the credential gate, so the engine spec was never parsed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "noequals") {
+		t.Fatalf("the error does not name the malformed spec: %v", err)
 	}
 }
 
-// Without the opt-in, a build never lands on the unencrypted store — it either
-// encrypts under a data key something outside the state directory holds, or it
-// refuses. Which of the two depends on whether this host offers a keyring, so
-// the invariant, not the branch, is what is asserted here.
-func TestBuildServerNeverLandsOnPlaintextWithoutTheOptIn(t *testing.T) {
+// With a protector available and no opt-in, a build encrypts. It must never
+// reach the unencrypted store, and the record it writes must name the protector
+// holding the key.
+func TestBuildServerEncryptsWithoutAnOptIn(t *testing.T) {
+	withLocalProtector(t)
 	dir := t.TempDir()
-	_, err := BuildServer(Config{
+	if _, err := BuildServer(Config{
 		StateDir:       dir,
 		Version:        "test",
 		MaxInlineBytes: 8192,
 		WasmMaxMemMB:   512,
-	})
+	}); err != nil {
+		t.Fatalf("build refused with a reachable protector: %v", err)
+	}
+	p, err := secretstore.LoadPosture(dir)
 	if err != nil {
-		if !errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
-			t.Fatalf("build failed for some other reason: %v", err)
-		}
-		return
+		t.Fatal(err)
 	}
-	p, loadErr := secretstore.LoadPosture(dir)
-	if loadErr != nil {
-		t.Fatal(loadErr)
+	if p.Kind != secretstore.KindEncryptedFile {
+		t.Fatalf("credentials did not land in the encrypted store with no opt-in: %+v", p)
 	}
-	if p.Kind == secretstore.KindFile {
-		t.Fatalf("credentials landed in the clear with no opt-in: %+v", p)
+	if p.Degraded {
+		t.Fatalf("an encrypted store was recorded as degraded: %+v", p)
+	}
+	if p.KeyCustody == "" || !p.KeyCreated {
+		t.Fatalf("the record does not say who holds the key this build generated: %+v", p)
 	}
 }
 
