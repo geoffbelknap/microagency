@@ -110,7 +110,9 @@ func TestProtectorCommandProtocols(t *testing.T) {
 
 // TestPurposesDoNotCollide is the property that lets two consumers share one
 // keyring: distinct service names and attributes, so neither can read or
-// overwrite the other's record.
+// overwrite the other's record. It is what makes Purpose a contract rather
+// than a label, and it has to hold before a second consumer exists, not after
+// one has already overwritten the first one's key.
 func TestPurposesDoNotCollide(t *testing.T) {
 	ctx := context.Background()
 	var seen []string
@@ -119,9 +121,9 @@ func TestPurposesDoNotCollide(t *testing.T) {
 		return Result{}
 	}
 	a := &keyringProtector{kind: KindSecretService, binary: "/x", account: "same-id",
-		purpose: Purpose{Attribute: "openbao-bootstrap"}, run: runner}
-	b := &keyringProtector{kind: KindSecretService, binary: "/x", account: "same-id",
 		purpose: Purpose{Attribute: "secretstore-data-key"}, run: runner}
+	b := &keyringProtector{kind: KindSecretService, binary: "/x", account: "same-id",
+		purpose: Purpose{Attribute: "some-other-material"}, run: runner}
 	_ = a.Save(ctx, []byte("a"))
 	_ = b.Save(ctx, []byte("b"))
 	if seen[0] == seen[1] {

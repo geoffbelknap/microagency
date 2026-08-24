@@ -52,11 +52,13 @@ type Config struct {
 	// fallback. Without it, a build that would land there fails closed instead
 	// of persisting upstream credentials in the clear.
 	AllowPlaintextCredentials bool
-	// PreferredStore names the store the caller tried before this build (e.g.
-	// "managed OpenBao"), and PreferredStoreUnavailable says why it could not
-	// be used. Both feed the credential-store record and the fail-closed error,
-	// so an operator is told what was unavailable rather than only what was
-	// refused. Empty when nothing was tried first.
+	// PreferredStore names a store the caller resolved before this build, and
+	// PreferredStoreUnavailable says why it could not be used. Both feed the
+	// credential-store record and the fail-closed error, so an operator is told
+	// what was unavailable rather than only what was refused. Empty — the usual
+	// case — when the caller resolved nothing ahead of BuildServer and Open
+	// alone decides, which is when the recorded store cannot disagree with a
+	// configured one because there is no second opinion to disagree with.
 	PreferredStore, PreferredStoreUnavailable string
 }
 
@@ -94,12 +96,13 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 		Timeout:  6 * time.Minute,
 	}
 
-	// Acquired secrets (upstream OAuth refresh tokens) persist in OpenBao/Vault when
-	// VAULT_ADDR + VAULT_TOKEN are set. The file fallback is encrypted under a data
-	// key a protector supplies — an OS keyring, a KMS-backed helper, or an operator
-	// key file; the unencrypted form is a downgrade and needs
-	// AllowPlaintextCredentials, so a vault outage cannot quietly move credentials
-	// into the clear.
+	// Acquired secrets (upstream OAuth refresh tokens) persist in an external
+	// Vault/OpenBao when VAULT_ADDR + VAULT_TOKEN are set. Otherwise they go in
+	// the AES-256-GCM file store, under a data key a protector holds outside the
+	// state directory — a configured one, or the host's own keyring on an
+	// install that configures nothing. The unencrypted form is a downgrade and
+	// needs AllowPlaintextCredentials, so nothing here can quietly move
+	// credentials into the clear.
 	secStore, err := secretstore.Open(cfg.StateDir, os.Getenv, secretstore.Options{
 		AllowPlaintext: cfg.AllowPlaintextCredentials,
 		Client:         http.DefaultClient,
@@ -115,7 +118,7 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	// silent downgrade is the failure this closes: everything keeps working, so
 	// nothing prompts the second look that would find the credentials in the
 	// clear.
-	posture := resolvedPosture(cfg, secStore.Kind(), keyCustodyOf(secStore))
+	posture := resolvedPosture(cfg, secStore.Kind(), keyCustodyOf(secStore), keyCreatedBy(secStore))
 	if err := secretstore.SavePosture(cfg.StateDir, posture); err != nil {
 		slog.Warn("could not record the credential-store posture", "err", err)
 	}
@@ -126,6 +129,12 @@ func BuildServer(cfg Config) (*mcp.Server, error) {
 	case posture.Degraded:
 		slog.Warn("credential store is degraded", "in_effect", posture.Effective,
 			"encrypt_with", secretstore.ProtectorEnv+" or "+secretstore.FileKeyEnv)
+	case posture.KeyCreated:
+		// The one start that mints the key is the one an operator must be told
+		// about: it is the moment the store becomes unreadable without something
+		// that is not in the state directory.
+		slog.Info("credential store data key generated", "backend", posture.Effective,
+			"held_by", secretstore.CustodyLabel(posture.KeyCustody))
 	default:
 		slog.Info("credential store selected", "backend", posture.Effective)
 	}
@@ -213,25 +222,28 @@ func keyCustodyOf(store secretstore.Store) string {
 	return ""
 }
 
+// keyCreatedBy reports whether this open generated the store's data key. Only
+// an encrypted file store can; a vault holds no local key.
+func keyCreatedBy(store secretstore.Store) bool {
+	c, ok := store.(interface{ KeyCreated() bool })
+	return ok && c.KeyCreated()
+}
+
 // resolvedPosture turns the store that was actually opened, plus what the
 // caller tried first, into the non-secret record `doctor` reads.
-func resolvedPosture(cfg Config, kind, keyCustody string) secretstore.Posture {
+func resolvedPosture(cfg Config, kind, keyCustody string, keyCreated bool) secretstore.Posture {
 	effective := secretstore.DescribeStore(kind, keyCustody)
 	if kind == secretstore.KindVault {
-		// A vault store is reached either through a managed instance the caller
-		// brought up or through an operator-run one; only the caller knows
-		// which, and "OpenBao/Vault" alone would not tell an operator where to
-		// look.
+		// Every vault store is one the operator runs and points VAULT_ADDR at,
+		// and "OpenBao/Vault" alone would not tell them where to look.
 		effective = "external Vault/OpenBao (VAULT_ADDR)"
-		if cfg.PreferredStore != "" {
-			effective = cfg.PreferredStore
-		}
 	}
 	p := secretstore.Posture{
 		PID:        os.Getpid(),
 		Kind:       kind,
 		Effective:  effective,
 		KeyCustody: keyCustody,
+		KeyCreated: keyCreated,
 		Degraded:   kind == secretstore.KindFile,
 	}
 	if cfg.PreferredStore != "" && cfg.PreferredStore != effective {
@@ -252,7 +264,7 @@ func plaintextRefusal(cfg Config) error {
 			msg += fmt.Sprintf(" (%s)", cfg.PreferredStoreUnavailable)
 		}
 	}
-	msg += fmt.Sprintf("; restore that store, encrypt the fallback with %s or %s, or opt in with %s=1",
+	msg += fmt.Sprintf("; no OS keyring was available to hold a data key — set %s=command with a KMS or secret-manager helper, point %s at a key you hold, or opt in with %s=1",
 		secretstore.ProtectorEnv, secretstore.FileKeyEnv, secretstore.AllowPlaintextEnv)
 	return fmt.Errorf("%s: %w", msg, secretstore.ErrPlaintextNotAllowed)
 }

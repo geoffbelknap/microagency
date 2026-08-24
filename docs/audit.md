@@ -4,7 +4,7 @@ description: The signed, hash-chained log every call lands in, and how to verify
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-22_
+_Last updated: 2026-08-24_
 
 Every discovery, proxied call, and reduction is written to an append-only
 audit log. Each line is hash-chained to its predecessor and **signed** (ES256)
@@ -93,12 +93,13 @@ Every 64 appends or so, microagency records the log's height and head hash,
 signed, in the **secret store**. Height is the chained line count.
 Verification then flags a log shorter than its anchor as truncated.
 
-This is strongest when the secret store is OpenBao or Vault, where a log-file
-attacker cannot reach the anchor. The encrypted file fallback prevents an
-attacker who has only `~/.microagency` from reading or forging the anchor, because
-its key is held separately. It cannot prevent replay of a previously copied,
-valid ciphertext. The opted-in unencrypted fallback keeps the anchor readable
-on the same disk. The signature detects edits, but not replay of an older valid
+This is strongest when the secret store is an external Vault or OpenBao, where
+a log-file attacker cannot reach the anchor. The encrypted file store, which is
+what an install that configures nothing gets, prevents an attacker who has only
+`~/.microagency` from reading or forging the anchor, because its data key is
+held elsewhere. It cannot prevent replay of a previously copied, valid
+ciphertext. The opted-in unencrypted store keeps the anchor readable on the
+same disk. The signature detects edits, but not replay of an older valid
 anchor. The residual window under the normal posture is the 64 most-recent lines
 since the last anchor.
 

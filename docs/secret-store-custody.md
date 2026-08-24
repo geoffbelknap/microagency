@@ -4,7 +4,7 @@ description: Keep the encrypted credential store's data key out of the gateway s
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 The encrypted credential store holds upstream OAuth refresh tokens, static
 bearers, and stored client registrations under AES-256-GCM. That cipher needs a
@@ -25,8 +25,33 @@ microagency secret-store status
 microagency doctor
 ```
 
-On the first start with a protector configured, microagency generates the data
-key, stores it, and reads it back before using it. Later starts retrieve it.
+On the first start, microagency generates the data key, stores it through the
+protector, and reads it back before using it. Later starts retrieve it.
+
+### This host's own keychain (the default)
+
+Configure nothing and microagency uses the keychain your host already has —
+macOS Keychain on a Mac, the Linux Secret Service elsewhere:
+
+```sh
+microagency up
+```
+
+It picks this only when you have configured nothing else. Every setting below
+outranks it, so does `--allow-plaintext-credentials`, and it is never chosen
+over a store that is already encrypted. The first start records the choice in
+`credential-key-custody.json`, and later starts follow that record instead of
+deciding again.
+
+On a host with no keychain at all — a headless server, a container, a locked
+session — startup refuses rather than picking a lesser store for you. It will
+not write a key file beside the ciphertext to avoid that: a key sitting next to
+what it opens protects nothing. Configure a `command` protector, place a key
+file yourself, or accept the unencrypted store deliberately.
+
+The two sections below describe the same keychains under an explicit setting.
+Set one when you want the choice recorded in your configuration rather than
+inferred, or when you are moving an existing deployment onto a keychain.
 
 ### macOS Keychain
 
@@ -188,13 +213,72 @@ microagency secret-store migrate --to file --allow-degraded
 It refuses if that path already holds a different key, which may be the only
 copy of some other store's key.
 
+## Upgrading from a managed OpenBao
+
+Earlier versions could start and supervise an OpenBao of their own, keeping
+microagency's secrets in it. This version does not, and it cannot start one to
+read what is in it. If your credentials live in a managed instance, pick one of
+these **before** you upgrade.
+
+**Keep the credentials.** The managed instance stored them in KV v2 under
+`secret/microagency/`, which is exactly what `VAULT_ADDR` reads. Run that same
+OpenBao yourself and nothing has to move:
+
+```sh
+microagency down                                  # on the older version
+bao server -config=~/.microagency/openbao/bao.hcl &
+bao operator unseal <unseal key>
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=<a token with access to secret/microagency/*>
+microagency up                                    # on this version
+```
+
+The unseal key and the AppRole credentials are in the bootstrap record the
+older version kept. Same-disk custody put it in
+`~/.microagency/openbao/bootstrap.json` as `unseal_key`, `role_id`, and
+`secret_id`. Protected custody put it in the provider named by
+`~/.microagency/openbao/custody.json`; retrieve it from there the way that
+provider is normally read. `bao write auth/approle/login role_id=… secret_id=…`
+exchanges those for a token, or use any token of your own with access to the
+same path.
+
+Once `microagency doctor` reports the external store, the instance is yours to
+keep, move, or replace. Treat it as any other Vault from then on.
+
+**Start clean.** Upgrade, let the gateway open its encrypted file store, and
+re-authorize each connection from the console. Connections, their scopes, their
+parameters, and their ownership are non-secret and survive in
+`~/.microagency/upstreams.json`; only the tokens have to be acquired again.
+
+There is no automatic conversion between the two. Reading a managed instance
+requires unsealing it, and unsealing it requires the material only you can
+retrieve.
+
+### Removing what the managed instance left behind
+
+Do this after the new store is working, not before.
+
+`~/.microagency/openbao/` is inert on this version and can be deleted once you
+no longer need the data in it. If you used protected custody, its record is
+still in your keychain or KMS, and this version does not know it exists —
+`purge --full` will not remove it. Delete it yourself:
+
+```sh
+security delete-generic-password -s microagency.openbao          # macOS
+secret-tool clear application microagency purpose openbao-bootstrap  # Linux
+```
+
+For a `command` protector, run your helper's own delete with the record ID from
+`~/.microagency/openbao/custody.json`.
+
 ## Backup and recovery
 
 Back up two things separately, because either alone is useless:
 
 1. `~/.microagency` — the encrypted store and the non-secret locator.
 2. The data key, through the Keychain, Secret Service, or your helper's
-   provider.
+   provider. This is the half you have to go and get: microagency generated it
+   for you if you configured nothing, so it is easy to forget it exists.
 
 A usable restore needs both, plus a protector that is available and unlocked.
 Run `microagency secret-store status`, then `microagency up`. If the protector

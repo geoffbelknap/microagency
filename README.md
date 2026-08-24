@@ -46,17 +46,18 @@ connected. Any other client works the same way: paste
 a token.
 
 To stop, `microagency down`. To disconnect a client,
-`claude mcp remove microagency`. `microagency restart` bounces the server
-(keeping its secret store up), and `microagency purge` deletes your local state
+`claude mcp remove microagency`. `microagency restart` bounces the server with
+new flags, and `microagency purge` deletes your local state
 (add `--full` to wipe everything; both confirm first).
 
 Your upstream credentials stay in the gateway's secret store and never enter
-the agent's configuration or context. OpenBao/Vault is preferred, and managed
-OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
-is unavailable, the local fallback is encrypted when you supply a separate key.
-Without one, `up` refuses to start rather than keep credentials in an
-unencrypted file; `--allow-plaintext-credentials` accepts that posture
-explicitly, and `doctor` reports it as degraded.
+the agent's configuration or context. With no configuration at all, `up`
+encrypts that store with AES-256-GCM under a data key it generates and keeps
+in this host's own keychain — the macOS login Keychain, or the Linux Secret
+Service. A copy of `~/.microagency` is not a copy of your credentials. Point
+`VAULT_ADDR` at a Vault or OpenBao you run and it uses that instead. On a host
+with no keychain, `up` refuses to start rather than keep credentials in an
+unencrypted file, and names every way forward.
 See [where credentials live](docs/connect-clients.md#where-credentials-live).
 
 Building from source instead: clone the repo, `make build`, `./microagency

@@ -300,6 +300,7 @@ func TestOpenRejectsPartialVaultConfig(t *testing.T) {
 // come up must not be able to move credentials into the clear on its own; that
 // takes an operator saying so.
 func TestOpenRefusesPlaintextWithoutOptIn(t *testing.T) {
+	withoutHostKeyring(t) // the host keyring, where there is one, encrypts instead
 	dir := t.TempDir()
 	if _, err := Open(dir, func(string) string { return "" }, Options{}); !errors.Is(err, ErrPlaintextNotAllowed) {
 		t.Fatalf("plaintext fallback was selected without an opt-in: %v", err)
@@ -370,7 +371,7 @@ func TestPostureRecordRoundTripsAndHoldsNoSecret(t *testing.T) {
 	dir := t.TempDir()
 	want := Posture{
 		PID: 1234, Kind: KindFile, Effective: "unencrypted mode-0600 file",
-		Configured: "managed OpenBao", Reason: "port held by another process", Degraded: true,
+		Configured: "external Vault/OpenBao (VAULT_ADDR)", Reason: "it did not answer", Degraded: true,
 	}
 	if err := SavePosture(dir, want); err != nil {
 		t.Fatal(err)

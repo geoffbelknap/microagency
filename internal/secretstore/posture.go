@@ -41,6 +41,10 @@ type Posture struct {
 	// keyring is locked after a reboot needs to know which one to unlock, and
 	// "encrypted-file" alone does not say.
 	KeyCustody string `json:"key_custody,omitempty"`
+	// KeyCreated marks the run that generated the data key. It describes this
+	// run only, so the start that first put a key in a protector can say so and
+	// every later start does not repeat it.
+	KeyCreated bool   `json:"key_created,omitempty"`
 	Recorded   string `json:"recorded"`
 }
 

@@ -4,7 +4,7 @@ description: Install microagency, connect a client, and add your first servers.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-12_
+_Last updated: 2026-08-24_
 
 ## Install and start
 
@@ -20,18 +20,30 @@ other client works the same way: paste the URL and approve once. You never
 copy, type, or store a token.
 
 To stop, `microagency down`. To disconnect a client,
-`claude mcp remove microagency`. `microagency restart` bounces the server
-(keeping its secret store up), and `microagency purge` deletes your local
+`claude mcp remove microagency`. `microagency restart` bounces the server with
+new flags, and `microagency purge` deletes your local
 state (add `--full` to wipe everything; both confirm first).
 [Operating the gateway](operations.md) covers the full CLI surface.
 
 Your upstream credentials stay in the gateway's secret store and never enter
-the agent's configuration or context. OpenBao/Vault is preferred, and managed
-OpenBao can keep its own bootstrap in an OS keychain or KMS helper. If OpenBao
-is unavailable, the local fallback is encrypted when you supply a separate key.
-Without one, `up` refuses to start rather than keep credentials in an
-unencrypted file; `--allow-plaintext-credentials` accepts that posture
-explicitly, and `doctor` reports it as degraded.
+the agent's configuration or context. On a fresh machine you configure nothing.
+The first `up` generates an AES-256-GCM data key and encrypts the store with
+it, keeping the key in this host's own keychain — the macOS login Keychain, or
+the Linux Secret Service. It says so when it does:
+
+```
+    Credentials    AES-256-GCM file store (data key: Linux Secret Service)
+                   data key generated in your Linux Secret Service — back it up; nothing in
+                   ~/.microagency can open this store without it
+```
+
+Back that key up. Nothing under `~/.microagency` can open the store without it,
+so a copy of that directory is not a copy of your credentials.
+
+Point `VAULT_ADDR` and `VAULT_TOKEN` at a Vault or OpenBao you run and the
+gateway uses that instead. On a host with no keychain — a headless server, a
+container, a locked session — `up` refuses to start rather than keep
+credentials in an unencrypted file, and names every way forward.
 See [where credentials live](connect-clients.md#where-credentials-live).
 
 ## Add your servers

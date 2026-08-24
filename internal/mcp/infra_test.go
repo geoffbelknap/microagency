@@ -94,7 +94,7 @@ func TestInfraHost(t *testing.T) {
 	}
 }
 
-// The file store is a fallback used only when OpenBao can't come up, so the
+// The unencrypted file store is reached only by an explicit opt-in, so the
 // secrets component warns (degraded posture) rather than reporting a healthy ok.
 func TestSecretsFileStoreWarns(t *testing.T) {
 	s := newTestServer(t, fakeRunner{})
