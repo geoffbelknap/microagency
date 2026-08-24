@@ -31,6 +31,20 @@ The guarantees, and where each one is enforced:
   short-lived per-user tokens derived from it stay inside the gateway,
   cached per caller and dropped when the connection is disabled or revoked.
   Nothing in the agent's config, context, or tool results can reveal them.
+- **A declared audience.** Federated sign-in never admits an unstated set of
+  people. Authenticating at a provider is not membership: a dedicated tenant's
+  issuer is a real boundary, a shared provider's is not, and the gateway cannot
+  tell them apart by looking. So `up --sso-issuer` refuses to start until the
+  operator declares who may sign in — the issuer itself
+  (`--sso-any-account`), a hosted domain (`--sso-hd`), a group the provider
+  asserts, or named identities. A domain and rules configured together must
+  both pass. An account outside the declared audience is refused during
+  sign-in, before any gateway token exists, so it never becomes a principal
+  with a tool surface, a credential scope, or an audit trail; the refusal names
+  the operator and never discloses who is admitted. The audience in effect is
+  stated in startup output and by `microagency doctor`, including when rules
+  are configured but cannot apply. See
+  [declaring the audience](public-mode.md#declaring-the-audience).
 - **Least privilege.** A connection can be read-only, narrowed to specific
   OAuth scopes, restricted to one user (`owner`), or held in the index as
   discovered — findable but not invocable until an operator enables it.

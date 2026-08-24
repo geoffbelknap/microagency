@@ -101,6 +101,8 @@ func main() {
 		runMediation(args[1:])
 	case "token":
 		runToken(args[1:])
+	case "sso-audience":
+		runSSOAudience(args[1:])
 	default:
 		// The usage dump never named the input, so "doctr" got 20 lines with
 		// zero occurrences of "doctr" and no suggestion — while an unknown
@@ -118,7 +120,7 @@ func main() {
 
 // commandNames is the dispatch set above, for suggestions — keep in step with
 // the switch.
-var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "secret-store", "hook", "mediation", "token"}
+var commandNames = []string{"help", "version", "up", "down", "restart", "purge", "doctor", "secret-store", "hook", "mediation", "token", "sso-audience"}
 
 // nearestCommand suggests the closest command: edit distance ≤ 2, or a
 // unique 3+ character prefix. Nonsense gets no confident wrong guess.
@@ -190,6 +192,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  microagency hook install  print the Claude Code egress-guard hook setup")
 	fmt.Fprintln(w, "  microagency mediation     configure or inspect enforced workspace mediation")
 	fmt.Fprintln(w, "  microagency token         manage named operator tokens for /admin and the console")
+	fmt.Fprintln(w, "  microagency sso-audience  manage who may sign in through federated sign-in")
 	fmt.Fprintln(w, "")
 	upFlags(w)
 }
@@ -220,7 +223,15 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --sso-client-id <id>  the OAuth client registered at the SSO provider for this gateway")
 	fmt.Fprintln(w, "    --sso-client-secret-file <path>  file holding that client's secret (or set")
 	fmt.Fprintln(w, "                          "+ssoClientSecretEnv+" once; stored in the secret store, never argv)")
-	fmt.Fprintln(w, "    --sso-hd <domain>     require the provider's hd (hosted domain) claim to equal <domain>")
+	fmt.Fprintln(w, "  federated sign-in must declare who may sign in — one or more of:")
+	fmt.Fprintln(w, "    --sso-any-account     every account at --sso-issuer may sign in. Right for a dedicated")
+	fmt.Fprintln(w, "                          tenant (your own Okta/Entra/Keycloak), where the issuer is the")
+	fmt.Fprintln(w, "                          membership boundary")
+	fmt.Fprintln(w, "    --sso-hd <domain>     require the provider's hd (hosted domain) claim to equal <domain>;")
+	fmt.Fprintln(w, "                          this is what bounds a shared provider to one organisation")
+	fmt.Fprintln(w, "    audience rules        admit a group the provider asserts, or named people, with")
+	fmt.Fprintln(w, "                          `microagency sso-audience allow group:<name>|email:<addr>|subject:<sub>`")
+	fmt.Fprintln(w, "    --sso-groups-claim <name>  ID-token claim carrying group membership (default "+auth.DefaultGroupsClaim+")")
 	fmt.Fprintln(w, "    --foreground          run attached instead of backgrounding")
 	fmt.Fprintln(w, "    --stdio               serve over stdin/stdout (client-spawned)")
 	fmt.Fprintln(w, "    --no-register         don't auto-register with Claude Code")
@@ -295,8 +306,14 @@ type upOptions struct {
 	// it arrives via MICROAGENCY_SSO_CLIENT_SECRET or --sso-client-secret-file
 	// and lives in the secret store.
 	ssoIssuer, ssoClientID, ssoClientSecretFile, ssoHD string
-	engineSpecs                                        []string
-	help                                               bool
+	// ssoAnyAccount declares the issuer itself to be the audience — the right
+	// answer for a dedicated tenant, where everyone who can authenticate is in
+	// the organisation. ssoGroupsClaim names the claim carrying group
+	// membership when the provider does not call it "groups".
+	ssoAnyAccount  bool
+	ssoGroupsClaim string
+	engineSpecs    []string
+	help           bool
 }
 
 func parseUpOptions(args []string) (upOptions, error) {
@@ -369,6 +386,11 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.reduceEnginesOnly = true
 		case args[i] == "--high-assurance-multi-user":
 			o.highAssuranceMultiUser = true
+		case args[i] == "--sso-any-account":
+			o.ssoAnyAccount = true
+		case args[i] == "--sso-groups-claim" && i+1 < len(args):
+			o.ssoGroupsClaim = args[i+1]
+			i++
 		case args[i] == "--single-user":
 			o.singleUser = true
 		case args[i] == "--allow-remote-admin":
@@ -464,8 +486,15 @@ func run(args []string) {
 		noRegister: noRegister, singleUser: o.singleUser, allowRemoteAdmin: o.allowRemoteAdmin,
 		ssoIssuer: o.ssoIssuer, ssoClientID: o.ssoClientID,
 		ssoClientSecretFile: o.ssoClientSecretFile, ssoHD: o.ssoHD,
+		ssoAnyAccount: o.ssoAnyAccount, ssoGroupsClaim: o.ssoGroupsClaim,
 	}
 	if err := validateHTTPConfig(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	// Checked here, before backgrounding, so the refusal lands on the terminal
+	// that asked rather than in a log the operator has yet to open.
+	if err := validateFederationAudience(cfg, ssoAudienceRules(cfg.authDir).Summary()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -962,6 +991,8 @@ type httpConfig struct {
 	ssoClientID                                      string // the gateway's OAuth client at the SSO provider
 	ssoClientSecretFile                              string // file holding that client's secret (stored in the secret store)
 	ssoHD                                            string // required hd (hosted domain) claim, enforced server-side
+	ssoAnyAccount                                    bool   // the issuer itself is the declared audience (dedicated tenant)
+	ssoGroupsClaim                                   string // ID-token claim carrying group membership (default "groups")
 	noRegister                                       bool
 	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
 	allowRemoteAdmin                                 bool // explicit acknowledgment of a non-loopback operator surface
@@ -1041,6 +1072,22 @@ func validateHTTPConfig(cfg httpConfig) error {
 	}
 	if cfg.ssoIssuer != "" && cfg.singleUser {
 		return fmt.Errorf("--sso-issuer and --single-user are mutually exclusive: federated sign-in makes each person a distinct principal, which is exactly what --single-user disclaims; drop one of them")
+	}
+	if cfg.ssoIssuer == "" {
+		if cfg.ssoAnyAccount {
+			return fmt.Errorf("--sso-any-account declares who may sign in through federated sign-in; it needs --sso-issuer, or drop the flag")
+		}
+		if cfg.ssoGroupsClaim != "" {
+			return fmt.Errorf("--sso-groups-claim names a claim in the identity provider's ID token; it needs --sso-issuer, or drop the flag")
+		}
+	}
+	// Both flags answer "who may sign in", and they answer it differently.
+	// Accepting both would leave the banner unable to state one audience, so
+	// the contradiction is refused rather than silently resolved.
+	if cfg.ssoAnyAccount && cfg.ssoHD != "" {
+		return fmt.Errorf("--sso-any-account and --sso-hd both declare the audience, and they disagree: --sso-any-account admits every account at %s, --sso-hd admits only accounts with hd=%s.\n"+
+			"  A dedicated tenant (the issuer is the membership boundary): keep --sso-any-account.\n"+
+			"  A shared provider bounded to one organisation: keep --sso-hd %s", cfg.ssoIssuer, cfg.ssoHD, cfg.ssoHD)
 	}
 	if cfg.tunnel == "" {
 		if cfg.singleUser {
@@ -1666,13 +1713,23 @@ func printManualConnect(url string) {
 
 // printSSOPosture describes federated built-in OAuth: where people sign in,
 // and that each provider account is its own principal.
-func printSSOPosture(cfg httpConfig) {
-	fmt.Fprintf(os.Stderr, "  Auth           Built-in OAuth; sign-in federated to %s\n", cfg.ssoIssuer)
-	if cfg.ssoHD != "" {
-		fmt.Fprintf(os.Stderr, "  Posture        multi-user — each provider account is a distinct principal (hd=%s required)\n", cfg.ssoHD)
-	} else {
-		fmt.Fprintln(os.Stderr, "  Posture        multi-user — each provider account is a distinct principal")
+func printSSOPosture(cfg httpConfig) { writeSSOPosture(os.Stderr, cfg) }
+
+func writeSSOPosture(w io.Writer, cfg httpConfig) {
+	fmt.Fprintf(w, "  Auth           Built-in OAuth; sign-in federated to %s\n", cfg.ssoIssuer)
+	// Who may sign in is the fact an operator most needs to see confirmed, so
+	// it is stated on every start rather than inferred from which flags were
+	// passed.
+	//
+	// Labelled "Admits", not "Audience": a tunnelled start already prints an
+	// Audience line carrying the OAuth protected-resource identifier, and two
+	// adjacent lines sharing a label while meaning different things is worse
+	// than either wording alone.
+	fmt.Fprintf(w, "  Admits         %s\n", describeSSOAudience(cfg))
+	if inert := auth.InertAudienceRules(cfg.ssoAnyAccount, ssoAudienceRules(cfg.authDir).Summary()); inert != "" {
+		fmt.Fprintf(w, "                 WARNING: %s configured but not applied — --sso-any-account admits every account at the issuer\n", inert)
 	}
+	fmt.Fprintln(w, "  Posture        multi-user — each provider account is a distinct principal")
 }
 
 func claudeAvailable() bool {
@@ -1790,7 +1847,11 @@ type authPosture struct {
 	// each provider account is a distinct principal.
 	SSOIssuer       string `json:"sso_issuer,omitempty"`
 	SSOHostedDomain string `json:"sso_hosted_domain,omitempty"`
-	UpdatedAt       string `json:"updated_at"`
+	// SSOAnyAccount records that the operator declared the issuer itself to be
+	// the audience, so doctor can tell that posture apart from one whose bound
+	// went missing.
+	SSOAnyAccount bool   `json:"sso_any_account,omitempty"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
@@ -1843,7 +1904,7 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 	}
 	posture := authPosture{
 		Mode: mode, Issuer: issuer, Resource: resource, Audience: audience, Tunnel: cfg.tunnel,
-		SSOIssuer: cfg.ssoIssuer, SSOHostedDomain: cfg.ssoHD,
+		SSOIssuer: cfg.ssoIssuer, SSOHostedDomain: cfg.ssoHD, SSOAnyAccount: cfg.ssoAnyAccount,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if cfg.tunnel != "" {

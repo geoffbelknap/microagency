@@ -247,6 +247,9 @@ func (s *Server) AdminHandler(opAuth OperatorAuth) http.Handler {
 	mux.HandleFunc("GET /admin/connection-templates", g(s.adminListConnectionTemplates))
 	mux.HandleFunc("POST /admin/connection-templates", g(s.adminPutConnectionTemplate))
 	mux.HandleFunc("DELETE /admin/connection-templates/{id}", g(s.adminDeleteConnectionTemplate))
+	mux.HandleFunc("GET /admin/sso-audience", g(s.adminListAudienceRules))
+	mux.HandleFunc("POST /admin/sso-audience", g(s.adminAddAudienceRule))
+	mux.HandleFunc("DELETE /admin/sso-audience/{id}", g(s.adminDeleteAudienceRule))
 	mux.HandleFunc("DELETE /admin/upstreams/{name}", g(s.adminDeleteUpstream))
 	return mux
 }

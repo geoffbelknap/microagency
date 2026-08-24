@@ -464,6 +464,14 @@ func (s *AuthServer) ssoCallback(w http.ResponseWriter, r *http.Request) {
 			authui.WriteUserMessage(w, "This account is not in the required domain ("+hd+"). Sign in with a "+hd+" account and start again from your MCP client.")
 			return
 		}
+		if errors.Is(err, ErrIdentityNotPermitted) {
+			// The provider vouched for this person; this gateway's audience
+			// does not include them. The page names the operator as the actor
+			// who can change that, and says nothing about who IS permitted —
+			// the refusal must not become a roster oracle.
+			authui.WriteUserMessage(w, "Your account signed in successfully, but it is not one this gateway admits. Ask the gateway's operator to add you, then start again from your MCP client.")
+			return
+		}
 		slog.Warn("sso sign-in failed", "err", err)
 		authui.WriteUserMessage(w, "Sign-in could not be verified. Start again from your MCP client.")
 		return

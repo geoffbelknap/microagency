@@ -106,7 +106,12 @@ func configureBuiltInFederation(builtInAS *auth.AuthServer, srv *mcp.Server, cfg
 	fed, err := auth.DiscoverFederation(ctx, auth.FederationConfig{
 		Issuer: cfg.ssoIssuer, ClientID: cfg.ssoClientID, ClientSecret: secret,
 		HostedDomain: cfg.ssoHD,
-		HTTPClient:   &http.Client{Timeout: 15 * time.Second},
+		AnyAccount:   cfg.ssoAnyAccount,
+		// The rule set reads through to its file, so a rule the operator adds
+		// while the gateway runs applies to the next sign-in without a restart.
+		Audience:    ssoAudienceRules(cfg.authDir),
+		GroupsClaim: cfg.ssoGroupsClaim,
+		HTTPClient:  &http.Client{Timeout: 15 * time.Second},
 	})
 	if err != nil {
 		return false, fmt.Errorf("discover SSO issuer %q: %w", cfg.ssoIssuer, err)
@@ -132,4 +137,54 @@ func ssoIdentitiesPathFor(dir string) string {
 		return filepath.Join(dir, "sso-identities.json")
 	}
 	return ssoIdentitiesPath()
+}
+
+// ssoAudienceRulesPath locates the operator-managed audience rule set. The
+// running gateway, the admin API, and the `sso-audience` command all address it
+// by path rather than through each other, so a rule takes effect wherever it is
+// added.
+func ssoAudienceRulesPath(dir string) string {
+	if dir == "" {
+		dir = microagencyDir()
+	}
+	return auth.AudienceRulesPath(dir)
+}
+
+// ssoAudienceRules opens the rule set for a run.
+func ssoAudienceRules(dir string) *auth.AudienceRules {
+	return auth.NewAudienceRules(ssoAudienceRulesPath(dir))
+}
+
+// describeSSOAudience states who may sign in, for a banner or a diagnostic
+// page. It names bounds, never members.
+func describeSSOAudience(cfg httpConfig) string {
+	return auth.DescribeAudience(cfg.ssoIssuer, cfg.ssoHD, cfg.ssoAnyAccount, ssoAudienceRules(cfg.authDir).Summary())
+}
+
+// validateFederationAudience refuses a federated start that has not said who
+// may sign in.
+//
+// An identity provider answers "is this really them", not "do they belong
+// here". For a dedicated tenant those are the same question, because everyone
+// who can authenticate is in the organisation. For a shared provider they are
+// not: pointed at one with nothing else declared, the gateway would admit
+// anyone in the world with an account there, and each of them would be a real
+// principal able to find and invoke every connection the operator shares.
+//
+// The gateway cannot tell the two kinds of issuer apart by looking, and
+// guessing wrong in either direction is bad — so it asks. Declaring "any
+// account at this issuer" is a first-class answer, not an override; what is
+// refused is leaving the question unanswered.
+func validateFederationAudience(cfg httpConfig, rules auth.AudienceSummary) error {
+	if cfg.ssoIssuer == "" || cfg.ssoAnyAccount || cfg.ssoHD != "" || rules.Total() > 0 {
+		return nil
+	}
+	return fmt.Errorf("federated sign-in to %s does not say who may sign in, so every account at that provider would become a principal on this gateway — able to find and invoke every connection you share.\n"+
+		"  Declare the audience one of these ways:\n"+
+		"  A dedicated tenant (your own Okta, Entra, or Keycloak, where anyone who can sign in\n"+
+		"  is in your organisation): add --sso-any-account\n"+
+		"  A shared provider bounded to one organisation: add --sso-hd <domain>\n"+
+		"  A group the provider asserts: microagency sso-audience allow group:<name>\n"+
+		"  Named people, when the provider asserts neither: microagency sso-audience allow email:<address>",
+		cfg.ssoIssuer)
 }

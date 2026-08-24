@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -92,6 +92,9 @@ microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com \
   --sso-hd example.com
 ```
 
+`--sso-hd example.com` is this deployment's [declared audience](#declaring-the-audience).
+A federated start requires one.
+
 The gateway stays the authorization server toward MCP clients: dynamic client
 registration, PKCE, and token minting are unchanged, and issued tokens still
 carry the gateway as their issuer. Only the human sign-in step is delegated.
@@ -116,9 +119,117 @@ for display and as the acting identity for
 [delegated connections](delegated-access.md); identity comparisons use only
 the subject.
 
-With `--sso-hd`, the ID token must carry that exact `hd` (hosted domain)
-claim. An account outside the domain is refused during sign-in, before any
-gateway token exists.
+## Declaring the audience
+
+An identity provider answers "is this really them". It does not answer "do they
+belong on this gateway". Those are the same question at a dedicated tenant and
+very different questions at a shared provider, so `up` requires you to say which
+accounts may sign in. Every account admitted becomes a principal that can find
+and invoke the connections you share, so a federated start with no declared
+audience refuses:
+
+```
+federated sign-in to https://accounts.google.com does not say who may sign in, so
+every account at that provider would become a principal on this gateway — able to
+find and invoke every connection you share.
+```
+
+There are four ways to declare it. Use whichever fits your provider.
+
+### Your own tenant: the issuer is the boundary
+
+Running your own Okta, Entra ID, or Keycloak? Everyone who can authenticate
+there is already in your organisation, so the issuer is the membership check:
+
+```sh
+microagency up --tunnel-name microagency --tunnel-url https://mcp.example.com \
+  --sso-issuer https://example.okta.com \
+  --sso-client-id <client-id> \
+  --sso-any-account
+```
+
+Add or remove people at the provider; the gateway follows. This is the ordinary
+answer for a company deployment, not a loosening of one.
+
+### A shared provider: a hosted domain
+
+`accounts.google.com` serves the whole internet, so the issuer bounds nothing.
+`--sso-hd example.com` requires the ID token to carry that exact `hd` (hosted
+domain) claim, which for Google Workspace is the membership check. An account
+outside the domain is refused during sign-in, before any gateway token exists.
+
+### A group the provider asserts
+
+Where the provider publishes group or organisation membership, admit a group:
+
+```sh
+microagency sso-audience allow group:engineering --note "platform team"
+```
+
+Each rule is read from the ID token's `groups` claim. Providers that name it
+something else — `roles`, for instance — need `up --sso-groups-claim <name>`.
+Membership stays managed at the provider; the gateway only names the group.
+
+### Named people, when the provider asserts nothing usable
+
+A few people on personal accounts have no hosted domain and no groups. Name
+them:
+
+```sh
+microagency sso-audience allow email:person@example.com
+microagency sso-audience allow subject:1078...        # when an address may change
+microagency sso-audience list
+microagency sso-audience remove email:person@example.com
+```
+
+An `email` rule matches only an address the provider marked **verified**; an
+unverified claim never matches. A `subject` rule matches the provider's stable
+`sub`, which survives an address change.
+
+This is the fallback, not the default. Prefer a tenant issuer, a domain, or a
+group wherever the provider supports one — those track your organisation without
+per-person maintenance.
+
+### How the bounds compose
+
+Any single matching rule admits an account. A configured `--sso-hd` applies as
+well, so with both a domain and rules, **both** must pass — the domain narrows
+the provider to your organisation, the rules narrow it further to some of them.
+`--sso-any-account` states that the issuer alone is the boundary, so it cannot
+be combined with `--sso-hd`; startup refuses the contradiction and names both.
+
+Rules hold no secret. They live in `sso-audience.json` in the state directory,
+survive restarts, and are read on every sign-in, so a change applies immediately
+with no restart. The same rules are managed over the loopback admin API:
+
+```sh
+IFS= read -r MICROAGENCY_OPERATOR_TOKEN < ~/.microagency/token
+curl -fsS http://127.0.0.1:8766/admin/sso-audience \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"kind":"group","value":"engineering","note":"platform team"}'
+curl -fsS http://127.0.0.1:8766/admin/sso-audience \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN"
+curl -fsS -X DELETE http://127.0.0.1:8766/admin/sso-audience/group:engineering \
+  -H "Authorization: Bearer $MICROAGENCY_OPERATOR_TOKEN"
+unset MICROAGENCY_OPERATOR_TOKEN
+```
+
+The `microagency sso-audience` command edits the same file directly, so it also
+works before a first start — which you need, since a federated gateway will not
+run until its audience is declared.
+
+An account the audience does not admit is refused at sign-in, on the same notice
+page as a hosted-domain refusal, and no gateway token is minted for it. It never
+becomes a principal, so it never reaches the tool surface at all. The page tells
+the person to ask the operator; it never says who is admitted.
+
+Startup output and `microagency doctor` both state the audience in effect:
+
+```
+  Admits         accounts with hd=example.com that also match 2 groups + 1 identity
+```
+
 
 The provider client secret is supplied once — via `MICROAGENCY_SSO_CLIENT_SECRET`
 or `--sso-client-secret-file` — and is kept only in the secret store, never on
@@ -126,10 +237,12 @@ the command line. Later starts read it back from the store.
 
 Federated mode is multi-user, so it starts without `--single-user`. A refresh
 continues under the token's own subject without re-contacting the provider.
-Disabling an account at the provider therefore takes effect when the gateway
-refresh token expires (30 days at most), or immediately on revocation at
-`/oauth/revoke`. Startup output and `microagency doctor` report the federated
-posture, the provider issuer, and the hosted-domain requirement.
+Disabling an account at the provider — or removing it from the audience —
+therefore takes effect for an already-signed-in caller when the gateway refresh
+token expires (30 days at most), or immediately on revocation at
+`/oauth/revoke`. New sign-ins are refused straight away. Startup output and
+`microagency doctor` report the federated posture, the provider issuer, and the
+declared audience.
 
 ## External authorization server
 

@@ -84,7 +84,8 @@ Each part of the system has its own page:
 - [Measuring context cost](docs/context-metrics.md) — exact schema and response
   byte accounting, task correlation, and the offline baseline.
 - [Public mode and multi-user gateways](docs/public-mode.md) — remote MCP
-  for web apps, built-in or external OAuth, the admin/tunnel split, and
+  for web apps, built-in or external OAuth, federated sign-in and the declared
+  audience that bounds who may sign in, the admin/tunnel split, and
   operator-approved self-service connections with principal-bound credentials.
 - [Operation and resource grants](docs/operation-grants.md) — exact
   principal/campaign operation authority, argument and destination bounds,
