@@ -309,7 +309,7 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string, audienceR
 // multi-user posture, and what the shared audit log retains of callers'
 // arguments.
 //
-// The audience line is always present. "Which accounts can reach this gateway"
+// The admits line is always present. "Which accounts can reach this gateway"
 // is the question a federated deployment most needs answered, and answering it
 // only when a bound happens to be configured would make the widest posture the
 // quietest one.
@@ -318,23 +318,23 @@ func reportFederatedSignIn(out io.Writer, posture authPosture, optedUp []string,
 	audience := auth.DescribeAudience(posture.SSOIssuer, posture.SSOHostedDomain, posture.SSOAnyAccount, audienceRules)
 	switch {
 	case posture.SSOAnyAccount:
-		fmt.Fprintf(out, "    audience        %s (--sso-any-account: the issuer is the membership boundary)\n", audience)
+		fmt.Fprintf(out, "    admits          %s (--sso-any-account: the issuer is the membership boundary)\n", audience)
 		if inert := auth.InertAudienceRules(true, audienceRules); inert != "" {
 			fmt.Fprintf(out, "                    ⚠ %s configured but not applied — every account at the issuer is admitted\n", inert)
 		}
 	case audienceRules.Unreadable:
 		// Sign-in fails closed here, so the page must not render the hosted
 		// domain alone as though it were still the whole audience.
-		fmt.Fprintf(out, "    audience        ⚠ %s\n", audience)
+		fmt.Fprintf(out, "    admits          ⚠ %s\n", audience)
 		fmt.Fprintf(out, "                    repair or remove %s\n", ssoAudienceRulesPath(""))
 	case posture.SSOHostedDomain == "" && audienceRules.Total() == 0:
 		// Reachable only by removing every rule from a running gateway that had
 		// no other bound: a start in this state is refused. Nobody can sign in,
 		// which is fail-closed but is still a broken deployment to report.
-		fmt.Fprintln(out, "    audience        ⚠ none declared — no account can sign in until a bound is restored")
+		fmt.Fprintln(out, "    admits          ⚠ none declared — no account can sign in until a bound is restored")
 		fmt.Fprintln(out, "                    add --sso-hd <domain>, --sso-any-account, or `microagency sso-audience allow ...`")
 	default:
-		fmt.Fprintf(out, "    audience        %s\n", audience)
+		fmt.Fprintf(out, "    admits          %s\n", audience)
 	}
 	fmt.Fprintln(out, "    posture         multi-user — each provider account is a distinct principal")
 	if len(optedUp) == 0 {

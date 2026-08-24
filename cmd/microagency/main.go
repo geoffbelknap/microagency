@@ -1720,7 +1720,12 @@ func writeSSOPosture(w io.Writer, cfg httpConfig) {
 	// Who may sign in is the fact an operator most needs to see confirmed, so
 	// it is stated on every start rather than inferred from which flags were
 	// passed.
-	fmt.Fprintf(w, "  Audience       %s\n", describeSSOAudience(cfg))
+	//
+	// Labelled "Admits", not "Audience": a tunnelled start already prints an
+	// Audience line carrying the OAuth protected-resource identifier, and two
+	// adjacent lines sharing a label while meaning different things is worse
+	// than either wording alone.
+	fmt.Fprintf(w, "  Admits         %s\n", describeSSOAudience(cfg))
 	if inert := auth.InertAudienceRules(cfg.ssoAnyAccount, ssoAudienceRules(cfg.authDir).Summary()); inert != "" {
 		fmt.Fprintf(w, "                 WARNING: %s configured but not applied — --sso-any-account admits every account at the issuer\n", inert)
 	}

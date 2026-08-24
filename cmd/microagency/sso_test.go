@@ -460,7 +460,7 @@ func TestDoctorReportsFederatedPosture(t *testing.T) {
 	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
 	for _, want := range []string{
 		"federated to https://idp.example",
-		"audience        accounts with hd=corp.example",
+		"admits          accounts with hd=corp.example",
 		"multi-user — each provider account is a distinct principal",
 		"audit capture",
 	} {
@@ -481,7 +481,7 @@ func TestDoctorReportsFederatedPosture(t *testing.T) {
 	path = writeFile(t, dir, "auth-posture.json", string(b))
 	out.Reset()
 	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
-	if !strings.Contains(out.String(), "audience        any account at https://idp.example (--sso-any-account") {
+	if !strings.Contains(out.String(), "admits          any account at https://idp.example (--sso-any-account") {
 		t.Errorf("dedicated-tenant audience line missing:\n%s", out.String())
 	}
 
@@ -491,7 +491,7 @@ func TestDoctorReportsFederatedPosture(t *testing.T) {
 	path = writeFile(t, dir, "auth-posture.json", string(b))
 	out.Reset()
 	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{Groups: 2, Identities: 1})
-	if !strings.Contains(out.String(), "audience        accounts matching 2 groups + 1 identity") {
+	if !strings.Contains(out.String(), "admits          accounts matching 2 groups + 1 identity") {
 		t.Errorf("rule-bounded audience line missing:\n%s", out.String())
 	}
 

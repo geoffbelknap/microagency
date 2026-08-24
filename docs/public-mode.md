@@ -227,7 +227,7 @@ the person to ask the operator; it never says who is admitted.
 Startup output and `microagency doctor` both state the audience in effect:
 
 ```
-  Audience       accounts with hd=example.com that also match 2 groups + 1 identity
+  Admits         accounts with hd=example.com that also match 2 groups + 1 identity
 ```
 
 

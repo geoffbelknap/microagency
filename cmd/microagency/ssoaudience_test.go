@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -302,8 +303,8 @@ func TestStartupBannerStatesTheAudience(t *testing.T) {
 		cfg  httpConfig
 		want string
 	}{
-		{"dedicated tenant", withAnyAccount(base), "Audience       any account at https://idp.example"},
-		{"hosted domain", withHD(base, "corp.example"), "Audience       accounts with hd=corp.example"},
+		{"dedicated tenant", withAnyAccount(base), "Admits         any account at https://idp.example"},
+		{"hosted domain", withHD(base, "corp.example"), "Admits         accounts with hd=corp.example"},
 	} {
 		var out strings.Builder
 		writeSSOPosture(&out, tc.cfg)
@@ -322,7 +323,7 @@ func TestStartupBannerStatesTheAudience(t *testing.T) {
 	}
 	var out strings.Builder
 	writeSSOPosture(&out, base)
-	if !strings.Contains(out.String(), "Audience       accounts matching 1 group + 1 identity") {
+	if !strings.Contains(out.String(), "Admits         accounts matching 1 group + 1 identity") {
 		t.Errorf("rule-bounded banner is wrong:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "person@example.com") {
@@ -334,5 +335,55 @@ func TestStartupBannerStatesTheAudience(t *testing.T) {
 	writeSSOPosture(&out, withHD(base, "corp.example"))
 	if !strings.Contains(out.String(), "accounts with hd=corp.example that also match") {
 		t.Errorf("composed banner does not show both bounds:\n%s", out.String())
+	}
+}
+
+// TestFederatedPostureLabelsAreUnique guards a collision that is easy to
+// reintroduce. A tunnelled gateway already reports an "audience" — the OAuth
+// protected-resource identifier clients must request — and federated sign-in
+// reports who may sign in. Two adjacent lines sharing one label while meaning
+// different things is worse than either wording alone, so the sign-in bound is
+// labelled "admits" and the page is checked for duplicate labels.
+func TestFederatedPostureLabelsAreUnique(t *testing.T) {
+	b, err := json.Marshal(authPosture{
+		Mode: "oauth-tunnel", Issuer: "https://gateway.example",
+		Resource: "https://gateway.example/mcp", Audience: "https://gateway.example/mcp",
+		Tunnel: "cloudflare", TunnelMode: "named", TunnelName: "gw",
+		SSOIssuer: "https://idp.example", SSOHostedDomain: "corp.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "auth-posture.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{Groups: 1})
+
+	seen := map[string]int{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		// Indented label lines carry a label column then the value; a
+		// continuation line is blank in that column.
+		trimmed := strings.TrimLeft(line, " ")
+		if line == trimmed || trimmed == "" {
+			continue
+		}
+		fields := strings.SplitN(trimmed, "  ", 2)
+		if len(fields) != 2 || strings.TrimSpace(fields[1]) == "" {
+			continue
+		}
+		seen[strings.TrimSpace(fields[0])]++
+	}
+	for label, n := range seen {
+		if n > 1 {
+			t.Errorf("label %q renders %d times on one page; two meanings under one label is unreadable:\n%s", label, n, out.String())
+		}
+	}
+	// The two facts that previously collided must both still be present.
+	for _, want := range []string{"audience        https://gateway.example/mcp", "admits          accounts with hd=corp.example"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("page is missing %q:\n%s", want, out.String())
+		}
 	}
 }
