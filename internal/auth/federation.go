@@ -43,10 +43,29 @@ type FederationConfig struct {
 	// Enforced server-side on every sign-in; an account outside the domain is
 	// refused before any gateway token exists.
 	HostedDomain string
+	// AnyAccount declares that every account able to authenticate at Issuer
+	// belongs on this gateway. That is the right answer for a dedicated tenant
+	// — an organisation's own Okta, Entra, or Keycloak — where the issuer is
+	// the membership boundary. It is a declaration, not an escape hatch: the
+	// operator states the audience rather than leaving it unstated.
+	AnyAccount bool
+	// Audience is the operator-managed rule set that bounds sign-in by a group
+	// the provider asserts, or by named identities. nil or empty means no rule
+	// bound; HostedDomain or AnyAccount must then supply the bound.
+	Audience *AudienceRules
+	// GroupsClaim names the ID-token claim carrying group or organisation
+	// membership. Empty means DefaultGroupsClaim. Providers disagree on the
+	// name ("groups", "roles"), and a group rule that silently never matches
+	// would look like protection while being none, so the operator can name it.
+	GroupsClaim string
 	// HTTPClient is used for discovery, JWKS fetches, and the code exchange.
 	// nil means http.DefaultClient.
 	HTTPClient *http.Client
 }
+
+// DefaultGroupsClaim is the claim consulted for group membership when the
+// operator names none. It is what Okta, Keycloak, and Entra emit by default.
+const DefaultGroupsClaim = "groups"
 
 // Federation is a discovered, ready-to-use identity provider binding.
 type Federation struct {
@@ -66,6 +85,9 @@ type FederatedIdentity struct {
 	Email string
 	// HostedDomain is the ID token's `hd` claim, if any.
 	HostedDomain string
+	// Groups are the values the provider asserted in its groups claim, if any.
+	// Audience rules read them; identity is never derived from them.
+	Groups []string
 }
 
 // DiscoverFederation resolves the provider's endpoints from its OIDC discovery
@@ -244,9 +266,103 @@ func (f *Federation) validateIDToken(ctx context.Context, raw, nonce string) (*F
 	if f.cfg.HostedDomain != "" && hd != f.cfg.HostedDomain {
 		return nil, fmt.Errorf("sso sign-in for %q: %w", f.cfg.HostedDomain, ErrHostedDomainRefused)
 	}
-	id := &FederatedIdentity{Subject: sub, HostedDomain: hd}
+	id := &FederatedIdentity{Subject: sub, HostedDomain: hd, Groups: groupsFromClaims(claims, f.groupsClaim())}
 	if verified, _ := claims["email_verified"].(bool); verified {
 		id.Email, _ = claims["email"].(string)
 	}
+	// The audience check runs last, on a fully validated identity, and refuses
+	// before any gateway token exists. Admitting the caller and letting them
+	// discover an empty tool surface would make an unwelcome account into a
+	// real principal with a real audit trail; refusing at the door does not.
+	if !f.Permits(id) {
+		return nil, fmt.Errorf("sso sign-in at %q: %w", f.cfg.Issuer, ErrIdentityNotPermitted)
+	}
 	return id, nil
+}
+
+func (f *Federation) groupsClaim() string {
+	if strings.TrimSpace(f.cfg.GroupsClaim) != "" {
+		return f.cfg.GroupsClaim
+	}
+	return DefaultGroupsClaim
+}
+
+// groupsFromClaims reads the named claim as group membership. Providers emit it
+// either as a list or, with one membership, as a bare string; both are read.
+func groupsFromClaims(claims jwt.MapClaims, name string) []string {
+	switch v := claims[name].(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []string{v}
+	case []any:
+		groups := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				groups = append(groups, s)
+			}
+		}
+		return groups
+	}
+	return nil
+}
+
+// Permits reports whether a validated identity is inside the declared audience.
+//
+// The bounds compose by AND: a hosted domain (already enforced by the time this
+// runs) and a rule set can both be configured, and then both must pass. Any one
+// of them alone is a complete answer. With none of them the audience was never
+// declared, so this refuses — a start in that state is refused too, and this is
+// the second line of the same defence.
+func (f *Federation) Permits(id *FederatedIdentity) bool {
+	if id == nil {
+		return false
+	}
+	if f.cfg.AnyAccount {
+		return true
+	}
+	if f.cfg.Audience.Summary().Total() > 0 {
+		return f.cfg.Audience.Permits(id)
+	}
+	return f.cfg.HostedDomain != ""
+}
+
+// AnyAccount reports whether the operator declared the issuer itself to be the
+// audience.
+func (f *Federation) AnyAccount() bool { return f.cfg.AnyAccount }
+
+// AudienceSummary counts the rule set bounding sign-in, by kind.
+func (f *Federation) AudienceSummary() AudienceSummary { return f.cfg.Audience.Summary() }
+
+// DescribeAudience states who may sign in, in one clause, for a startup banner
+// or a diagnostic page. It names bounds, never members, so a shared terminal
+// never renders the roster.
+func DescribeAudience(issuer, hostedDomain string, anyAccount bool, rules AudienceSummary) string {
+	switch {
+	case anyAccount:
+		return "any account at " + issuer
+	case hostedDomain != "" && rules.Total() > 0:
+		return "accounts with hd=" + hostedDomain + " that also match " + rules.String()
+	case hostedDomain != "":
+		return "accounts with hd=" + hostedDomain
+	case rules.Total() > 0:
+		return "accounts matching " + rules.String()
+	default:
+		return "UNDECLARED — no account can sign in"
+	}
+}
+
+// InertAudienceRules reports the rules that are configured but cannot apply,
+// or "" when none are.
+//
+// Declaring the issuer to be the audience makes every narrower rule inert.
+// Refusing to start over it would be too blunt — an operator may be
+// mid-migration — but it must not pass unsaid, or a rule set that protects
+// nothing reads exactly like one that does.
+func InertAudienceRules(anyAccount bool, rules AudienceSummary) string {
+	if !anyAccount || rules.Total() == 0 {
+		return ""
+	}
+	return rules.String()
 }

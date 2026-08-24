@@ -20,6 +20,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"microagency/internal/auth"
 	"microagency/internal/mcp"
 	"microagency/internal/secretstore"
 )
@@ -276,6 +277,9 @@ func TestLocalFederatedFlowThroughMuxes(t *testing.T) {
 	cfg := httpConfig{
 		addr: "127.0.0.1:8765", authDir: t.TempDir(),
 		ssoIssuer: provider.ts.URL, ssoClientID: "gw-client",
+		// A dedicated tenant: the issuer is the membership boundary, which is
+		// the declaration this flow test models.
+		ssoAnyAccount: true,
 	}
 	mcpMux, _, mode, _, err := buildMuxes(srv, cfg, mcp.OperatorAuth{LegacyToken: "op-tok"})
 	if err != nil {
@@ -453,10 +457,10 @@ func TestDoctorReportsFederatedPosture(t *testing.T) {
 	})
 	path := writeFile(t, dir, "auth-posture.json", string(b))
 	var out strings.Builder
-	reportAuthPostureAt(&out, path, nil)
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
 	for _, want := range []string{
 		"federated to https://idp.example",
-		"hosted domain   corp.example",
+		"audience        accounts with hd=corp.example",
 		"multi-user — each provider account is a distinct principal",
 		"audit capture",
 	} {
@@ -468,12 +472,41 @@ func TestDoctorReportsFederatedPosture(t *testing.T) {
 		t.Errorf("federated doctor page still claims single-user:\n%s", out.String())
 	}
 
-	// Without a hosted domain, its absence renders explicitly.
+	// A dedicated tenant reads as the deliberate declaration it is, naming the
+	// flag that made it, rather than as a missing bound.
+	b, _ = json.Marshal(authPosture{
+		Mode: "oauth-local", Issuer: "http://127.0.0.1:8765",
+		SSOIssuer: "https://idp.example", SSOAnyAccount: true,
+	})
+	path = writeFile(t, dir, "auth-posture.json", string(b))
+	out.Reset()
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
+	if !strings.Contains(out.String(), "audience        any account at https://idp.example (--sso-any-account") {
+		t.Errorf("dedicated-tenant audience line missing:\n%s", out.String())
+	}
+
+	// Rules alone bound the audience, and the page counts them without naming
+	// anyone: a diagnostic page is not a roster.
 	b, _ = json.Marshal(authPosture{Mode: "oauth-local", Issuer: "http://127.0.0.1:8765", SSOIssuer: "https://idp.example"})
 	path = writeFile(t, dir, "auth-posture.json", string(b))
 	out.Reset()
-	reportAuthPostureAt(&out, path, nil)
-	if !strings.Contains(out.String(), "hosted domain   none required") {
-		t.Errorf("missing explicit no-hd line:\n%s", out.String())
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{Groups: 2, Identities: 1})
+	if !strings.Contains(out.String(), "audience        accounts matching 2 groups + 1 identity") {
+		t.Errorf("rule-bounded audience line missing:\n%s", out.String())
 	}
+
+	// A federated gateway with every bound removed cannot serve anyone. That is
+	// fail-closed, and it is still a broken deployment the page must report.
+	out.Reset()
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
+	if !strings.Contains(out.String(), "⚠ none declared") {
+		t.Errorf("undeclared audience is not flagged:\n%s", out.String())
+	}
+}
+
+// setUser selects the identity the provider asserts on the next sign-in.
+func (p *testOIDCProvider) setUser(sub, email string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sub, p.email = sub, email
 }

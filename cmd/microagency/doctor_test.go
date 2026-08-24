@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"microagency/internal/auth"
 	"microagency/internal/secretstore"
 )
 
@@ -30,7 +31,7 @@ func TestReportAuthPostureNamesPublicIssuerResourceAndConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	reportAuthPostureAt(&out, path, nil)
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
 	for _, want := range []string{"built-in OAuth", "cloudflare", posture.Issuer, posture.Resource, posture.Audience, "loopback operator listener"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("auth posture %q is missing %q", out.String(), want)
@@ -55,7 +56,7 @@ func TestReportAuthPostureDisclosesAuditCapture(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	reportAuthPostureAt(&out, path, nil)
+	reportAuthPostureAt(&out, path, nil, auth.AudienceSummary{})
 	if !strings.Contains(out.String(), "structure + digest") {
 		t.Fatalf("default multi-user capture posture is not stated: %q", out.String())
 	}
@@ -64,7 +65,7 @@ func TestReportAuthPostureDisclosesAuditCapture(t *testing.T) {
 	}
 
 	out.Reset()
-	reportAuthPostureAt(&out, path, []string{"github", "slack"})
+	reportAuthPostureAt(&out, path, []string{"github", "slack"}, auth.AudienceSummary{})
 	for _, want := range []string{"⚠", "FULL arguments", "github, slack"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("opt-up disclosure %q is missing %q", out.String(), want)

@@ -35,6 +35,7 @@ type stubProvider struct {
 	email      string
 	verified   bool
 	hd         string
+	groups     []string
 	wrongNonce bool
 }
 
@@ -45,6 +46,7 @@ type stubCode struct {
 	sub, email  string
 	verified    bool
 	hd          string
+	groups      []string
 }
 
 func newStubProvider(t *testing.T) *stubProvider {
@@ -85,6 +87,14 @@ func (p *stubProvider) setUser(sub, email string, verified bool, hd string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sub, p.email, p.verified, p.hd = sub, email, verified, hd
+	p.groups = nil
+}
+
+// setGroups sets the membership the provider asserts for the next sign-in.
+func (p *stubProvider) setGroups(groups ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.groups = groups
 }
 
 func (p *stubProvider) authorize(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +108,7 @@ func (p *stubProvider) authorize(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.codes[code] = stubCode{
 		redirectURI: q.Get("redirect_uri"), nonce: q.Get("nonce"), challenge: q.Get("code_challenge"),
-		sub: p.sub, email: p.email, verified: p.verified, hd: p.hd,
+		sub: p.sub, email: p.email, verified: p.verified, hd: p.hd, groups: p.groups,
 	}
 	p.mu.Unlock()
 	u, _ := url.Parse(q.Get("redirect_uri"))
@@ -139,6 +149,13 @@ func (p *stubProvider) token(w http.ResponseWriter, r *http.Request) {
 	if sc.hd != "" {
 		claims["hd"] = sc.hd
 	}
+	if len(sc.groups) > 0 {
+		groups := make([]any, len(sc.groups))
+		for i, g := range sc.groups {
+			groups[i] = g
+		}
+		claims["groups"] = groups
+	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	tok.Header["kid"] = "stub-1"
 	signed, err := tok.SignedString(p.priv)
@@ -152,8 +169,22 @@ func (p *stubProvider) token(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// newFederatedAS builds an AuthServer federated to a stub provider.
+// newFederatedAS builds an AuthServer federated to a stub provider. With no
+// hosted domain it declares the issuer itself to be the audience, which is the
+// dedicated-tenant posture these flow tests model; with one, the domain is the
+// bound.
 func newFederatedAS(t *testing.T, hostedDomain string) (*httptest.Server, *AuthServer, *stubProvider, *http.Client) {
+	t.Helper()
+	return newFederatedASWith(t, FederationConfig{
+		HostedDomain: hostedDomain,
+		AnyAccount:   hostedDomain == "",
+	})
+}
+
+// newFederatedASWith builds an AuthServer federated to a stub provider under a
+// caller-supplied audience configuration. Issuer and client credentials are
+// filled in from the stub.
+func newFederatedASWith(t *testing.T, cfg FederationConfig) (*httptest.Server, *AuthServer, *stubProvider, *http.Client) {
 	t.Helper()
 	provider := newStubProvider(t)
 	signer, err := LoadOrCreateSigner(filepath.Join(t.TempDir(), "k"))
@@ -165,10 +196,8 @@ func newFederatedAS(t *testing.T, hostedDomain string) (*httptest.Server, *AuthS
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	as = NewAuthServer(signer, ts.URL, testAud, time.Hour, nil)
-	fed, err := DiscoverFederation(context.Background(), FederationConfig{
-		Issuer: provider.ts.URL, ClientID: provider.clientID, ClientSecret: provider.clientSecret,
-		HostedDomain: hostedDomain,
-	})
+	cfg.Issuer, cfg.ClientID, cfg.ClientSecret = provider.ts.URL, provider.clientID, provider.clientSecret
+	fed, err := DiscoverFederation(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +205,18 @@ func newFederatedAS(t *testing.T, hostedDomain string) (*httptest.Server, *AuthS
 	as.Register(mux)
 	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return ts, as, provider, c
+}
+
+// testAudienceRules returns an empty, file-backed rule set for a test.
+func testAudienceRules(t *testing.T, rules ...AudienceRule) *AudienceRules {
+	t.Helper()
+	a := NewAudienceRules(AudienceRulesPath(t.TempDir()))
+	for _, rule := range rules {
+		if _, err := a.Add(rule); err != nil {
+			t.Fatalf("seed audience rule %s: %v", rule.ID(), err)
+		}
+	}
+	return a
 }
 
 // federatedSignIn walks the whole browser round-trip for one MCP-client
