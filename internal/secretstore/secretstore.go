@@ -115,17 +115,29 @@ type Store interface {
 	Kind() string // "vault" | "encrypted-file" | "file"
 }
 
-// Open returns a Vault-backed store when VAULT_ADDR + VAULT_TOKEN are set (the
-// preferred path). Otherwise it opens the file fallback, encrypting it whenever
-// a data-key protector supplies the AES-256-GCM key: an OS keyring, an operator
-// helper fronting a KMS, or MICROAGENCY_SECRET_KEY_FILE. Existing plaintext
-// fallback state is migrated atomically when encryption is enabled. Landing on
-// the unencrypted fallback requires opts.AllowPlaintext.
+// Open picks the credential store, highest precedence first:
+//
+//  1. VAULT_ADDR + VAULT_TOKEN — an external Vault/OpenBao. Both or neither.
+//  2. MICROAGENCY_SECRET_PROTECTOR — the AES-256-GCM file store under a data
+//     key the named protector holds.
+//  3. MICROAGENCY_SECRET_KEY_FILE — the same store under a key file the
+//     operator places outside the state directory.
+//  4. The host's own keyring (macOS Keychain, Linux Secret Service) — same
+//     store, key generated on first use and kept where the operator already
+//     unlocks it. This is what an install that configures nothing gets, and it
+//     is skipped when opts.AllowPlaintext says the operator chose otherwise.
+//  5. The unencrypted mode-0600 file, and only with opts.AllowPlaintext.
+//
+// A recorded locator outranks all of it: once a start has put the data key
+// somewhere, that is where later starts look. Existing plaintext state is
+// migrated atomically the first time encryption is enabled.
 //
 // A protector that is configured and cannot supply the key fails the open. It
 // never degrades to another store: creating a second credential store beside
 // one the operator believes is authoritative is the failure that goes unnoticed
-// precisely because everything keeps working.
+// precisely because everything keeps working. The host keyring in (4) is held
+// to the same rule in the other direction — it is chosen only when a read
+// proves it reachable, and never over a store that is already encrypted.
 func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 	client := opts.Client
 	if client == nil {
@@ -136,17 +148,13 @@ func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 		return nil, errors.New("secretstore: VAULT_ADDR and VAULT_TOKEN must be configured together")
 	}
 	if addr != "" {
-		mount := getenv("VAULT_MOUNT")
-		if mount == "" {
-			mount = "secret" // OpenBao/Vault dev default KV v2 mount
-		}
-		return &Vault{Addr: addr, Token: tok, Mount: mount, Prefix: "microagency", Client: client}, nil
+		return VaultFromEnv(getenv, client), nil
 	}
 	path := StorePath(dir)
 	if err := protectExistingFile(path); err != nil {
 		return nil, err
 	}
-	src, err := resolveKeySource(dir, getenv)
+	src, err := resolveKeySource(dir, getenv, opts.AllowPlaintext)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +170,7 @@ func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 			return nil, err
 		}
 		f.keyCustody = src.manifest.Kind
+		f.keyCreated = src.created
 		return f, nil
 	}
 	f := &File{Path: path}
@@ -176,6 +185,27 @@ func Open(dir string, getenv func(string) string, opts Options) (Store, error) {
 		return nil, ErrPlaintextNotAllowed
 	}
 	return f, nil
+}
+
+// VaultFromEnv builds the external Vault/OpenBao client the environment names.
+// It performs no I/O, so a diagnostic can construct exactly the client a start
+// would use and probe it, rather than reporting a configured address as if
+// setting one made it reachable.
+func VaultFromEnv(getenv func(string) string, client *http.Client) *Vault {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	mount := strings.TrimSpace(getenv("VAULT_MOUNT"))
+	if mount == "" {
+		mount = "secret" // OpenBao/Vault dev default KV v2 mount
+	}
+	return &Vault{
+		Addr:   strings.TrimSpace(getenv("VAULT_ADDR")),
+		Token:  strings.TrimSpace(getenv("VAULT_TOKEN")),
+		Mount:  mount,
+		Prefix: "microagency",
+		Client: client,
+	}
 }
 
 // --- Vault / OpenBao (KV v2) ---
@@ -277,6 +307,7 @@ type File struct {
 	mu         sync.Mutex
 	aead       cipher.AEAD
 	keyCustody string                     // protector kind supplying the data key
+	keyCreated bool                       // this open minted the data key
 	renameFn   func(string, string) error // test seam for interrupted atomic writes
 }
 
@@ -298,6 +329,12 @@ func (f *File) KeyCustody() string {
 	}
 	return f.keyCustody
 }
+
+// KeyCreated reports that this open generated the store's data key rather than
+// retrieving an existing one. It is true exactly once per store, on the start
+// that first put a key in the protector — the moment an operator most needs to
+// be told where that key now lives and what to back up.
+func (f *File) KeyCreated() bool { return f.keyCreated }
 
 // NewEncryptedFile opens an AES-256-GCM file store. If path contains the legacy
 // plaintext JSON map, it is encrypted to a sibling temporary file and atomically

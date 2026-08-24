@@ -3,12 +3,11 @@
 // Service, an operator helper backed by a KMS or secret manager, or — the
 // compatibility posture — a file the consumer owns.
 //
-// Two things inside microagency need exactly this. The managed OpenBao
-// bootstrap record has to survive a restart without sitting beside the data it
-// unseals, and the encrypted credential store's data key has to be reachable at
-// startup without an operator hand-placing it. Both get the same protector
-// choices, the same fail-closed behavior when a selected protector cannot be
-// reached, and the same verified copy-then-switch migration.
+// The encrypted credential store's data key needs exactly this: reachable at
+// startup without an operator hand-placing it, and not sitting beside the
+// ciphertext it opens. A consumer gets the protector choices, fail-closed
+// behavior when a selected protector cannot be reached, and a verified
+// copy-then-switch migration between protectors.
 //
 // Nothing here decides *what* the material is. A consumer supplies a Records
 // value naming its locator file, its format tag, the settings that select a
@@ -80,7 +79,7 @@ type Records struct {
 	Path string
 	// Format tags the locator so another consumer's file is never adopted.
 	Format string
-	// Noun names the material in operator-facing text ("managed OpenBao custody").
+	// Noun names the material in operator-facing text ("credential-store key custody").
 	Noun string
 	// KindEnv and CommandEnv are the settings that select a protector.
 	KindEnv, CommandEnv string

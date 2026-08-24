@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,8 +53,15 @@ var ErrCustodyConflict = errors.New("secretstore: the configured data-key custod
 // which keyring identifiers its record uses. The format tag, Keychain service,
 // and Secret Service attribute are a compatibility surface: changing one
 // orphans every existing record.
+// hostRunner overrides how this package runs keyring tools and protector
+// helpers. Production leaves it nil, which means custody.Run. Tests set it so a
+// unit test's answer never depends on — and never touches — the keyring of
+// whoever happens to be running it.
+var hostRunner custody.Runner
+
 func keyRecords(stateDir string) custody.Records {
 	return custody.Records{
+		Runner:     hostRunner,
 		Path:       filepath.Join(stateDir, CustodyFile),
 		Format:     keyCustodyFormat,
 		Noun:       "credential-store key custody",
@@ -133,6 +141,10 @@ type keySource struct {
 	protector custody.Protector
 	stateDir  string
 	keyFile   string
+	// created records that this resolution minted the data key, so the first
+	// start can say where the key now lives instead of leaving the operator to
+	// discover it.
+	created bool
 }
 
 func (s *keySource) label() string { return CustodyLabel(s.manifest.Kind) }
@@ -148,10 +160,20 @@ func CustodyLabel(kind string) string {
 	return custody.Label(kind)
 }
 
-// resolveKeySource decides which protector supplies the data key. It returns
-// (nil, nil) when nothing selects one, which leaves the plaintext gate to
-// decide — the behavior of every deployment that configures neither setting.
-func resolveKeySource(stateDir string, getenv func(string) string) (*keySource, error) {
+// resolveKeySource decides which protector supplies the data key, in this
+// order: the recorded locator, then MICROAGENCY_SECRET_PROTECTOR, then
+// MICROAGENCY_SECRET_KEY_FILE, then the host's own keyring. It returns
+// (nil, nil) only when none of those is usable, which leaves the plaintext gate
+// to decide.
+//
+// allowPlaintext suppresses the host keyring — and only the host keyring.
+// Everything above it is an explicit instruction about where the key lives and
+// outranks the opt-in; the keyring is what happens when the operator has said
+// nothing, and an operator who accepted the unencrypted store has said
+// something. Overriding that would make the opt-in a silent no-op on every
+// desktop host, and would re-key a working deployment on the strength of a
+// choice it never made.
+func resolveKeySource(stateDir string, getenv func(string) string, allowPlaintext bool) (*keySource, error) {
 	records := keyRecords(stateDir)
 	keyFile := strings.TrimSpace(getenv(FileKeyEnv))
 	envKind := strings.TrimSpace(getenv(ProtectorEnv))
@@ -174,7 +196,14 @@ func resolveKeySource(stateDir string, getenv func(string) string) (*keySource, 
 		}
 	case os.IsNotExist(err):
 		if envKind == "" && keyFile == "" {
-			return nil, nil // no data key configured; the plaintext gate decides
+			if allowPlaintext {
+				return nil, nil // the operator chose the unencrypted store
+			}
+			// Nothing configured: encrypt by default under the host's own
+			// keyring rather than asking every single-user install to choose a
+			// protector before it can start. An unusable keyring returns
+			// (nil, nil) and the plaintext gate reports it.
+			return autoKeySource(stateDir, records, getenv), nil
 		}
 		kind, kindErr := custody.CanonicalKind(envKind, ProtectorEnv)
 		if kindErr != nil {
@@ -205,6 +234,94 @@ func resolveKeySource(stateDir string, getenv func(string) string) (*keySource, 
 	return &keySource{records: records, manifest: manifest, protector: p, stateDir: stateDir, keyFile: keyFile}, nil
 }
 
+// autoProtectorKind names the protector a host supplies without configuration.
+// Only the two desktop keyrings qualify: they are present by default, they keep
+// the key out of the state directory, and the operator already unlocks them to
+// log in. Everywhere else there is no such thing, and inventing one — a key file
+// microagency writes for itself — would put the key back beside the ciphertext.
+func autoProtectorKind() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return custody.KindKeychain
+	case "linux":
+		return custody.KindSecretService
+	default:
+		return ""
+	}
+}
+
+// AutoProtector describes the protector this host would select on its own, for
+// operator-facing text. It carries no key material.
+type AutoProtector struct {
+	// Kind is the protector kind, or "" on a host with no default keyring.
+	Kind string
+	// Label is the operator-facing protector name.
+	Label string
+	// Available reports that the keyring answered a read. A keyring that is
+	// absent, locked, or has no session bus is not available, and startup
+	// refuses rather than choosing a lesser store on its own.
+	Available bool
+	// Detail explains Available in the operator's terms.
+	Detail string
+}
+
+// InspectAutoProtector probes the host keyring read-only: it never creates a
+// key, never writes a locator, and never returns key material. `up` uses it to
+// decide, `doctor` to report, and the startup refusal to say what was tried.
+func InspectAutoProtector(ctx context.Context, stateDir string, getenv func(string) string) AutoProtector {
+	kind := autoProtectorKind()
+	if kind == "" {
+		return AutoProtector{Detail: runtime.GOOS + " has no default OS keyring microagency can use without configuration"}
+	}
+	a := AutoProtector{Kind: kind, Label: custody.Label(kind)}
+	records := keyRecords(stateDir)
+	manifest := custody.Manifest{Format: keyCustodyFormat, Kind: kind, ID: custody.ID(stateDir)}
+	p, err := records.New(manifest, getenv, nil)
+	if err != nil {
+		a.Detail = err.Error()
+		return a
+	}
+	// A read is the whole probe. It answers with the key, with "nothing stored
+	// yet", or with the reason the keyring cannot be reached — and it changes
+	// nothing either way, so running doctor never makes a later start behave
+	// differently than it would have.
+	switch _, err := p.Load(ctx); {
+	case err == nil:
+		a.Available, a.Detail = true, "the keyring already holds this gateway's data key"
+	case errors.Is(err, custody.ErrNotFound):
+		a.Available, a.Detail = true, "the data key will be created here on first startup"
+	default:
+		a.Detail = err.Error()
+	}
+	return a
+}
+
+// autoKeySource returns the host keyring as the data-key protector when nothing
+// else is configured, or nil when this host has no usable one. Selection is
+// recorded like any other: the first successful start writes the locator, and
+// every later start resolves from that record instead of re-deciding.
+func autoKeySource(stateDir string, records custody.Records, getenv func(string) string) *keySource {
+	// An already-encrypted store is opened by a key some setting used to name.
+	// Choosing a keyring here would mint a second key over ciphertext it cannot
+	// read, so leave it alone: the missing setting has its own message, and it
+	// is the one an operator can act on.
+	if kind, err := InspectFile(StorePath(stateDir), nil); kind == KindEncryptedFile || errors.Is(err, ErrKeyRequired) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dataKeyTimeout)
+	defer cancel()
+	auto := InspectAutoProtector(ctx, stateDir, getenv)
+	if !auto.Available {
+		return nil
+	}
+	manifest := custody.Manifest{Format: keyCustodyFormat, Kind: auto.Kind, ID: custody.ID(stateDir)}
+	p, err := records.New(manifest, getenv, nil)
+	if err != nil {
+		return nil
+	}
+	return &keySource{records: records, manifest: manifest, protector: p, stateDir: stateDir}
+}
+
 // dataKey returns the store's data key, creating one on first use. storePath is
 // consulted only to refuse minting a key over ciphertext that key cannot open.
 func (s *keySource) dataKey(ctx context.Context, storePath string) ([]byte, error) {
@@ -221,6 +338,9 @@ func (s *keySource) dataKey(ctx context.Context, storePath string) ([]byte, erro
 		if err := s.reconcile(key); err != nil {
 			return nil, err
 		}
+		if err := s.recordLocator(); err != nil {
+			return nil, err
+		}
 		return key, nil
 	case errors.Is(err, custody.ErrNotFound):
 		return s.create(ctx, storePath)
@@ -231,6 +351,26 @@ func (s *keySource) dataKey(ctx context.Context, storePath string) ([]byte, erro
 		}
 		return nil, fmt.Errorf("%w: %s: %v", ErrProtectorUnavailable, s.label(), err)
 	}
+}
+
+// recordLocator writes the locator when protected custody is in use and none is
+// recorded — the state a protector that already holds the key leaves behind
+// when the state directory was rebuilt around it, or when custody was selected
+// without configuration. Without it the record is unreachable by anything but a
+// re-derivation: `purge --full` cannot find the key to delete, and it stays in
+// the keyring or KMS after the gateway that put it there is gone.
+//
+// The key-file posture keeps no locator. That file is the operator's, in a path
+// only they know, and recording one would claim custody microagency does not
+// have.
+func (s *keySource) recordLocator() error {
+	if !s.protector.Protected() || s.records.Exists() {
+		return nil
+	}
+	if err := s.records.SaveManifest(s.manifest); err != nil {
+		return fmt.Errorf("secretstore: record data-key custody: %w", err)
+	}
+	return nil
 }
 
 // reconcile refuses to start when a protector and a key file are both
@@ -281,6 +421,7 @@ func (s *keySource) create(ctx context.Context, storePath string) ([]byte, error
 	if err := s.records.SaveManifest(s.manifest); err != nil {
 		return nil, fmt.Errorf("secretstore: record data-key custody: %w", err)
 	}
+	s.created = true
 	return key, nil
 }
 
@@ -306,6 +447,19 @@ func parseDataKey(b []byte) ([]byte, error) {
 	return nil, errors.New("expected 32 raw bytes or their base64 encoding")
 }
 
+// AllowPlaintextConfigured reports the unencrypted-store opt-in as the
+// environment carries it. A diagnostic cannot see the `up` flag that sets the
+// same thing, so a gateway started with only the flag is described by the record
+// it wrote rather than by this.
+func AllowPlaintextConfigured(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv(AllowPlaintextEnv))) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 // KeyCustodyPosture is the non-secret data-key custody state doctor renders. It
 // never carries key material.
 type KeyCustodyPosture struct {
@@ -329,7 +483,7 @@ type KeyCustodyPosture struct {
 // never creates a key, never writes a locator, and never returns key material —
 // running it must not change what a later startup would do.
 func InspectKeyCustody(ctx context.Context, stateDir string, getenv func(string) string) KeyCustodyPosture {
-	src, err := resolveKeySource(stateDir, getenv)
+	src, err := resolveKeySource(stateDir, getenv, AllowPlaintextConfigured(getenv))
 	if err != nil {
 		kind, _ := custody.CanonicalKind(getenv(ProtectorEnv), ProtectorEnv)
 		if m, mErr := keyRecords(stateDir).LoadManifest(); mErr == nil {

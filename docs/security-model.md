@@ -4,27 +4,25 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 The guarantees, and where each one is enforced:
 
 - **Credential custody.** Upstream tokens and OAuth refresh tokens live in
-  the gateway's secret store — OpenBao/Vault when available, else an
-  AES-256-GCM file whose data key a protector holds outside the state
-  directory: macOS Keychain, Linux Secret Service, an operator KMS helper, or
-  a key file the operator places (see
+  the gateway's secret store — an external Vault/OpenBao when `VAULT_ADDR` is
+  configured, else an AES-256-GCM file whose data key a protector holds
+  outside the state directory: macOS Keychain, Linux Secret Service, an
+  operator KMS helper, or a key file the operator places (see
   [where credentials live](connect-clients.md#where-credentials-live) and
   [protecting the credential store key](secret-store-custody.md)).
+  An install that configures none of that still encrypts: the first start
+  generates the data key in this host's own keychain, verifies it reads back,
+  and records which protector holds it.
   A configured protector that cannot supply the key stops startup rather than
-  opening a second store.
-  With neither, startup stops rather than keeping credentials in an
-  unencrypted file; `up --allow-plaintext-credentials` is the only way to
-  accept that store, and it is reported as degraded wherever the posture
-  appears.
-  Managed OpenBao can keep its unseal and AppRole bootstrap in macOS Keychain,
-  Linux Secret Service, or an operator KMS helper. The initial root token is
-  revoked after narrow AppRole provisioning; protected-provider failure stops
-  startup instead of selecting another credential store. The store `up`
+  opening a second store, and a host with no usable protector stops rather
+  than keeping credentials in an unencrypted file.
+  `up --allow-plaintext-credentials` is the only way to accept that store, and
+  it is reported as degraded wherever the posture appears. The store `up`
   actually opened is recorded and reported, so a configured store that could
   not be reached is never mistaken for the one holding credentials.
   A [delegated connection](delegated-access.md)'s service-account key lives
@@ -84,7 +82,7 @@ The guarantees, and where each one is enforced:
   inserted, or reordered line is detectable by anyone with the public key —
   not just the operator who holds the private one. Wholesale tail truncation
   is caught by a signed, out-of-band head anchor in the secret store (real
-  protection under OpenBao/Vault); see [the audit chain](audit.md). A
+  protection under an external Vault/OpenBao); see [the audit chain](audit.md). A
   declarative transform fused into `call_tool` records its engine, query
   digest, byte counts, latency, and outcome under that same run without
   retaining the query or raw result.

@@ -4,7 +4,7 @@ import "testing"
 
 func TestParseFormulaVersion(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"class MicroagencyLatest < Formula\n  version \"0.1.2-latest.8\"\n  depends_on \"openbao\"\n", "0.1.2-latest.8"},
+		{"class MicroagencyLatest < Formula\n  version \"0.1.2-latest.8\"\n  depends_on \"microagent\"\n", "0.1.2-latest.8"},
 		{"  version \"1.2.3\"\n", "1.2.3"},
 		{"no version line here", ""},
 		{"version \"unterminated", ""},

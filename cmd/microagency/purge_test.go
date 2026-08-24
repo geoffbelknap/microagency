@@ -12,9 +12,6 @@ func seedState(t *testing.T, dir string) {
 	if err := os.MkdirAll(filepath.Join(dir, "refs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "openbao"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	files := map[string]string{
 		"audit.jsonl":        "run1\nrun2\n",
 		"refs/ref_abc.enc":   "encrypted",
@@ -23,8 +20,8 @@ func seedState(t *testing.T, dir string) {
 		"upstreams.json":     `{"conn":"notion"}`,
 		"token":              "operator-token",
 		"oauth-clients.json": "{}",
-		"openbao/vault.db":   "secrets",
 	}
+	files["credential-key-custody.json"] = `{"kind":"secret-service"}`
 	files["oauth-revocations.json"] = "[]"
 	files["auth-posture.json"] = `{"mode":"oauth-tunnel"}`
 	files["connection-templates.json"] = `[{"id":"docs"}]`
@@ -58,7 +55,7 @@ func TestDoPurgeTier1KeepsAuthAndConnections(t *testing.T) {
 		t.Errorf("log should be truncated, got %d bytes", len(b))
 	}
 	// kept: connections, credentials, auth
-	for _, p := range []string{"upstreams.json", "token", "oauth-clients.json", "oauth-revocations.json", "auth-posture.json", "connection-templates.json", "openbao/vault.db"} {
+	for _, p := range []string{"upstreams.json", "token", "oauth-clients.json", "oauth-revocations.json", "auth-posture.json", "connection-templates.json", "credential-key-custody.json"} {
 		if !fileExists(filepath.Join(dir, p)) {
 			t.Errorf("%s must be kept by a Tier-1 purge", p)
 		}

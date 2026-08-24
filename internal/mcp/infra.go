@@ -124,12 +124,11 @@ func (s *Server) secretsComponent(ctx context.Context) InfraComponent {
 		c.Status = "ok"
 		c.Detail["note"] = "using the AES-256-GCM file store with a separately supplied operator key"
 	case kind == "file":
-		// OpenBao is the managed default and is always attempted; the file store is
-		// only reached when Bao couldn't come up. It works, but mode 0600 is
-		// permission isolation rather than encryption at rest, so warn rather than
-		// report a healthy "ok".
+		// This store is reached only by an explicit operator opt-in. It works,
+		// but mode 0600 is permission isolation rather than encryption at rest,
+		// so warn rather than report a healthy "ok".
 		c.Status = "warn"
-		c.Detail["note"] = "OpenBao unavailable — running on the unencrypted mode-0600 file store, accepted by an explicit operator opt-in. Configure MICROAGENCY_SECRET_KEY_FILE with a separately held key for encrypted fallback storage."
+		c.Detail["note"] = "running on the unencrypted mode-0600 file store, accepted by an explicit operator opt-in. Drop the opt-in to let this host's keyring hold a data key, or set MICROAGENCY_SECRET_PROTECTOR or MICROAGENCY_SECRET_KEY_FILE, for an encrypted store."
 	default:
 		c.Status = "ok"
 	}

@@ -307,9 +307,11 @@ func TestConflictingCustodyRefusesRatherThanGuesses(t *testing.T) {
 	}
 }
 
-// TestNoCustodyConfiguredStillReachesThePlaintextGate: adding protectors must
-// not change what a deployment that configures none of this does.
+// TestNoCustodyConfiguredStillReachesThePlaintextGate: on a host that offers no
+// keyring of its own, configuring none of this still lands exactly where it
+// always did — at the gate, not in the clear.
 func TestNoCustodyConfiguredStillReachesThePlaintextGate(t *testing.T) {
+	withoutHostKeyring(t)
 	dir := t.TempDir()
 	none := func(string) string { return "" }
 	if _, err := Open(dir, none, Options{}); !errors.Is(err, ErrPlaintextNotAllowed) {

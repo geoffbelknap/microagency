@@ -68,26 +68,50 @@ func TestBuildServerReturnsErrorOnBadEngineSpec(t *testing.T) {
 	}
 }
 
-// A vault that could not be reached must not silently become a plaintext file
-// on disk. The refusal has to name what was unavailable and why, or the
-// operator is left with "it won't start" and no thread to pull.
-func TestBuildServerFailsClosedRatherThanDowngradingToPlaintext(t *testing.T) {
+// Without the opt-in, a build never lands on the unencrypted store — it either
+// encrypts under a data key something outside the state directory holds, or it
+// refuses. Which of the two depends on whether this host offers a keyring, so
+// the invariant, not the branch, is what is asserted here.
+func TestBuildServerNeverLandsOnPlaintextWithoutTheOptIn(t *testing.T) {
+	dir := t.TempDir()
 	_, err := BuildServer(Config{
-		StateDir:                  t.TempDir(),
-		Version:                   "test",
-		MaxInlineBytes:            8192,
-		WasmMaxMemMB:              512,
-		PreferredStore:            "managed OpenBao",
-		PreferredStoreUnavailable: "another process holds http://127.0.0.1:8200",
+		StateDir:       dir,
+		Version:        "test",
+		MaxInlineBytes: 8192,
+		WasmMaxMemMB:   512,
+	})
+	if err != nil {
+		if !errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
+			t.Fatalf("build failed for some other reason: %v", err)
+		}
+		return
+	}
+	p, loadErr := secretstore.LoadPosture(dir)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if p.Kind == secretstore.KindFile {
+		t.Fatalf("credentials landed in the clear with no opt-in: %+v", p)
+	}
+}
+
+// The refusal has to name what was unavailable and every way forward, or the
+// operator is left with "it won't start" and no thread to pull.
+func TestPlaintextRefusalNamesWhatWasTriedAndEveryWayForward(t *testing.T) {
+	err := plaintextRefusal(Config{
+		PreferredStore:            "external Vault/OpenBao (VAULT_ADDR)",
+		PreferredStoreUnavailable: "it did not answer when the gateway started",
 	})
 	if !errors.Is(err, secretstore.ErrPlaintextNotAllowed) {
-		t.Fatalf("build did not fail closed on the unencrypted fallback: %v", err)
+		t.Fatalf("refusal does not carry the sentinel: %v", err)
 	}
 	for _, want := range []string{
-		"managed OpenBao is unavailable",              // what was configured
-		"another process holds http://127.0.0.1:8200", // why it was unavailable
-		secretstore.FileKeyEnv,                        // how to encrypt instead
-		secretstore.AllowPlaintextEnv,                 // how to accept it deliberately
+		"external Vault/OpenBao (VAULT_ADDR)",        // what was configured
+		"it did not answer when the gateway started", // why it was unavailable
+		"no OS keyring was available",                // why nothing else held a key
+		secretstore.ProtectorEnv,                     // a KMS or secret-manager helper
+		secretstore.FileKeyEnv,                       // a key the operator holds
+		secretstore.AllowPlaintextEnv,                // how to accept it deliberately
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal %q is missing %q", err.Error(), want)
@@ -106,8 +130,8 @@ func TestBuildServerRecordsTheStoreItActuallyOpened(t *testing.T) {
 		MaxInlineBytes:            8192,
 		WasmMaxMemMB:              512,
 		AllowPlaintextCredentials: true,
-		PreferredStore:            "managed OpenBao",
-		PreferredStoreUnavailable: "another process holds http://127.0.0.1:8200",
+		PreferredStore:            "external Vault/OpenBao (VAULT_ADDR)",
+		PreferredStoreUnavailable: "it did not answer when the gateway started",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +142,7 @@ func TestBuildServerRecordsTheStoreItActuallyOpened(t *testing.T) {
 	if p.Kind != secretstore.KindFile || !p.Degraded {
 		t.Fatalf("record does not describe the unencrypted store: %+v", p)
 	}
-	if !p.Disagrees() || p.Configured != "managed OpenBao" {
+	if !p.Disagrees() || p.Configured != "external Vault/OpenBao (VAULT_ADDR)" {
 		t.Fatalf("record does not say the configured store is not the one in effect: %+v", p)
 	}
 	if p.Reason == "" {

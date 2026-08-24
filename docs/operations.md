@@ -4,18 +4,17 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 ## The CLI
 
 ```sh
 microagency up [flags]     # start the MCP server (runs in the background)
 microagency down           # stop the background server
-microagency restart        # restart with new flags; keeps OpenBao up
+microagency restart        # restart the background server with new flags
 microagency purge [--full] # delete your data (both tiers confirm first)
 microagency doctor         # check runtime + engine health
 microagency secret-store   # inspect or migrate the credential-store data key
-microagency openbao        # inspect or migrate managed OpenBao custody
 microagency hook install   # print the Claude Code egress-guard hook setup
 microagency mediation      # configure or inspect enforced workspace mediation
 microagency token          # manage named operator tokens for /admin + console
@@ -85,9 +84,6 @@ Everything lives under `~/.microagency`:
 | `upstream-tokens.json` | fallback credential store: encrypted with a separately supplied key, otherwise the mode-0600 unencrypted store that `--allow-plaintext-credentials` gates |
 | `refs/` | parked reference payloads (encrypted; 24h TTL with `--persist-refs`) |
 | `refs.key` | the refs encryption key |
-| `openbao/data/` | encrypted storage for the managed OpenBao |
-| `openbao/bootstrap.json` | same-disk degraded bootstrap only; absent with protected custody |
-| `openbao/custody.json` | non-secret protected-provider kind, record ID, and helper path |
 | `microagency.log` | the backgrounded server's log, including the secret-store posture line |
 | `credential-store.json` | non-secret record of the store `up` actually opened: kind, the store in effect, and the configured store when it differs |
 | `credential-key-custody.json` | non-secret locator naming the protector that holds the credential store's data key, its record ID, and the helper path |
@@ -109,16 +105,14 @@ provider, and `purge --full` deletes that record first.
   history, stored upstream credentials (you will re-authenticate every
   connection), the operator tokens (legacy and named), and the local OAuth
   keys (Claude Code will re-consent). It deletes any externally held record
-  first — the protected OpenBao bootstrap, the credential store's data key —
-  and keeps the state directory if either deletion fails, so nothing is
-  stranded in a keyring or KMS with no locator left.
+  first — the credential store's data key — and keeps the state directory if
+  that deletion fails, so nothing is stranded in a keyring or KMS with no
+  locator left.
 
 `--yes`/`-y` skips the confirmation for scripted use.
 
 See [protecting the credential store key](secret-store-custody.md) for
-data-key protector setup, the helper protocol, migration, and recovery, and
-[protecting managed OpenBao](openbao-custody.md) for the same for managed
-OpenBao's bootstrap.
+data-key protector setup, the helper protocol, migration, and recovery.
 
 ## Doctor
 

@@ -4,7 +4,7 @@ description: The four auth modes, and where every secret actually lives.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 ## Built-in OAuth (the default)
 
@@ -41,51 +41,95 @@ gets `--allow-remote-admin`; see
 
 The upstream secrets microagency holds — OAuth refresh tokens, static
 bearers, stored client registrations — go in a secret store, not the
-plaintext registration index. On startup `up` picks one:
+plaintext registration index. On startup `up` picks one, highest precedence
+first:
 
-- If `VAULT_ADDR` and `VAULT_TOKEN` are set, it uses that Vault/OpenBao. Both
-  are required; a partial configuration fails startup.
-- Otherwise, if an `openbao`/`bao` binary is on your PATH, `up` starts a
-  dedicated OpenBao on `127.0.0.1:8200` and uses its KV-v2 engine. Protected
-  custody can keep its bootstrap in macOS Keychain, Linux Secret Service, or
-  an operator KMS helper. Without one, the bootstrap stays beside the data
-  under `~/.microagency/openbao/` and is reported as same-disk degraded.
-  `restart` keeps this OpenBao up; `down` stops it.
-- If neither is available and a data-key protector is configured (below), it
-  uses the **encrypted file store**. This needs no opt-in: it is a supported
-  posture, not a downgrade.
-- If neither is available and no protector is configured, the only store left
-  is a mode-0600 **unencrypted file** at `~/.microagency/upstream-tokens.json` —
-  permission isolation, not encryption at rest. `up` **refuses to start**
-  rather than put credentials there. To accept it anyway, pass
-  `up --allow-plaintext-credentials` (or set
-  `MICROAGENCY_ALLOW_PLAINTEXT_CREDENTIALS=1` for a unit file). The startup
-  banner, the log, and `doctor` all report it as degraded.
+1. **An external Vault or OpenBao**, when `VAULT_ADDR` and `VAULT_TOKEN` are
+   both set. Both are required; a partial configuration fails startup.
+2. **The AES-256-GCM file store**, under a data key the protector named by
+   `MICROAGENCY_SECRET_PROTECTOR` holds.
+3. **The AES-256-GCM file store**, under a key file you place yourself and
+   name with `MICROAGENCY_SECRET_KEY_FILE`.
+4. **The AES-256-GCM file store**, under a data key microagency generates on
+   first start and keeps in this host's own keychain — the macOS login
+   Keychain, or the Linux Secret Service. This is what an install that
+   configures none of the above gets. It needs no opt-in.
+5. **An unencrypted mode-0600 file** at `~/.microagency/upstream-tokens.json` —
+   permission isolation, not encryption at rest. `up` **refuses to start**
+   rather than put credentials there. To accept it anyway, pass
+   `up --allow-plaintext-credentials` (or set
+   `MICROAGENCY_ALLOW_PLAINTEXT_CREDENTIALS=1` for a unit file). The startup
+   banner, the log, and `doctor` all report it as degraded.
+
+Once a start has put the data key somewhere,
+`~/.microagency/credential-key-custody.json` records which protector holds it,
+and later starts follow that record rather than deciding again. The host
+keychain in (4) is chosen only when the operator has configured nothing:
+every setting above it wins, and so does the explicit
+`--allow-plaintext-credentials`. It is also never chosen over a store that is
+already encrypted, because minting a second key there would make the existing
+credentials unreadable.
+
+### A fresh machine
+
+`brew install …` then `microagency up` is the whole setup. The first start
+generates the data key, stores it, reads it back to prove the store will open
+again, and says where it went:
+
+```
+    Credentials    AES-256-GCM file store (data key: Linux Secret Service)
+                   data key generated in your Linux Secret Service — back it up; nothing in
+                   ~/.microagency can open this store without it
+```
+
+Later starts retrieve the same key and name the protector without repeating
+that line. `microagency secret-store status` reports it at any time.
+
+### A headless host
+
+A server, a container, or a locked session has no keychain to put a key in.
+`up` refuses rather than choose a lesser store for you, and it will not write a
+key beside the ciphertext it opens:
+
+```
+microagency: refusing to start — upstream credentials would be stored UNENCRYPTED.
+  No data key can be held outside the state directory: linux Secret Service protector
+  requires secret-tool (libsecret-tools/libsecret)
+  ...
+  Choose one:
+    - hold the key in a KMS or secret manager: set MICROAGENCY_SECRET_PROTECTOR=command and
+      MICROAGENCY_SECRET_PROTECTOR_COMMAND to your helper, then start again
+    - hold the key yourself: point MICROAGENCY_SECRET_KEY_FILE at a separately held
+      32-byte key outside ~/.microagency, then start again
+    - make this host's Linux Secret Service reachable, then start again
+    - accept unencrypted credentials, knowing what that means:
+      `microagency up --allow-plaintext-credentials` (or MICROAGENCY_ALLOW_PLAINTEXT_CREDENTIALS=1)
+```
+
+For a hosted deployment the first option is the one you want: a `command`
+protector wraps the data key with a KMS you control. See
+[protecting the credential store key](secret-store-custody.md#kms-or-secret-manager-helper).
+
+### When the store is not the one you configured
 
 `up` records the store it actually opened in
 `~/.microagency/credential-store.json` and prints it on startup, so the store
-in effect is never inferred from configuration. When the two differ — a
-configured OpenBao that could not be reached, say — `doctor` names both, and
-which one holds your credentials:
+in effect is never inferred from configuration. `doctor` reports the same
+record while the gateway runs, and probes what a start would use when it is
+not. A configured external store is reported only after it answers:
 
 ```
-  secret store      ✗ the configured store is NOT the one holding credentials
-                    configured: managed OpenBao
-                    in effect:  unencrypted mode-0600 file in the state directory (running gateway, pid 4711)
-                    why:        another process holds http://127.0.0.1:8200, so microagency's own instance was never reached
-                    fix:        restore the configured store, then `microagency restart`
-                    until then credentials are NOT encrypted at rest
+  secret store      ✗ external Vault/OpenBao (VAULT_ADDR=http://127.0.0.1:8200) did not answer
+                    why:        dial tcp 127.0.0.1:8200: connect: connection refused
+                    fix:        start it, or correct VAULT_ADDR/VAULT_TOKEN, then `microagency restart`
+                    (a start still uses it; every credential read would fail until it answers)
 ```
-
-A common cause of that "another process holds" line is an OpenBao left over
-from an earlier run: it answers on `127.0.0.1:8200`, but it is not the instance
-microagency recorded, so adopting it is refused. Stop whatever holds the port
-and start again.
 
 ### Encrypting the file store
 
 The encrypted file store uses AES-256-GCM under a 32-byte data key that a
-**protector** supplies. Pick the one that matches where the gateway runs:
+**protector** supplies. Your own host keychain is the default; name a different
+one when it does not match where the gateway runs:
 
 ```sh
 export MICROAGENCY_SECRET_PROTECTOR=keychain        # macOS login Keychain
@@ -124,11 +168,13 @@ your credentials is the failure nobody notices. See
 [protecting the credential store key](secret-store-custody.md) for the helper
 protocol, moving the key between protectors, and recovery.
 
-The managed OpenBao runs with `tls_disable` on the loopback bind; it never
-leaves localhost. On its first protected start, microagency uses the initial
-root token only to configure KV v2 and a narrow AppRole, then revokes it. See
-[protecting managed OpenBao](openbao-custody.md) for setup, migration,
-fail-closed recovery, rotation, and backup procedures.
+### Upgrading from a managed OpenBao
+
+Earlier versions could start and supervise an OpenBao of their own. This
+version does not, and it cannot start one to read what is in it. If your
+credentials live in a managed instance, choose a path **before** you upgrade.
+See [upgrading from a managed OpenBao](secret-store-custody.md#upgrading-from-a-managed-openbao)
+for both, and for removing what the managed instance left behind.
 
 In a multi-user self-service deployment, each upstream token and dynamic
 client record uses a principal-specific secret-store path. The path contains a
@@ -175,6 +221,6 @@ claude mcp add microagency -- /abs/path/to/microagency up --stdio
 ```
 
 `--stdio` is meant for `reduce` and for testing the tool surface: it
-doesn't run OpenBao or aggregate upstreams, so there's no console to add
+doesn't open a credential store or aggregate upstreams, so there's no console to add
 servers from and the index starts empty. For the gateway story — connecting
 MCP servers and proxying them — use the HTTP server (`up`).
