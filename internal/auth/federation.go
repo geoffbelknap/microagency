@@ -282,8 +282,10 @@ func (f *Federation) validateIDToken(ctx context.Context, raw, nonce string) (*F
 }
 
 func (f *Federation) groupsClaim() string {
-	if strings.TrimSpace(f.cfg.GroupsClaim) != "" {
-		return f.cfg.GroupsClaim
+	// Trimmed: a claim name that arrived with surrounding whitespace would
+	// match no claim at all, turning every group rule into a silent no-op.
+	if named := strings.TrimSpace(f.cfg.GroupsClaim); named != "" {
+		return named
 	}
 	return DefaultGroupsClaim
 }

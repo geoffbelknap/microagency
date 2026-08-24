@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestParseAudienceRule(t *testing.T) {
@@ -431,5 +433,49 @@ func TestUnreadableRulesFailClosedRatherThanDecay(t *testing.T) {
 	}
 	if rules.Summary().Unreadable {
 		t.Error("Summary still reports the repaired rule set as unreadable")
+	}
+}
+
+// TestGroupsClaimReading covers the shapes providers actually emit. A group
+// rule that never matches because the claim was spelled differently, or came
+// back as a bare string, would look like a working bound while admitting
+// nobody — so both the claim name and both encodings are pinned.
+func TestGroupsClaimReading(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		claims jwt.MapClaims
+		claim  string
+		want   []string
+	}{
+		{"list under the default claim", jwt.MapClaims{"groups": []any{"eng", "all"}}, "", []string{"eng", "all"}},
+		{"a single membership as a bare string", jwt.MapClaims{"groups": "eng"}, "", []string{"eng"}},
+		{"an operator-named claim", jwt.MapClaims{"roles": []any{"eng"}}, "roles", []string{"eng"}},
+		{"the default claim is ignored when another is named", jwt.MapClaims{"groups": []any{"eng"}}, "roles", nil},
+		{"non-string entries are skipped", jwt.MapClaims{"groups": []any{"eng", 7, ""}}, "", []string{"eng"}},
+		{"absent claim", jwt.MapClaims{}, "", nil},
+		{"empty string claim", jwt.MapClaims{"groups": "   "}, "", nil},
+		{"wrong type", jwt.MapClaims{"groups": 42}, "", nil},
+	} {
+		f := &Federation{cfg: FederationConfig{GroupsClaim: tc.claim}}
+		got := groupsFromClaims(tc.claims, f.groupsClaim())
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: groups = %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: groups = %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+	// The default is only applied when the operator named nothing.
+	if got := (&Federation{}).groupsClaim(); got != DefaultGroupsClaim {
+		t.Errorf("default groups claim = %q, want %q", got, DefaultGroupsClaim)
+	}
+	// Surrounding whitespace is trimmed: an untrimmed name matches no claim,
+	// which would turn every group rule into a silent no-op.
+	if got := (&Federation{cfg: FederationConfig{GroupsClaim: "  roles  "}}).groupsClaim(); got != "roles" {
+		t.Errorf("operator-named claim = %q, want it trimmed to \"roles\"", got)
 	}
 }
