@@ -152,7 +152,15 @@ The guarantees, and where each one is enforced:
   operator tokens cannot authenticate `/mcp`.
   The public `/connections` account API accepts the MCP principal token but
   cannot route to `/admin`; its unauthenticated provider callback is protected
-  by expiring, single-use OAuth state and PKCE.
+  by expiring, single-use OAuth state and PKCE, and a callback carrying state
+  the gateway is not holding answers `404` with a notice that identifies
+  nothing — that branch is the only one an anonymous caller can reach.
+  The account portal at `/account` is served only to a valid principal token,
+  so its description of what the gateway holds and records reaches the person
+  granting access and no one else. A sign-in page at `/` is the only page an
+  unauthenticated caller receives, and it carries one control and no prose
+  about the deployment. See
+  [public endpoints](public-mode.md#public-endpoints).
 
 ## Governed-program threat model
 

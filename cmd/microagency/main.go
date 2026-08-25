@@ -624,7 +624,9 @@ func daemonize(cfg httpConfig) {
 	fmt.Fprintf(os.Stderr, "\n  microagency is up in the background (pid %d).\n\n", pid)
 	fmt.Fprintf(os.Stderr, "    MCP endpoint   http://%s/mcp   (in Claude Code: /mcp → Authenticate)\n", cfg.addr)
 	if servesPortal(cfg) {
-		fmt.Fprintf(os.Stderr, "    Account portal http://%s%s\n", cfg.addr, portal.Path)
+		// The address to hand someone is where they sign in, not the route
+		// that requires the token signing in produces.
+		fmt.Fprintf(os.Stderr, "    Account portal http://%s/   (sign in here; the account page needs the token it issues)\n", cfg.addr)
 	}
 	fmt.Fprintf(os.Stderr, "    Console        http://%s/console\n", consoleAddr(cfg))
 	if ra := remoteAdminAddr(cfg); ra != "" {
@@ -1245,6 +1247,12 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 			audience = "microagency"
 		}
 	}
+	// Whether the account application was actually mounted, and the discovery
+	// URL it was mounted with. The root serves a sign-in control only when
+	// there is something to sign in to, and it points the flow at the same
+	// metadata the application uses, so the two cannot drift.
+	portalMounted := false
+	portalMetadata := ""
 
 	mcpMux = http.NewServeMux()
 	var builtInAS *auth.AuthServer
@@ -1383,19 +1391,37 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		// screens belong to the operator's identity provider, and there is no
 		// registration endpoint here for a browser to obtain a client from.
 		if builtInAS != nil && servesPortal(cfg) {
-			mcpMux.Handle(portal.Path, portal.Handler(portal.Config{
+			// The portal is released only to a caller this gateway
+			// authenticates — the same check the /connections routes it drives
+			// make, so the page and its API cannot disagree about who is
+			// signed in. Signing in happens at the root; nothing about the
+			// account application reaches a caller without a token.
+			portalHandler, err := portal.Handler(portal.Config{
 				ResourceMetadata: connectionMetadata,
-			}))
+			}, func(r *http.Request) error {
+				_, err := connectionAuth.Authenticate(r)
+				return err
+			})
+			if err != nil {
+				return nil, nil, "", "", err
+			}
+			mcpMux.Handle(portal.Path, portalHandler)
+			portalMetadata = connectionMetadata
+			portalMounted = true
 		}
 	}
-	// GET / on the public listener answered 404, which tells someone who
-	// reached this gateway in a browser nothing — not what it is, not where to
-	// sign in. The landing page says both and nothing else: no counts, no
-	// provider names, no deployment specifics, and no sign-in affordance at all
-	// when this deployment serves no account portal to point at.
+	// GET / is the ONE page this gateway serves to a caller that has not
+	// authenticated, and it is a sign-in control and nothing else — no product
+	// name, no description of what runs here, no counts, no provider names, no
+	// deployment specifics. Sign-in lives at the root precisely because the
+	// root is anonymous: the account application can then require the token
+	// this page produces, which it could not do while it was the sign-in
+	// mechanism itself. A deployment with no sign-in of its own serves no page
+	// at all here.
 	landingCfg := landing.Config{}
-	if connectionAuth != nil && builtInAS != nil && servesPortal(cfg) {
+	if portalMounted {
 		landingCfg.PortalPath = portal.Path
+		landingCfg.ResourceMetadata = portalMetadata
 	}
 	mcpMux.Handle("/", landing.Handler(landingCfg))
 
@@ -1732,8 +1758,8 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 		}
 	}
 	if servesPortal(cfg) {
-		fmt.Fprintf(os.Stderr, "  Account portal %s   (each signed-in user connects their own providers here)\n",
-			strings.TrimSuffix(endpoint, "/mcp")+portal.Path)
+		fmt.Fprintf(os.Stderr, "  Account portal %s/   (each user signs in here and connects their own providers)\n",
+			strings.TrimSuffix(strings.TrimSuffix(endpoint, "/mcp"), "/"))
 	}
 	fmt.Fprintf(os.Stderr, "  Console        http://%s/console   (operator token: cat %s)\n", consoleAddr(cfg), opTokenFile)
 	if cfg.tunnel != "" && consoleAddr(cfg) != cfg.addr {

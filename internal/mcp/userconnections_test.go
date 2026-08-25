@@ -536,12 +536,17 @@ func TestUserConnectionRoutesRequirePrincipal(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"), "/.well-known/oauth-protected-resource/mcp") {
 		t.Fatalf("unauthenticated template list = %d, challenge %q", rec.Code, rec.Header().Get("WWW-Authenticate"))
 	}
-	// The provider callback cannot be bearer-gated, but forged state is inert.
+	// The provider callback cannot be bearer-gated, but forged state is inert —
+	// and answers without identifying what runs here, because this is the one
+	// branch an anonymous caller can reach by guessing the path.
 	req = httptest.NewRequest(http.MethodGet, "/connections/oauth/callback?state=forged&code=x", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || len(server.UpstreamList()) != 0 {
+	if rec.Code != http.StatusNotFound || len(server.UpstreamList()) != 0 {
 		t.Fatalf("forged unauthenticated callback changed state: %d %+v", rec.Code, server.UpstreamList())
+	}
+	if body := rec.Body.String(); strings.Contains(body, "microagency") {
+		t.Error("the forged-callback notice names the product to an anonymous caller")
 	}
 }
 

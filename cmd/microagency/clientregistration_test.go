@@ -19,8 +19,8 @@ func mcpGet(t *testing.T, mux *http.ServeMux, path string) *httptest.ResponseRec
 	return rec
 }
 
-// The root answers on the public listener, with a sign-in affordance when this
-// deployment serves a portal to sign in to.
+// The root answers on the public listener with a sign-in control, and it is the
+// ONLY page this listener serves to a caller that has not authenticated.
 func TestLandingPageIsServedOnTheAgentPlane(t *testing.T) {
 	srv := testServer(t, "127.0.0.1:8766")
 	cfg := httpConfig{addr: "127.0.0.1:8765", authDir: t.TempDir()}
@@ -33,15 +33,20 @@ func TestLandingPageIsServedOnTheAgentPlane(t *testing.T) {
 		t.Fatalf("GET / = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "microagency") || !strings.Contains(body, portal.Path) {
-		t.Error("landing page does not name the product and its sign-in route")
+	if strings.Contains(body, "microagency") {
+		t.Error("the page served before sign-in names the product")
+	}
+	if !strings.Contains(body, ">Sign in</button>") {
+		t.Error("the page served before sign-in offers no sign-in control")
 	}
 	// It must not shadow anything already mounted on this listener.
 	if rec := mcpGet(t, mcpMux, "/.well-known/oauth-authorization-server"); rec.Code != http.StatusOK {
 		t.Errorf("OAuth metadata = %d; the landing page must not shadow discovery", rec.Code)
 	}
-	if rec := mcpGet(t, mcpMux, portal.Path); rec.Code != http.StatusOK {
-		t.Errorf("%s = %d; the landing page must not shadow the portal", portal.Path, rec.Code)
+	// The account application is mounted, and it answers a caller with no
+	// credential by sending it back here rather than by serving itself.
+	if rec := mcpGet(t, mcpMux, portal.Path); rec.Code != http.StatusSeeOther {
+		t.Errorf("anonymous %s = %d, want 303 to the sign-in page", portal.Path, rec.Code)
 	}
 	if rec := mcpGet(t, mcpMux, "/nothing-here"); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown path = %d, want 404", rec.Code)
@@ -92,14 +97,11 @@ func TestRegistrationOffRefusesAndDropsThePortal(t *testing.T) {
 	if rec := mcpGet(t, mcpMux, portal.Path); rec.Code != http.StatusNotFound {
 		t.Errorf("%s = %d with registration off, want 404", portal.Path, rec.Code)
 	}
-	// The landing page still answers, without offering a sign-in that leads
-	// nowhere.
-	landing := mcpGet(t, mcpMux, "/")
-	if landing.Code != http.StatusOK {
-		t.Fatalf("GET / = %d, want 200", landing.Code)
-	}
-	if strings.Contains(landing.Body.String(), portal.Path) {
-		t.Error("landing page offers a portal this deployment does not serve")
+	// With no portal there is no sign-in to offer, so the root serves no page
+	// either. A card with no control on it is not an improvement on 404, and it
+	// would be one more document published to anyone who asks.
+	if landing := mcpGet(t, mcpMux, "/"); landing.Code != http.StatusNotFound {
+		t.Errorf("GET / with no portal = %d, want 404", landing.Code)
 	}
 }
 

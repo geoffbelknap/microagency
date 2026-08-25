@@ -501,7 +501,9 @@ func (s *AuthServer) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	if !ok || state == "" {
-		authui.WriteUserMessage(w, "This sign-in request is missing, expired, or was already used. Start again from your MCP client.")
+		// Reached without a state this server issued, so the caller is not
+		// necessarily anyone: answer without identifying what runs here.
+		authui.WriteUnknownRequest(w, "This sign-in request is missing, expired, or was already used. Start again from the client you began in.")
 		return
 	}
 	if q.Get("error") != "" {

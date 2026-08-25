@@ -175,8 +175,40 @@ func WriteMessage(w http.ResponseWriter, msg string) {
 	_, _ = w.Write([]byte(Shell("microagency", "", body)))
 }
 
+// WriteUnknownRequest renders the notice for a redirect that carries no request
+// this process is holding: a state that expired, was already used, or was never
+// issued.
+//
+// That branch is the one page on the public listener an ANONYMOUS caller can
+// reach by guessing a path, because reaching any other branch means holding a
+// single-use state the gateway issued to a signed-in person. So it identifies
+// nothing: no name, no mark, no description of what runs here. Someone whose
+// request really did expire still gets a sentence and a next step; someone who
+// guessed the path learns only that the path exists, which the 404 status says
+// anyway.
+//
+// Callers pass their own sentence, because "expired mid-connect" and "expired
+// mid-sign-in" send a person back to two different places.
+func WriteUnknownRequest(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.WriteHeader(http.StatusNotFound)
+	body := `
+<div class="card"><div class="body center" style="padding:34px 26px">
+ <div class="seal warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></div>
+ <p class="lead" style="margin-top:10px;color:var(--ink)">` + html.EscapeString(msg) + `</p>
+</div></div>`
+	_, _ = w.Write([]byte(Shell("Expired", "", body)))
+}
+
 // WriteUserMessage renders a public authorization notice without linking to the
 // loopback-only operator console.
+//
+// Every branch that reaches it has already consumed a single-use state this
+// gateway issued to a signed-in person, so the page may identify itself. The
+// one branch that has NOT — an unknown state — uses WriteUnknownRequest.
 func WriteUserMessage(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	body := `

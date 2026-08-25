@@ -332,11 +332,25 @@ Built-in public OAuth serves these routes on the tunneled listener:
 - `/oauth/jwks`
 - `/oauth/sso/callback` (federated sign-in only)
 - `/connections` and `/connections/*`
-- `/account` (built-in OAuth only)
+- `/account` (built-in OAuth only) — authenticated; see
+  [the account portal](#the-account-portal)
 - `/mcp`
-- `/` — a landing page naming the product and linking to `/account`. It carries
-  nothing about this deployment: no version, no counts, no provider names, no
-  issuer or tunnel URL, and no sign-in link where no portal is served
+- `/` — a sign-in page, and the only page this listener serves to a caller that
+  has not authenticated
+
+Everything else on that list either authenticates the caller or is discovery.
+The sign-in page carries one control and no words beyond its label: no product
+name, no description of what this gateway does, no version, no counts, no
+provider names, no issuer or tunnel URL. A deployment that runs no sign-in of
+its own serves no page at the root either, and answers 404 there.
+
+Discovery is the deliberate exception, and it names endpoints rather than
+contents. One value in it is worth knowing about: `resource` in
+`/.well-known/oauth-protected-resource` is this gateway's audience, and it
+defaults to the literal string `microagency` on a deployment that does not set
+one. Set `--audience` to your own resource identifier if you would rather that
+document said nothing recognizable. Over a tunnel the default is already your
+own public `/mcp` URL.
 
 The tunnel exposes `/mcp`, the OAuth endpoints, the principal-authenticated
 self-service connection API, and the account portal that drives it. The operator
@@ -442,35 +456,45 @@ contain only `client_configured: true`.
 
 Users do not need the API to add a provider. A gateway running the built-in
 authorization server serves an account portal at `/account`, on the same
-listener as `/mcp`:
+listener as `/mcp`. Users reach it by signing in at the root:
 
 ```
-http://127.0.0.1:8765/account          # local
-https://gateway.example/account        # tunnel
+http://127.0.0.1:8765/                 # local
+https://gateway.example/               # tunnel
 ```
 
-The startup banner prints the address. The page lists the templates you
+The startup banner prints both addresses. The page lists the templates you
 published, shows each user their own connections, and offers connect, refresh,
 reauthorize, and disconnect. Connecting sends the user to the provider and the
 grant comes back to the gateway, exactly as the API flow does.
 
-The portal signs a user in the same way an MCP client does. It registers itself
-as a public OAuth client, runs an authorization code flow with PKCE, and keeps
-the resulting access token in the browser tab. With `--sso-issuer` the sign-in
-is your identity provider's, so each corporate account is its own principal and
-sees only its own connections. There is no cookie and no server-side session.
-Signing out revokes the token at the gateway.
+Sign-in happens at `/`, not at `/account`. The sign-in page registers itself as
+a public OAuth client, runs an authorization code flow with PKCE, and keeps the
+resulting access token in the browser tab — the same way an MCP client signs
+in. With `--sso-issuer` the sign-in is your identity provider's, so each
+corporate account is its own principal and sees only its own connections. There
+is no cookie and no server-side session. Signing out revokes the token at the
+gateway and returns the tab to `/`.
+
+`/account` is then served only to a request carrying a valid principal token.
+That is why the portal describes plainly what the gateway does with a
+credential, who can see a connection, and what is recorded: the person reading
+it has signed in. A browser that asks for `/account` without a token is sent to
+`/`. A client whose token was refused gets `401` with the `WWW-Authenticate`
+challenge every other guarded route here returns. Neither answer contains any
+of the page.
 
 The portal is a client of the routes above and holds no operator authority. It
 never reaches `/admin`, and the token it obtains cannot: the operator surface
 stays on its own listener behind the operator token. A user can create only what
 their templates and quotas allow.
 
-Three configurations do not serve the portal, and `/account` returns 404 in each
-while the API above stays available. With `--issuer`, issuance belongs to your
-own authorization server. With `--token`, there is no interactive sign-in at
-all. With `--client-registration off`, there is no client for the page to
-obtain: it registers itself, exactly as an MCP client does.
+Three configurations do not serve the portal, and `/account` and `/` both
+return 404 in each while the API above stays available. With `--issuer`,
+issuance belongs to your own authorization server. With `--token`, there is no
+interactive sign-in at all. With `--client-registration off`, there is no client
+for the sign-in page to obtain: it registers itself, exactly as an MCP client
+does.
 
 The portal drives these routes, and an integration or script can call them
 directly with the same principal token as `/mcp`:

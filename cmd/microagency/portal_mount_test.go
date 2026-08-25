@@ -17,6 +17,17 @@ func portalStatus(t *testing.T, mux *http.ServeMux, path string) *httptest.Respo
 	return rec
 }
 
+// withBearer asks for a route the way the sign-in page's own fetch does: with a
+// token, which is the only way this route answers with the application at all.
+func withBearer(t *testing.T, mux *http.ServeMux, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
 // The portal belongs to the agent plane's listener, beside the /connections API
 // it drives. It must never appear on the operator listener, and mounting it must
 // not put an operator route on the public one.
@@ -34,12 +45,31 @@ func TestPortalIsOnTheAgentPlaneOnly(t *testing.T) {
 		t.Fatalf("mode = %q, separate operator mux = %v", mode, adminMux != mcpMux)
 	}
 
+	// Mounted, and gated: a caller with no credential is sent to the one page
+	// that can sign it in, and never receives the application.
 	rec := portalStatus(t, mcpMux, portal.Path)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("%s on the agent plane = %d, want 200", portal.Path, rec.Code)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("anonymous %s on the agent plane = %d to %q, want 303 to /",
+			portal.Path, rec.Code, rec.Header().Get("Location"))
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "gateway.example/.well-known/oauth-protected-resource/mcp") {
-		t.Error("portal was not handed this deployment's protected-resource metadata URL")
+	// A refused token gets this deployment's own discovery URL, which is how the
+	// page that asked learns where to authenticate.
+	metadata := "https://gateway.example/.well-known/oauth-protected-resource/mcp"
+	refused := withBearer(t, mcpMux, portal.Path, "not-a-real-token")
+	if refused.Code != http.StatusUnauthorized {
+		t.Fatalf("refused token on %s = %d, want 401", portal.Path, refused.Code)
+	}
+	if got := refused.Header().Get("WWW-Authenticate"); !strings.Contains(got, metadata) {
+		t.Errorf("WWW-Authenticate = %q, want this deployment's metadata URL %q", got, metadata)
+	}
+	// The sign-in page is handed the same URL, so the flow it runs and the route
+	// it unlocks cannot point at two different authorization servers.
+	root := portalStatus(t, mcpMux, "/")
+	if root.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", root.Code)
+	}
+	if !strings.Contains(root.Body.String(), metadata) {
+		t.Error("sign-in page was not handed this deployment's protected-resource metadata URL")
 	}
 
 	if rec := portalStatus(t, adminMux, portal.Path); rec.Code != http.StatusNotFound {

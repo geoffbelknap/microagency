@@ -11,21 +11,9 @@
   </div>
 
   <div id="boot" class="sec">
-    <p class="lead">Loading your account…</p>
-    <div class="bar"><i></i></div>
-  </div>
-
-  <div id="signedout" class="hidden">
-    <div class="sec">
-      <div class="eyebrow">Account</div>
-      <h2 style="margin-top:9px">Connect a provider to your own account</h2>
-      <p class="hint">This gateway lets you add the providers your operator has published.
-        A connection you create here is yours: its credential is held by the gateway, and no
-        other user of this gateway can see it or call its tools.</p>
-      <div id="signin-notice"></div>
-      <div style="margin-top:20px"><button class="btn primary" id="signin" style="max-width:220px">Sign in</button></div>
-      <p class="note" style="text-align:left;margin-top:14px">you sign in the same way an MCP client does · nothing is stored on this page but the tab's own session</p>
-    </div>
+    <p class="lead" id="boot-msg">Loading your account…</p>
+    <div class="bar" id="boot-bar"><i></i></div>
+    <div id="boot-notice"></div>
   </div>
 
   <div id="app" class="hidden">
@@ -70,23 +58,24 @@
 <script>
 /* microagency account portal.
    No framework, no CDN, no build step — the same constraints as the operator
-   console. This page is a CLIENT of the public API: it signs in against the
-   gateway's own OAuth authorization server with dynamic client registration and
-   PKCE (exactly as an MCP client does), keeps the access token in this tab's
-   sessionStorage, and calls /connections with it. There is no cookie and no
-   server-side session, so there is nothing here for another site to ride on. */
+   console. This page is a CLIENT of the public API: the sign-in page at the
+   root ran the gateway's own OAuth flow (dynamic client registration and PKCE,
+   exactly as an MCP client does) and left the access token in this tab's
+   sessionStorage; this page reads it and calls /connections with it. There is
+   no cookie and no server-side session, so there is nothing here for another
+   site to ride on — and the gateway does not serve this document at all to a
+   request that presents no token, which is why everything below may say plainly
+   what it does. */
 (function () {
   "use strict";
 
   var CFG = {};
   try { CFG = JSON.parse(document.getElementById("portal-config").textContent || "{}"); } catch (e) { CFG = {}; }
 
-  var TOKEN_KEY = "microagency.portal.token";
-  var PKCE_KEY = "microagency.portal.pkce";
-  var ATTEMPT_KEY = "microagency.portal.attempt";
-  /* The client_id is a public identifier, not a secret, and it is per gateway
-     origin: a different origin is a different issuer and a different client. */
-  var CLIENT_KEY = "microagency.portal.client:" + location.origin;
+  /* The storage keys this tab shares with the sign-in page that put the token
+     here. Both documents are handed the same constants by the server, so the
+     two cannot drift apart. */
+  var K = CFG.keys || {};
 
   var state = { token: "", conns: [], templates: [], resource: "", as: null };
 
@@ -103,9 +92,6 @@
   function ss(k) { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } }
   function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* private mode */ } }
   function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) { /* private mode */ } }
-  function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
-  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
-  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } }
 
   function notice(sel, msg, kind) {
     var slot = $(sel);
@@ -156,7 +142,7 @@
     }
     var r = await fetch(path, opt);
     if (r.status === 401) {
-      signedOut("Your session ended. Sign in again.");
+      leave("Your session ended. Sign in again.");
       throw new Error("unauthenticated");
     }
     var text = (await r.text()).trim();
@@ -207,23 +193,11 @@
     return !fault || fault.retryable !== false;
   }
 
-  /* ---------- OAuth: discovery, registration, PKCE ---------- */
+  /* ---------- OAuth: what signing out needs ---------- */
 
-  function b64url(bytes) {
-    var s = "";
-    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-  function randomB64(n) {
-    var b = new Uint8Array(n);
-    crypto.getRandomValues(b);
-    return b64url(b);
-  }
-  async function challengeFor(verifier) {
-    var digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-    return b64url(new Uint8Array(digest));
-  }
-
+  /* Discovery is still read here, for one reason: signing out revokes the token
+     at the gateway, and the revocation endpoint is whatever the gateway
+     advertises. Obtaining a token is not this page's job any more. */
   async function discover() {
     if (state.as) return state.as;
     var meta = await getJSON(localize(CFG.resource_metadata || "/.well-known/oauth-protected-resource"));
@@ -233,116 +207,10 @@
     return state.as;
   }
 
-  async function ensureClient(registrationEndpoint, redirect) {
-    var cached = lsGet(CLIENT_KEY);
-    if (cached) return cached;
-    var r = await fetch(localize(registrationEndpoint), {
-      method: "POST", cache: "no-store", credentials: "omit",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        redirect_uris: [redirect],
-        client_name: "microagency account portal",
-        token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code"],
-        response_types: ["code"]
-      })
-    });
-    if (!r.ok) {
-      throw new Error("This gateway would not register the portal as an OAuth client (" + r.status +
-        "). Reach it over HTTPS, or on a loopback address over HTTP.");
-    }
-    var reg = await r.json();
-    if (!reg.client_id) throw new Error("The gateway's client registration returned no client_id.");
-    lsSet(CLIENT_KEY, reg.client_id);
-    return reg.client_id;
-  }
-
-  async function signIn() {
-    if (!(window.crypto && window.crypto.subtle)) {
-      notice("#signin-notice", "This browser will not run the PKCE exchange on an insecure origin. " +
-        "Reach the gateway over HTTPS, or on a loopback address.", "bad");
-      return;
-    }
-    notice("#signin-notice", "");
-    var as = await discover();
-    var redirect = location.origin + location.pathname;
-    var clientID = await ensureClient(as.registration_endpoint, redirect);
-    var verifier = randomB64(64);
-    var nonce = randomB64(16);
-    ssSet(PKCE_KEY, JSON.stringify({
-      v: verifier, s: nonce, r: redirect,
-      res: state.resource || "", iss: as.issuer || ""
-    }));
-    ssSet(ATTEMPT_KEY, "1");
-    var q = new URLSearchParams({
-      response_type: "code",
-      client_id: clientID,
-      redirect_uri: redirect,
-      code_challenge: await challengeFor(verifier),
-      code_challenge_method: "S256",
-      scope: "mcp",
-      state: nonce
-    });
-    if (state.resource) q.set("resource", state.resource);
-    location.href = localize(as.authorization_endpoint) + "?" + q.toString();
-  }
-
-  async function complete(params) {
-    var pkce = {};
-    try { pkce = JSON.parse(ss(PKCE_KEY) || "{}"); } catch (e) { pkce = {}; }
-    ssDel(PKCE_KEY);
-    ssDel(ATTEMPT_KEY);
-    history.replaceState(null, "", location.pathname);
-
-    if (params.get("error")) {
-      signedOut("Sign-in was not completed: " + params.get("error") + ".");
-      return;
-    }
-    var code = params.get("code");
-    if (!code || !pkce.v) { signedOut("Sign-in did not complete. Try again."); return; }
-    if (params.get("state") !== pkce.s) {
-      signedOut("Sign-in was refused: the reply did not match the request this browser started.");
-      return;
-    }
-    var issued = params.get("iss");
-    if (issued && pkce.iss && issued !== pkce.iss) {
-      signedOut("Sign-in was refused: the reply came from a different authorization server.");
-      return;
-    }
-    var as = await discover();
-    var form = new URLSearchParams({
-      grant_type: "authorization_code",
-      code: code,
-      code_verifier: pkce.v,
-      client_id: lsGet(CLIENT_KEY),
-      redirect_uri: pkce.r
-    });
-    if (pkce.res) form.set("resource", pkce.res);
-    var r = await fetch(localize(as.token_endpoint), {
-      method: "POST", cache: "no-store", credentials: "omit",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form.toString()
-    });
-    if (!r.ok) {
-      /* A refused exchange usually means this browser's remembered client is no
-         longer registered here. Drop it so the next attempt registers again. */
-      lsDel(CLIENT_KEY);
-      signedOut("The gateway refused the sign-in exchange. Try again.");
-      return;
-    }
-    var tok = await r.json();
-    if (!tok.access_token) { signedOut("The gateway issued no access token. Try again."); return; }
-    /* Only the access token is kept, and only for this tab. The refresh token is
-       deliberately dropped: a long-lived credential has no place in a browser. */
-    state.token = tok.access_token;
-    ssSet(TOKEN_KEY, state.token);
-    await load();
-  }
-
   async function signOut() {
     var tok = state.token;
     state.token = "";
-    ssDel(TOKEN_KEY);
+    ssDel(K.token);
     var revoked = false;
     try {
       var as = await discover();
@@ -355,7 +223,7 @@
         revoked = r.ok;
       }
     } catch (e) { revoked = false; }
-    signedOut(revoked
+    leave(revoked
       ? "Signed out. The gateway revoked this session's token."
       : "Signed out on this device. The token expires on its own.");
   }
@@ -374,15 +242,17 @@
   /* ---------- data ---------- */
 
   async function load() {
-    show("#boot", true); show("#signedout", false); show("#app", false); show("#signout", false);
+    show("#boot", true); show("#app", false); show("#signout", false);
+    $("#boot-msg").textContent = "Loading your account\u2026";
+    $("#boot-bar").classList.remove("hidden");
+    notice("#boot-notice", "");
     try {
       var both = await Promise.all([api("GET", "/connections/templates"), api("GET", "/connections")]);
       state.templates = both[0] || [];
       state.conns = both[1] || [];
     } catch (e) {
       if (e && e.message === "unauthenticated") return;
-      show("#boot", false); show("#signedout", true);
-      notice("#signin-notice", whatToSay(e), "bad");
+      stalled(e);
       return;
     }
     var who = subjectOf(state.token);
@@ -391,19 +261,33 @@
     render();
   }
 
-  function signedOut(msg) {
-    state.token = ""; state.conns = []; state.templates = [];
-    ssDel(TOKEN_KEY);
-    $("#who").textContent = "";
+  /* stalled reports a page that could not load for a reason that is not the
+     session: the gateway refused or did not answer. The signed-in shell stays
+     put and says so, because sending someone back to sign in again would be a
+     diagnosis of the wrong problem — they are signed in. */
+  function stalled(e) {
     closeModal();
-    show("#boot", false); show("#app", false); show("#signout", false); show("#signedout", true);
-    notice("#signin-notice", msg, msg ? "bad" : "");
+    show("#app", false); show("#signout", false); show("#boot", true);
+    $("#boot-msg").textContent = "";
+    $("#boot-bar").classList.add("hidden");
+    notice("#boot-notice", whatToSay(e), "bad");
+  }
+
+  /* leave hands the tab back to the sign-in page at the root. This page has no
+     signed-out state of its own: the gateway does not serve it without a token,
+     so there is nothing here for a signed-out person to be shown. The sentence
+     travels in this tab's own storage and is never part of what the root
+     serves to anyone else. */
+  function leave(msg) {
+    state.token = ""; state.conns = []; state.templates = [];
+    ssDel(K.token);
+    if (msg) { ssSet(K.notice, msg); } else { ssDel(K.notice); }
+    location.replace("/");
   }
 
   function fail(e) {
     if (e && e.message === "unauthenticated") return;
-    show("#boot", false); show("#app", false); show("#signout", false); show("#signedout", true);
-    notice("#signin-notice", whatToSay(e), "bad");
+    stalled(e);
   }
 
   /* ---------- rendering ---------- */
@@ -707,7 +591,7 @@
           closeModal();
           await reload();
         } catch (e) {
-          if (e.message === "unauthenticated") return; /* signedOut closed the dialog */
+          if (e.message === "unauthenticated") return; /* leave() is already navigating */
           modalFailed(e);
         }
       });
@@ -773,27 +657,21 @@
 
   $("#scrim").onclick = function (ev) { if (ev.target === this) closeModal(); };
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeModal(); });
-  $("#signin").onclick = function () { signIn().catch(fail); };
   $("#signout").onclick = function () { signOut().catch(fail); };
 
   /* ---------- start ---------- */
 
   $("#foot").textContent = "microagency";
 
-  var query = new URLSearchParams(location.search);
-  if (query.get("code") || query.get("error")) {
-    complete(query).catch(fail);
-  } else if (ss(TOKEN_KEY)) {
-    state.token = ss(TOKEN_KEY);
+  /* The token is already here: the sign-in page obtained it and the gateway
+     released this document only because the request carried it. Its absence
+     means this tab lost it between the fetch and the render, so hand the tab
+     back rather than render an account nobody is signed in to. */
+  state.token = ss(K.token);
+  if (state.token) {
     load().catch(fail);
-  } else if (ss(ATTEMPT_KEY)) {
-    /* We left for the authorization server and came back without a result — the
-       user went back, or the gateway rejected this browser's remembered client.
-       Forget it so the next attempt registers cleanly. */
-    ssDel(ATTEMPT_KEY); ssDel(PKCE_KEY); lsDel(CLIENT_KEY);
-    signedOut("Sign-in did not complete. Try again.");
   } else {
-    signedOut("");
+    leave("");
   }
 })();
 </script>
