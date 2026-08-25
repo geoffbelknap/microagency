@@ -373,6 +373,10 @@ func (s *Server) completeUpstreamOAuth(w http.ResponseWriter, r *http.Request, s
 	}
 	tok, err := auth.ExchangeCode(r.Context(), s.httpClient(), flow.meta, flow.clientID, flow.clientSecret, flow.redirectURI, q.Get("code"), flow.pkce)
 	if err != nil {
+		// The self-service page deliberately withholds the provider's words from
+		// the person authorizing — they cannot act on them. The operator can, and
+		// without this line the failure leaves no trace anywhere at all.
+		slog.Warn("upstream token exchange failed", "upstream", flow.name, "self_service", selfService, "err", err)
 		if selfService {
 			writeMessage(w, "Token exchange failed. Return to your account and try again.")
 		} else {

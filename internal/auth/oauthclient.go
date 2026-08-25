@@ -1,12 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -334,30 +336,100 @@ func TokenFromRecord(r TokenRecord) *UpstreamToken {
 	}
 }
 
+// tokenResponse is the subset of a token response microagency uses.
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+// decodeTokenResponse reads a token response in either encoding an
+// authorization server may answer with — JSON per RFC 6749, or the form
+// encoding some servers still return.
+func decodeTokenResponse(body []byte) (tokenResponse, error) {
+	var out tokenResponse
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		if err := json.Unmarshal(trimmed, &out); err != nil {
+			return out, fmt.Errorf("token endpoint: response is not valid JSON: %w", err)
+		}
+		return out, nil
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return out, fmt.Errorf("token endpoint: response is neither JSON nor form encoded: %w", err)
+	}
+	out.AccessToken = values.Get("access_token")
+	out.RefreshToken = values.Get("refresh_token")
+	if secs := values.Get("expires_in"); secs != "" {
+		if n, convErr := strconv.Atoi(secs); convErr == nil {
+			out.ExpiresIn = n
+		}
+	}
+	return out, nil
+}
+
+// oauthErrorFrom extracts an RFC 6749 error from a token response in either
+// encoding, so a refusal is reported in the server's own words.
+func oauthErrorFrom(body []byte) string {
+	var code, desc string
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		var e struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(trimmed, &e) == nil {
+			code, desc = e.Error, e.Description
+		}
+	} else if values, err := url.ParseQuery(string(body)); err == nil {
+		code, desc = values.Get("error"), values.Get("error_description")
+	}
+	switch {
+	case code == "":
+		return ""
+	case desc == "":
+		return code
+	default:
+		return code + ": " + desc
+	}
+}
+
 func postToken(ctx context.Context, hc *http.Client, tokenEndpoint, clientID, clientSecret string, form url.Values) (*UpstreamToken, error) {
 	if clientSecret != "" {
 		form.Set("client_secret", clientSecret)
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// RFC 6749 says a token response is JSON, but not every authorization
+	// server volunteers it: at least one major provider answers in
+	// application/x-www-form-urlencoded unless the request asks for JSON, and
+	// a client that does not ask gets a body it cannot parse.
+	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("token endpoint: reading response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("token endpoint: http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		if oerr := oauthErrorFrom(body); oerr != "" {
+			return nil, fmt.Errorf("token endpoint: http %d: %s", resp.StatusCode, oerr)
+		}
+		return nil, fmt.Errorf("token endpoint: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var out struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	out, err := decodeTokenResponse(body)
+	if err != nil {
 		return nil, err
 	}
 	if out.AccessToken == "" {
+		// A refusal can arrive with a 200: the same provider that answers in
+		// form encoding also reports invalid_grant that way. Report what it
+		// said rather than the absence of a field.
+		if oerr := oauthErrorFrom(body); oerr != "" {
+			return nil, fmt.Errorf("token endpoint: %s", oerr)
+		}
 		return nil, fmt.Errorf("token endpoint: no access_token")
 	}
 	t := &UpstreamToken{AccessToken: out.AccessToken, RefreshToken: out.RefreshToken, tokenEndpoint: tokenEndpoint, clientID: clientID, clientSecret: clientSecret}
