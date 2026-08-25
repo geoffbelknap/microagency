@@ -16,7 +16,7 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 }
 
 func TestServesPage(t *testing.T) {
-	rec := get(t, Handler(Config{ResourceMetadata: "/.well-known/oauth-protected-resource", Version: "1.2.3"}), Path)
+	rec := get(t, Handler(Config{ResourceMetadata: "/.well-known/oauth-protected-resource"}), Path)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -33,7 +33,6 @@ func TestServesPage(t *testing.T) {
 		"S256",                                  // and the only method this gateway accepts
 		"authorization_code",                    // exchanged in the browser for an access token
 		"/.well-known/oauth-protected-resource", // where discovery starts
-		"1.2.3",                                 // the build serving the page
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("portal page missing %q", want)
@@ -197,5 +196,18 @@ func TestOperatorOnlyFailureDoesNotReadAsRetryable(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("portal page missing operator-fault wording %q", want)
 		}
+	}
+}
+
+// The portal page is served to anyone who reaches /account, before any sign-in.
+// Everything in its config island is therefore published to the unauthenticated
+// internet, so it carries the discovery URL a client needs and nothing that
+// describes this particular deployment.
+func TestPreAuthPageCarriesNoBuildVersion(t *testing.T) {
+	body := get(t, Handler(Config{ResourceMetadata: "/.well-known/oauth-protected-resource"}), Path).Body.String()
+	island := body[strings.Index(body, `id="portal-config"`):]
+	island = island[:strings.Index(island, "</script>")]
+	if strings.Contains(island, "version") {
+		t.Errorf("pre-auth config island carries a version field: %s", island)
 	}
 }

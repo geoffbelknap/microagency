@@ -264,6 +264,7 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string, audienceR
 			reportFederatedSignIn(out, posture, optedUp, audienceRules)
 			break
 		}
+		reportClientRegistration(out, posture)
 		fmt.Fprintln(out, "    consent         loopback operator listener")
 		fmt.Fprintln(out, "    posture         single-user (--single-user) — every remote client authenticates as the")
 		fmt.Fprintln(out, "                    local operator; several people need federated sign-in (--sso-issuer)")
@@ -280,6 +281,7 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string, audienceR
 		// Multi-user deployment: say what the shared audit log retains. The
 		// default keeps callers' argument values out of the operator-readable
 		// file; a per-connection opt-up widens that, so it never passes silently.
+		fmt.Fprintln(out, "    registers       nothing — clients are registered at the issuer, not here")
 		if len(optedUp) == 0 {
 			fmt.Fprintln(out, "    audit capture   argument structure + digest (callers' argument values stay out of the shared log)")
 		} else {
@@ -287,11 +289,14 @@ func reportAuthPostureAt(out io.Writer, path string, optedUp []string, audienceR
 		}
 	case "bearer":
 		fmt.Fprintln(out, "  public auth      static bearer compatibility mode")
+		fmt.Fprintln(out, "    registers       nothing — this mode runs no authorization server")
 	case "oauth-local":
 		fmt.Fprintln(out, "  public auth      local built-in OAuth")
 		if posture.SSOIssuer != "" {
 			reportFederatedSignIn(out, posture, optedUp, audienceRules)
+			break
 		}
+		reportClientRegistration(out, posture)
 	default:
 		fmt.Fprintf(out, "  public auth      ⚠ unknown posture %q\n", posture.Mode)
 	}
@@ -336,11 +341,32 @@ func reportFederatedSignIn(out io.Writer, posture authPosture, optedUp []string,
 	default:
 		fmt.Fprintf(out, "    admits          %s\n", audience)
 	}
+	reportClientRegistration(out, posture)
 	fmt.Fprintln(out, "    posture         multi-user — each provider account is a distinct principal")
 	if len(optedUp) == 0 {
 		fmt.Fprintln(out, "    audit capture   argument structure + digest (callers' argument values stay out of the shared log)")
 	} else {
 		fmt.Fprintf(out, "    audit capture   ⚠ FULL arguments for: %s (operator opt-up; other connections record structure + digest)\n", strings.Join(optedUp, ", "))
+	}
+}
+
+// reportClientRegistration states who may obtain an OAuth client from this
+// gateway, beside the line saying who may sign in.
+//
+// Those two answer one question between them, and either alone answers it
+// wrongly: an audience bound to one domain still lets anyone register a client,
+// and a gateway that registers nobody still admits whoever its audience does.
+// A posture written before this was recorded says so rather than being rendered
+// as the default, which would state a mode nobody declared.
+func reportClientRegistration(out io.Writer, posture authPosture) {
+	mode, err := auth.ParseRegistrationMode(posture.ClientRegistration)
+	switch {
+	case posture.ClientRegistration == "":
+		fmt.Fprintln(out, "    registers       not recorded — restart the gateway to state this posture")
+	case err != nil:
+		fmt.Fprintf(out, "    registers       ⚠ unrecognized mode %q\n", posture.ClientRegistration)
+	default:
+		fmt.Fprintf(out, "    registers       %s\n", mode.Describe(auth.DefaultRegistrationLimits()))
 	}
 }
 

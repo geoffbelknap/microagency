@@ -229,6 +229,15 @@ type runRecord struct {
 	Effect            string   `json:"effect,omitempty"`
 	ResourceIDs       []string `json:"resource_ids,omitempty"`
 	Session           string   `json:"session,omitempty"` // per-run SPIFFE identity
+	// ClientID names the OAuth client a "client" record is about — the
+	// client_id a dynamic registration created. It is a public identifier, not
+	// a credential.
+	ClientID string `json:"client_id,omitempty"`
+	// SourceDigest is a short one-way digest of the network source an
+	// unauthenticated event arrived from. It tells one source apart from
+	// another without the log accumulating the addresses of everyone who
+	// reached the endpoint.
+	SourceDigest string `json:"source_digest,omitempty"`
 	// Impact instrumentation: which substrate ran it, which engine (wasm only),
 	// how long it took, the bytes fetched (input) and returned to the model
 	// (output). InputBytes/OutputBytes give the data-minimization ratio.

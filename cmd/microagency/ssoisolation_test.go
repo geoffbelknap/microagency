@@ -164,6 +164,12 @@ func TestTwoAdmittedIdentitiesCannotReachEachOthersData(t *testing.T) {
 				betaProxy++
 			}
 		default:
+			// A client registration precedes sign-in and has no principal by
+			// definition — it is the one unauthenticated event on this surface.
+			// Attribution is about what a signed-in caller did.
+			if rec.Kind == "client" {
+				continue
+			}
 			wrongUser = append(wrongUser, fmt.Sprintf("%s/%s", rec.Kind, rec.User))
 		}
 	}
@@ -234,9 +240,18 @@ func TestRefusedAccountNeverBecomesAPrincipal(t *testing.T) {
 	if !strings.Contains(string(body), "not one this gateway admits") {
 		t.Errorf("refusal page did not explain the refusal:\n%s", body)
 	}
-	// Nothing was minted, so nothing can be presented to the agent surface.
-	if len(srv.RunLog()) != 0 {
-		t.Errorf("a refused account produced audit activity: %+v", srv.RunLog())
+	// Nothing was minted, so nothing can be presented to the agent surface. The
+	// client registration that opened the flow is recorded and carries no
+	// principal, which is exactly what a refused sign-in should leave behind:
+	// evidence that something tried, and no attributed activity.
+	for _, rec := range srv.RunLog() {
+		if rec.Kind == "client" {
+			if rec.User != "" {
+				t.Errorf("a client registration was attributed to a principal: %+v", rec)
+			}
+			continue
+		}
+		t.Errorf("a refused account produced audit activity: %+v", rec)
 	}
 }
 
