@@ -161,9 +161,24 @@
       var parsed = JSON.parse(text);
       if (parsed && typeof parsed.message === "string" && parsed.message) fault = parsed;
     } catch (e) { fault = null; }
-    var err = new Error((fault && fault.message) || text || (method + " " + path + " failed (" + status + ")."));
+    /* A body that is not the gateway's own envelope did not necessarily come
+       from the gateway: any proxy or CDN between here and it can answer in its
+       place, and it typically does so for a 5xx. Such a body is written for a
+       site operator, names infrastructure this person does not run, and is not
+       ours to render — so it is discarded rather than shown. What is left is
+       the status, which is honest about what is known. */
+    var err = new Error((fault && fault.message) || describeStatus(status, method, path));
     err.fault = fault;
     return err;
+  }
+
+  /* describeStatus says what a bare status code means to the person reading it,
+     without pretending to know a cause the response never gave. */
+  function describeStatus(status, method, path) {
+    if (status >= 500) return "The gateway did not answer this request (" + status + "). It may be restarting or unreachable — try again shortly.";
+    if (status === 429) return "Too many requests just now. Wait a moment and try again.";
+    if (status === 404) return "That is no longer available (404).";
+    return method + " " + path + " failed (" + status + ").";
   }
 
   /* whatToSay decides what a person reads about a failure.

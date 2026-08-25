@@ -859,3 +859,31 @@ func persistedLabel(t *testing.T, stateDir, name string) string {
 	t.Fatalf("no persisted registration for %q", name)
 	return ""
 }
+
+// A provider whose authorization server offers no dynamic client registration,
+// on a template with no configured client, is a configuration fault on this
+// side — not a failure to reach the provider. Reporting it as 5xx invites an
+// intermediary to replace the response with its own error page, discarding the
+// one message that says what to do about it.
+func TestConnectionStartFaultsUseClientErrorStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		want  int
+		actor string
+	}{
+		{"no OAuth client for a provider without registration", ErrNoOAuthClientAvailable, http.StatusConflict, "operator"},
+		{"gateway refused the provider's resource indicator", ErrUnsafeResourceIndicator, http.StatusConflict, "operator"},
+		{"provider genuinely unreachable", errors.New("dial tcp: connection refused"), http.StatusBadGateway, "user"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, fault := classifyConnectionStart(tc.err)
+			if status != tc.want {
+				t.Fatalf("status = %d, want %d", status, tc.want)
+			}
+			if fault.Actor != tc.actor {
+				t.Fatalf("actor = %q, want %q", fault.Actor, tc.actor)
+			}
+		})
+	}
+}

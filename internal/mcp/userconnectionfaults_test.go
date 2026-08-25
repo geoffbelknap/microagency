@@ -106,8 +106,11 @@ func TestProviderWithoutDynamicRegistrationIsAnOperatorFault(t *testing.T) {
 
 	resp := userRequest(t, http.DefaultClient, http.MethodPost, fixture.users.URL+"/connections", "alice",
 		map[string]any{"template": "nodcr"})
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	// A client-error status, deliberately: this is a configuration fault on this
+	// side, and a 5xx invites an intermediary to answer in the gateway's place
+	// with its own error page — discarding the message that says what to fix.
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 	fault := readFault(t, resp)
 	if fault.Kind != faultUnsupported || fault.Actor != actorOperator || fault.Retryable {
