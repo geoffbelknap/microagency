@@ -4,7 +4,7 @@ description: Each guarantee microagency makes, and where it is enforced.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-25_
 
 The guarantees, and where each one is enforced:
 
@@ -64,6 +64,23 @@ The guarantees, and where each one is enforced:
   expiring [operation and resource grant](operation-grants.md) for the signed
   principal and campaign. Arguments, URL targets, writable namespaces, request
   count, bytes, and rate are bounded outside the agent request.
+- **No guessed connection.** An agent cannot invoke a tool it could not have
+  chosen deliberately. Two connections instantiated from one template expose
+  identical tools — same names, same descriptions, same schemas — and their
+  generated names differ only by a random suffix, so nothing in the agent's view
+  says which is production and which is staging. `call_tool` refuses such a call
+  rather than resolving it arbitrarily, and the remedy ships with it: a
+  connection may carry a short [label](tool-index.md#labels) that is surfaced as
+  its own field beside its tools, and distinct labels make the choice a
+  deliberate one. The refusal names the sibling connections, which is safe
+  precisely because all of them are already in this caller's own index; a
+  connection belonging to another principal is never a sibling and is never
+  named. A label is caller-supplied text that reaches a model's context, so it
+  is held to an identifier's charset — bounded length, printable ASCII, no
+  control, zero-width, or bidirectional characters — and a label that cannot be
+  expressed within it is refused when it is set rather than rewritten. A call
+  authorized by a matching [operation grant](operation-grants.md) names its
+  connection exactly and is exempt.
 - **Field minimization.** Sensitive field values in inline results are
   redacted or tokenized before they reach the model, on by default; a
   tokenized value is resolved back only on the principal's outbound call to

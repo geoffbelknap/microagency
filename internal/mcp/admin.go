@@ -234,6 +234,7 @@ func (s *Server) AdminHandler(opAuth OperatorAuth) http.Handler {
 	mux.HandleFunc("POST /admin/upstreams/{name}/revoke", g(s.adminRevokeUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/refresh", g(s.adminRefreshUpstream))
 	mux.HandleFunc("POST /admin/upstreams/{name}/reauth", g(s.adminReauthUpstream))
+	mux.HandleFunc("POST /admin/upstreams/{name}/label", g(s.adminSetLabel))
 	mux.HandleFunc("POST /admin/upstreams/{name}/read-only", g(s.adminSetReadOnly))
 	mux.HandleFunc("POST /admin/upstreams/{name}/audit-capture", g(s.adminSetAuditCapture))
 	mux.HandleFunc("POST /admin/upstreams/{name}/grants", g(s.adminSetGrants))
@@ -499,6 +500,34 @@ func (s *Server) adminSetOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistOwner(name, in.Owner)
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "owner": in.Owner})
+}
+
+// adminSetLabel names a connection for everyone who can see it. It is the
+// operator surface because a label on a SHARED connection lands in every
+// admitted caller's model context, which is a gateway-wide decision rather than
+// one principal's. It also reaches a self-service connection, so an operator can
+// name one on the owner's behalf; the charset rules are identical either way.
+func (s *Server) adminSetLabel(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	label, err := validateConnectionLabel(in.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.SetUpstreamLabel(name, label); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.persistLabel(name, label)
+	s.recordConnectionEvent(operatorActor(r), name, "labelled")
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "label": label})
 }
 
 // adminSetReadOnly toggles an upstream's read-only restriction (writes refused).

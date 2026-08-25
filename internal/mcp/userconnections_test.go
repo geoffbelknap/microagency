@@ -713,3 +713,144 @@ func TestUserConnectionListCarriesTargetAndLastUse(t *testing.T) {
 		t.Fatalf("another principal saw the connection: %+v", other)
 	}
 }
+
+// A principal labels their OWN connection through the self-service plane. The
+// label is what makes two connections from one template choosable on purpose, so
+// it has to survive the round trip to the listing and the tool view — and an
+// invalid label has to be refused at the write, not sanitized into the record.
+func TestSelfServiceConnectionLabelling(t *testing.T) {
+	fixture := newSelfServiceFixture(t, 2)
+	name := authorizeSelfServiceConnection(t, fixture, "alice")
+
+	label := func(subject, connection, value string) *http.Response {
+		return userRequest(t, http.DefaultClient, http.MethodPatch,
+			fixture.users.URL+"/connections/"+connection, subject, map[string]any{"label": value})
+	}
+
+	resp := label("alice", name, "production")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("label own connection = %d: %s", resp.StatusCode, body)
+	}
+	listed := listUserConnections(t, fixture, "alice")
+	if len(listed) != 1 || listed[0].Label != "production" {
+		t.Fatalf("label must appear in the owner's listing: %+v", listed)
+	}
+
+	// Refused at the write surface, with the reason — never trimmed into shape.
+	for _, bad := range []string{"prod\nstaging", strings.Repeat("x", 33), " prod", "prоduction"} {
+		resp := label("alice", name, bad)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("label %q must be refused with 400; got %d %s", bad, resp.StatusCode, body)
+		}
+	}
+	if listed := listUserConnections(t, fixture, "alice"); listed[0].Label != "production" {
+		t.Fatalf("a refused label must leave the stored one intact: %+v", listed)
+	}
+
+	// Another principal cannot label a connection they do not own, and learns
+	// nothing about it beyond the not-found every unknown name gets.
+	resp = label("bob", name, "mine-now")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("labelling another principal's connection must 404; got %d %s", resp.StatusCode, body)
+	}
+	if listed := listUserConnections(t, fixture, "alice"); listed[0].Label != "production" {
+		t.Fatalf("another principal must not change the owner's label: %+v", listed)
+	}
+
+	// Clearing is the reverse of setting.
+	resp = label("alice", name, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("clearing a label = %d", resp.StatusCode)
+	}
+	if listed := listUserConnections(t, fixture, "alice"); listed[0].Label != "" {
+		t.Fatalf("label was not cleared: %+v", listed)
+	}
+}
+
+// A label set when the connection is created closes the window in which a second
+// connection from the same template exists and neither can be told apart. It must
+// also survive a restart, or the gateway comes back with both twins unnamed.
+func TestSelfServiceLabelAtCreationSurvivesReload(t *testing.T) {
+	fixture := newSelfServiceFixture(t, 2)
+	resp := userRequest(t, http.DefaultClient, http.MethodPost, fixture.users.URL+"/connections", "alice",
+		map[string]any{"template": "documents", "label": "prod\nstaging"})
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an invalid label must be refused before any connection is started; got %d %s", resp.StatusCode, body)
+	}
+
+	name := authorizeSelfServiceConnectionLabelled(t, fixture, "alice", "production")
+	listed := listUserConnections(t, fixture, "alice")
+	if len(listed) != 1 || listed[0].Label != "production" {
+		t.Fatalf("a label set at creation must be stored: %+v", listed)
+	}
+
+	persisted := persistedLabel(t, fixture.stateDir, name)
+	if persisted != "production" {
+		t.Fatalf("label must be persisted for reload; got %q", persisted)
+	}
+}
+
+// authorizeSelfServiceConnectionLabelled runs the self-service OAuth flow with a
+// label supplied at creation and returns the connection name.
+func authorizeSelfServiceConnectionLabelled(t *testing.T, fixture *selfServiceFixture, subject, label string) string {
+	t.Helper()
+	resp := userRequest(t, http.DefaultClient, http.MethodPost, fixture.users.URL+"/connections", subject,
+		map[string]any{"template": "documents", "label": label})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("start labelled connection: %d %s", resp.StatusCode, body)
+	}
+	var started struct {
+		Name         string `json:"name"`
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+		t.Fatal(err)
+	}
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	approved := approveAtAS(t, noRedirect, started.AuthorizeURL)
+	if approved.StatusCode != http.StatusFound {
+		t.Fatalf("approve = %d, want 302", approved.StatusCode)
+	}
+	callback, err := http.Get(approved.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer callback.Body.Close()
+	if callback.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callback.Body)
+		t.Fatalf("callback = %d: %s", callback.StatusCode, body)
+	}
+	return started.Name
+}
+
+// persistedLabel reads one connection's stored label straight out of the state
+// file, proving the label is durable rather than only in memory.
+func persistedLabel(t *testing.T, stateDir, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(stateDir, "upstreams.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var regs []upstreamReg
+	if err := json.Unmarshal(raw, &regs); err != nil {
+		t.Fatal(err)
+	}
+	for _, reg := range regs {
+		if reg.Name == name {
+			return reg.Label
+		}
+	}
+	t.Fatalf("no persisted registration for %q", name)
+	return ""
+}

@@ -4,7 +4,7 @@ description: The CLI surface, state files, doctor, and what purge deletes.
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-25_
 
 ## The CLI
 
@@ -75,7 +75,7 @@ Everything lives under `~/.microagency`:
 | `oauth-revocations.json` | revoked token IDs and consumed refresh token IDs |
 | `auth-posture.json` | the active public auth mode, issuer, resource, and tunnel URL stability |
 | `tunnel-state.json` | the tunnel subprocess: provider, quick or named mode, URL, pid, and any recorded exit |
-| `upstreams.json` | non-secret connection registrations, ownership, operation grants, template identity, and revoked state |
+| `upstreams.json` | non-secret connection registrations, ownership, labels, operation grants, template identity, and revoked state |
 | `connection-templates.json` | operator-approved self-service provider, scope, parameter, and quota bounds; never OAuth client secrets |
 | `sso-audience.json` | operator-declared federated sign-in audience: permitted groups and identities; read on every sign-in, so changes need no restart |
 | `mediation.json` | non-secret enforced workspace, gateway URL/host, and policy digest |

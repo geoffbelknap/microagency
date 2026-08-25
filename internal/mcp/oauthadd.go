@@ -50,6 +50,10 @@ type oauthFlow struct {
 	clientStoreKey  string
 	reservation     string
 	authGeneration  uint64
+	// label is the human-meaningful name the caller chose when starting the
+	// flow, already validated. It is applied when the connection is registered,
+	// so a connection is never briefly indistinguishable from its sibling.
+	label string
 }
 
 type oauthFlowOption func(*oauthFlow)
@@ -63,6 +67,10 @@ func withSelfServiceOAuth(template string, templateVersion uint64, credentialKey
 		f.clientStoreKey = clientStoreKey
 		f.authGeneration = authGeneration
 	}
+}
+
+func withConnectionLabel(label string) oauthFlowOption {
+	return func(f *oauthFlow) { f.label = label }
 }
 
 func withConnectionReservation(id string) oauthFlowOption {
@@ -381,7 +389,7 @@ func (s *Server) completeUpstreamOAuth(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	s.saveUpstreamTokenAtKey(flow.name, key, tok, flow.authGeneration, flow.selfService) // persist only after the generation-bound registration commits
-	reg := upstreamReg{Name: flow.name, URL: flow.url, Discover: flow.discover, Auth: authOAuth, ReadOnly: flow.readOnly, Owner: flow.owner, SelfService: flow.selfService, Template: flow.template}
+	reg := upstreamReg{Name: flow.name, URL: flow.url, Discover: flow.discover, Auth: authOAuth, ReadOnly: flow.readOnly, Owner: flow.owner, SelfService: flow.selfService, Template: flow.template, Label: flow.label}
 	if flow.selfService {
 		reg.Strategy = StrategyPerUserOAuth // the user's own grant IS the credential
 	}

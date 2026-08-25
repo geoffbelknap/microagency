@@ -443,6 +443,7 @@ function renderUpstreams(){
     if(hasExplicit){var mz=el("span",{class:"chip mz",title:"field minimization active (custom policy)"},"minimized");mz.onclick=function(){openMinimize(u)};c2.appendChild(mz)}
     else if(hasEffective){var mp=el("span",{class:"chip mz",title:"protected by default — click to adjust or turn off"},"protected");mp.onclick=function(){openMinimize(u)};c2.appendChild(mp)}
     else if(u.minimize_suggested&&Object.keys(u.minimize_suggested).length){var sg=el("span",{class:"chip sug",title:"sensitive fields detected — review suggested minimization"},"review");sg.onclick=function(){openMinimize(u)};c2.appendChild(sg)}
+    if(u.label){var lb=el("span",{class:"chip",title:"label — what an agent sees beside this connection's tools"},u.label);c2.appendChild(lb)}
     if(u.owner){var ow=el("span",{class:"chip owner"});ow.innerHTML='<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'+u.owner;c2.appendChild(ow)}
     var c3=el("div",{class:"mono",style:"font-size:12px;color:var(--ink-mid)"},u.tools!=null?String(u.tools):"—");
     var c4=el("div",{class:"uactions"});
@@ -461,6 +462,7 @@ function openMenu(ev,u){
   function item(label,fn,danger){var b=el("button",{class:danger?"danger":""},label);b.onclick=function(){closeMenu();fn()};m.appendChild(b)}
   item(u.read_only?"Allow writes":"Make read-only",function(){doReadOnly(u)});
   item((u.minimize&&Object.keys(u.minimize).length)?"Edit field minimization":((u.minimize_effective&&Object.keys(u.minimize_effective).length)?"Adjust field minimization":((u.minimize_suggested&&Object.keys(u.minimize_suggested).length)?"Minimize fields (suggested)…":"Minimize fields…")),function(){openMinimize(u)});
+  item(u.label?"Change label":"Label connection",function(){openLabel(u)});
   item(u.owner?"Re-scope owner":"Scope to user",function(){openScope(u)});
   item("Re-authorize",function(){doReauth(u)});
   m.appendChild(el("div",{class:"div"}));
@@ -549,6 +551,21 @@ function openScope(u){
     async function(){
       var sub=($("#scope-inp").value||"").trim();closeDialog();
       try{await api("POST","/admin/upstreams/"+encodeURIComponent(u.name)+"/owner",{owner:sub});toast(sub?u.name+" scoped to "+sub:u.name+" shared.")}catch(e){toast(e.message)}
+      refresh();
+    });
+}
+
+function openLabel(u){
+  openDialog(
+    "Label "+u.name,
+    "A short human-meaningful name an agent sees as its own field beside every tool this connection exposes. "+
+    "It is what lets an agent tell two connections from the same provider apart instead of guessing. "+
+    "Up to 32 characters: letters, digits, spaces, and - _ . Leave empty to remove it.",
+    '<input class="inp" id="label-inp" maxlength="32" placeholder="production" value="'+(u.label||"").replace(/"/g,"&quot;")+'">',
+    "Apply",
+    async function(){
+      var v=$("#label-inp").value;closeDialog();
+      try{await api("POST","/admin/upstreams/"+encodeURIComponent(u.name)+"/label",{label:v});toast(v?u.name+" labelled "+v+".":"Removed the label from "+u.name+".")}catch(e){toast(e.message)}
       refresh();
     });
 }

@@ -4,7 +4,7 @@ description: Remote MCP for the Claude and ChatGPT web apps, and sharing one gat
 ---
 
 <!-- docs-last-updated -->
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-25_
 
 ## Public mode (remote MCP in the Claude/ChatGPT web apps)
 
@@ -373,7 +373,10 @@ unset MICROAGENCY_OPERATOR_TOKEN
 ```
 
 The template fixes the upstream URL and caps each principal's connection
-count. A user may request only the listed OAuth scopes and curated provider
+count. A `max_per_user` above one lets a user connect the same provider twice —
+production and staging, say — whose tools are then identical to their agent.
+Those connections need [labels](tool-index.md#labels) to be told apart; without
+them the gateway refuses the call rather than guessing which one was meant. A user may request only the listed OAuth scopes and curated provider
 parameters. Unknown parameters are rejected instead of being appended to the
 URL. Set `disabled: true` on the template to stop new and pending
 authorizations; existing connections stay in their current posture until the
@@ -428,24 +431,33 @@ curl -fsS https://gateway.example/connections \
   -H 'Content-Type: application/json' \
   --data '{
     "template": "supabase",
-    "params": {"project_ref": "my-project", "read_only": "true"}
+    "params": {"project_ref": "my-project", "read_only": "true"},
+    "label": "production"
   }'
 ```
 
 Open the returned `authorize_url` in that user's browser. The provider returns
 to `/connections/oauth/callback`; the callback state is random, single-use,
 expires after ten minutes, and is bound to the initiating principal and
-template. The resulting connection name is server-generated.
+template. The resulting connection name is server-generated, so the optional
+`label` is what makes the connection recognizable — to the person reading the
+portal and to the agent choosing between two connections from one template. It
+can be set at creation, as above, or at any time afterwards.
 
 Use these principal-authenticated routes to manage only the caller's own
 connections:
 
 - `GET /connections`
+- `PATCH /connections/{name}` with `{"label": "..."}` to name it, or `""` to
+  remove the name. Labels follow a restricted charset and are refused rather
+  than rewritten; see [labels](tool-index.md#labels)
 - `POST /connections/{name}/refresh` to reload its tool index
 - `POST /connections/{name}/reauthorize` to replace a revoked or changed grant
 - `DELETE /connections/{name}` to remove the connection and credential
 
 The operator retains gateway-wide controls at
+`POST /admin/upstreams/{name}/label` (a label on a shared connection reaches
+every admitted caller's context, so it is set here rather than by one user),
 `POST /admin/upstreams/{name}/disable`,
 `POST /admin/upstreams/{name}/revoke`, and
 `DELETE /admin/upstreams/{name}`. Disable keeps the credential but makes calls
