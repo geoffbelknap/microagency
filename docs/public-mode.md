@@ -271,6 +271,54 @@ operator-owned operation grant. See
 Use `--token <token>` only for a client that cannot complete OAuth. This flag
 selects static bearer mode instead of built-in OAuth.
 
+## Who may register a client
+
+Dynamic client registration ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591))
+is how a remote MCP client obtains a `client_id` without you provisioning one.
+It is also the one write to persistent state this gateway accepts from an
+unauthenticated caller, so it is bounded and the posture is stated.
+
+`--client-registration bounded` is the default:
+
+- at most 10 registrations an hour from one network source, and 60 an hour in
+  total. The per-source bound is what separates callers on a directly reachable
+  bind; behind a tunnel every caller arrives from the tunnel, so the total is
+  what holds there. Neither reads `Forwarded` or `X-Forwarded-*`: those are
+  supplied by the caller
+- at most 4096 registrations at once
+- a registration that never completes a flow is dropped after 24 hours. One that
+  has been used to obtain a token is kept
+- every registration and every refusal is recorded in the audit log as a
+  `client` record carrying the `client_id` and a one-way digest of the source.
+  Repeated refusals from one source record once per hour, so a refused caller
+  cannot grow the log
+
+`--client-registration off` refuses registration outright. Clients are
+provisioned by you, `/oauth/register` answers 403, and
+`/.well-known/oauth-authorization-server` stops advertising a registration
+endpoint, so a client discovers it must be provisioned rather than finding out
+by being refused. The [account portal](#the-account-portal) is not served in
+this mode: it obtains its own client by registering, exactly as an MCP client
+does, so there is nothing to hand it.
+
+Discovery itself is never closed. `/.well-known/*` and `/oauth/jwks` answer in
+every mode, because a client has to be able to find where to authenticate before
+it can authenticate ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414),
+[RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)). They name endpoints,
+not contents.
+
+The startup banner and `microagency doctor` both state the mode in effect, next
+to who may sign in:
+
+```
+  Admits         accounts at accounts.example.com in example.com
+  Registers      bounded — any client may register: 10/hour per source, 60/hour total, 4096 at once, unused expire after 1d
+```
+
+Those two answer one question between them. An audience bound to one domain
+still lets anyone register a client, and a gateway that registers nobody still
+admits whoever its audience does.
+
 ## Public endpoints
 
 Built-in public OAuth serves these routes on the tunneled listener:
@@ -286,6 +334,9 @@ Built-in public OAuth serves these routes on the tunneled listener:
 - `/connections` and `/connections/*`
 - `/account` (built-in OAuth only)
 - `/mcp`
+- `/` — a landing page naming the product and linking to `/account`. It carries
+  nothing about this deployment: no version, no counts, no provider names, no
+  issuer or tunnel URL, and no sign-in link where no portal is served
 
 The tunnel exposes `/mcp`, the OAuth endpoints, the principal-authenticated
 self-service connection API, and the account portal that drives it. The operator
@@ -415,9 +466,11 @@ never reaches `/admin`, and the token it obtains cannot: the operator surface
 stays on its own listener behind the operator token. A user can create only what
 their templates and quotas allow.
 
-`--issuer` and `--token` do not serve the portal. Issuance belongs to your
-authorization server in the first case and there is no interactive sign-in in
-the second, so `/account` returns 404 and the API above stays available.
+Three configurations do not serve the portal, and `/account` returns 404 in each
+while the API above stays available. With `--issuer`, issuance belongs to your
+own authorization server. With `--token`, there is no interactive sign-in at
+all. With `--client-registration off`, there is no client for the page to
+obtain: it registers itself, exactly as an MCP client does.
 
 The portal drives these routes, and an integration or script can call them
 directly with the same principal token as `/mcp`:

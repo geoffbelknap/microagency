@@ -52,6 +52,14 @@ type AuthServer struct {
 	pending     map[string]authCode  // request-ID-bound grants awaiting the consent decision
 	clientsPath string               // if set, client registrations persist here across restarts
 
+	// Dynamic client registration is an unauthenticated write to persistent
+	// state, so its posture is declared and bounded rather than implicit. See
+	// clientregistration.go.
+	registrationMode   RegistrationMode
+	registrationLimits RegistrationLimits
+	registrationRates  map[string]registrationWindow
+	recordRegistration func(RegistrationEvent)
+
 	resource        string
 	approvalBase    string
 	revocations     *RevocationList
@@ -75,6 +83,12 @@ type AuthServer struct {
 type clientReg struct {
 	redirectURIs []string
 	name         string
+	// createdAt and usedAt drive unused-registration expiry: a registration
+	// that never completed a flow is transient, one that did belongs to a real
+	// client and is kept. A zero createdAt is a record written before
+	// registrations carried a time and is never expired on age alone.
+	createdAt time.Time
+	usedAt    time.Time
 }
 
 type authCode struct {
@@ -183,12 +197,11 @@ func (s *AuthServer) metadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	meta := map[string]any{
 		"issuer":                                         s.issuer,
 		"authorization_endpoint":                         s.issuer + "/oauth/authorize",
 		"token_endpoint":                                 s.issuer + "/oauth/token",
 		"revocation_endpoint":                            s.issuer + "/oauth/revoke",
-		"registration_endpoint":                          s.issuer + "/oauth/register",
 		"jwks_uri":                                       s.issuer + "/oauth/jwks",
 		"response_types_supported":                       []string{"code"},
 		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
@@ -197,7 +210,17 @@ func (s *AuthServer) metadata(w http.ResponseWriter, r *http.Request) {
 		"revocation_endpoint_auth_methods_supported":     []string{"none"},
 		"authorization_response_iss_parameter_supported": true,
 		"scopes_supported":                               []string{"mcp"},
-	})
+	}
+	// registration_endpoint is optional in RFC 8414. A gateway that refuses
+	// registration does not advertise one, so a client discovers it must be
+	// provisioned instead of learning it by having a registration refused.
+	s.mu.Lock()
+	advertise := s.effectiveRegistrationModeLocked() != RegistrationOff
+	s.mu.Unlock()
+	if advertise {
+		meta["registration_endpoint"] = s.issuer + "/oauth/register"
+	}
+	writeJSON(w, http.StatusOK, meta)
 }
 
 // register is open dynamic client registration (RFC 7591). Single user, loopback —
@@ -207,6 +230,22 @@ func (s *AuthServer) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	source := registrationSource(r)
+	// A deployment that provisions its own clients refuses here before reading
+	// the body. There is nothing to validate and nothing to rate-limit: the
+	// answer does not depend on what was sent.
+	s.mu.Lock()
+	off := s.effectiveRegistrationModeLocked() == RegistrationOff
+	s.mu.Unlock()
+	if off {
+		s.reportRegistration(RegistrationEvent{Outcome: RegistrationRefusedDisabled, SourceDigest: sourceDigest(source)})
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":             "invalid_client_metadata",
+			"error_description": "this gateway does not accept dynamic client registration; ask its operator for a client_id",
+		})
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var in struct {
 		RedirectURIs      []string `json:"redirect_uris"`
@@ -235,16 +274,26 @@ func (s *AuthServer) register(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[redirectURI] = true
 	}
+	name := firstNonBlank(in.ClientName, "an MCP client")
+	now := time.Now()
 	id := randToken(16)
 	s.mu.Lock()
-	if len(s.clients) >= 4096 {
-		s.mu.Unlock()
+	outcome, report := s.admitRegistrationLocked(source, now)
+	if outcome == RegistrationAccepted {
+		s.clients[id] = clientReg{redirectURIs: in.RedirectURIs, name: name, createdAt: now}
+		s.persistClientsLocked() // survive restart, so the client's cached client_id stays known
+	}
+	s.mu.Unlock()
+	if outcome != RegistrationAccepted {
+		if report {
+			s.reportRegistration(RegistrationEvent{Outcome: outcome, SourceDigest: sourceDigest(source), ClientName: name})
+		}
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "temporarily_unavailable"})
 		return
 	}
-	s.clients[id] = clientReg{redirectURIs: in.RedirectURIs, name: firstNonBlank(in.ClientName, "an MCP client")}
-	s.persistClientsLocked() // survive restart, so the client's cached client_id stays known
-	s.mu.Unlock()
+	s.reportRegistration(RegistrationEvent{
+		Outcome: RegistrationAccepted, ClientID: id, SourceDigest: sourceDigest(source), ClientName: name,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  id,
 		"redirect_uris":              in.RedirectURIs,
@@ -252,6 +301,17 @@ func (s *AuthServer) register(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint_auth_method": "none",
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 	})
+}
+
+// reportRegistration hands one decision to the audit sink, outside s.mu so a
+// slow sink cannot stall the authorization server.
+func (s *AuthServer) reportRegistration(event RegistrationEvent) {
+	s.mu.Lock()
+	record := s.recordRegistration
+	s.mu.Unlock()
+	if record != nil {
+		record(event)
+	}
 }
 
 // authorize renders the one-click consent page (GET), bound to a pending grant
@@ -600,6 +660,12 @@ func (s *AuthServer) grantCode(w http.ResponseWriter, f url.Values) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
+	// This client completed a flow, so it is a real client rather than a
+	// registration nobody came back for, and unused-registration expiry stops
+	// applying to it.
+	s.mu.Lock()
+	s.markClientUsedLocked(ac.clientID)
+	s.mu.Unlock()
 	s.issueTokens(w, ac.subject, ac.scope, ac.clientID)
 }
 

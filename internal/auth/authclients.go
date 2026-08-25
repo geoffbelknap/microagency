@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // persistedClient is the on-disk form of one dynamic client registration.
@@ -22,6 +23,13 @@ type persistedClient struct {
 	RedirectURIs []string `json:"redirect_uris"`
 	Name         string   `json:"name"`
 	Issuer       string   `json:"issuer,omitempty"`
+	// CreatedAt and UsedAt persist unused-registration expiry across restarts.
+	// Without them a restart would reset every registration's age and a
+	// long-running gateway would never expire anything it had been restarted
+	// through. A record written before these existed carries neither, and is
+	// treated as an established client rather than expired on sight.
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UsedAt    time.Time `json:"used_at,omitzero"`
 }
 
 // LoadClients enables client-registration persistence at path and loads any
@@ -60,8 +68,14 @@ func (s *AuthServer) LoadClients(path string) {
 		if !valid {
 			continue
 		}
-		s.clients[pc.ClientID] = clientReg{redirectURIs: pc.RedirectURIs, name: pc.Name}
+		s.clients[pc.ClientID] = clientReg{
+			redirectURIs: pc.RedirectURIs, name: pc.Name,
+			createdAt: pc.CreatedAt, usedAt: pc.UsedAt,
+		}
 	}
+	// Registrations that expired while this gateway was down are dropped on the
+	// way in, so a restart does not resurrect them for another full TTL.
+	s.expireUnusedClientsLocked(time.Now(), s.effectiveRegistrationLimitsLocked().UnusedTTL)
 }
 
 // persistClientsLocked writes the current registrations to disk (0600, dir 0700).
@@ -72,7 +86,10 @@ func (s *AuthServer) persistClientsLocked() {
 	}
 	pcs := make([]persistedClient, 0, len(s.clients))
 	for id, c := range s.clients {
-		pcs = append(pcs, persistedClient{ClientID: id, RedirectURIs: c.redirectURIs, Name: c.name, Issuer: s.issuer})
+		pcs = append(pcs, persistedClient{
+			ClientID: id, RedirectURIs: c.redirectURIs, Name: c.name, Issuer: s.issuer,
+			CreatedAt: c.createdAt, UsedAt: c.usedAt,
+		})
 	}
 	if err := os.MkdirAll(filepath.Dir(s.clientsPath), 0o700); err != nil {
 		slog.Error("persist oauth clients failed", "err", err)

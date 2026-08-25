@@ -33,6 +33,7 @@ import (
 	"microagency/internal/auth"
 	"microagency/internal/console"
 	"microagency/internal/gateway"
+	"microagency/internal/landing"
 	"microagency/internal/mcp"
 	"microagency/internal/optoken"
 	"microagency/internal/portal"
@@ -241,6 +242,11 @@ func upFlags(w io.Writer) {
 	fmt.Fprintln(w, "    --high-assurance-multi-user  require exact principal/campaign operation grants (external issuer)")
 	fmt.Fprintln(w, "    --admin-addr <addr>   bind /admin + /console on a separate listener")
 	fmt.Fprintln(w, "                          (defaults to "+defaultAdminAddr+" when a tunnel is used)")
+	fmt.Fprintln(w, "    --client-registration <mode>  who may obtain an OAuth client from the built-in")
+	fmt.Fprintln(w, "                          authorization server: bounded (default — anyone may register,")
+	fmt.Fprintln(w, "                          rate-limited per source, capped, unused registrations expire)")
+	fmt.Fprintln(w, "                          or off (clients are provisioned by the operator; the account")
+	fmt.Fprintln(w, "                          portal is not served, because it registers itself)")
 	fmt.Fprintln(w, "    --allow-remote-admin  serve /admin + /console on a non-loopback bind (cleartext HTTP,")
 	fmt.Fprintln(w, "                          operator token only — required when --http or --admin-addr leaves")
 	fmt.Fprintln(w, "                          loopback; prefer a loopback bind reached over SSH forwarding)")
@@ -294,6 +300,9 @@ type upOptions struct {
 	// /console) on a non-loopback bind. Without it, such a bind refuses to
 	// start (see validateHTTPConfig).
 	allowRemoteAdmin bool
+	// clientRegistration declares who may obtain an OAuth client from the
+	// built-in authorization server: "bounded" (the default) or "off".
+	clientRegistration string
 	// allowPlaintextCredentials acknowledges keeping upstream credentials in the
 	// unencrypted mode-0600 file store. Without it — or MICROAGENCY_ALLOW_
 	// PLAINTEXT_CREDENTIALS — a start that would land there refuses, so a host
@@ -395,6 +404,9 @@ func parseUpOptions(args []string) (upOptions, error) {
 			o.singleUser = true
 		case args[i] == "--allow-remote-admin":
 			o.allowRemoteAdmin = true
+		case args[i] == "--client-registration" && i+1 < len(args):
+			o.clientRegistration = args[i+1]
+			i++
 		case args[i] == "--allow-plaintext-credentials":
 			o.allowPlaintextCredentials = true
 		case args[i] == "--no-register":
@@ -479,12 +491,18 @@ func run(args []string) {
 	if token == "" {
 		token = os.Getenv("MICROAGENCY_TOKEN")
 	}
+	registrationMode, err := auth.ParseRegistrationMode(o.clientRegistration)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	cfg := httpConfig{
 		addr: httpAddr, adminAddr: adminAddr, token: token,
 		issuer: issuer, audience: audience, requireScope: requireScope,
 		tunnel: tunnelProvider, tunnelName: o.tunnelName, tunnelURL: o.tunnelURL,
 		noRegister: noRegister, singleUser: o.singleUser, allowRemoteAdmin: o.allowRemoteAdmin,
-		ssoIssuer: o.ssoIssuer, ssoClientID: o.ssoClientID,
+		clientRegistration: registrationMode,
+		ssoIssuer:          o.ssoIssuer, ssoClientID: o.ssoClientID,
 		ssoClientSecretFile: o.ssoClientSecretFile, ssoHD: o.ssoHD,
 		ssoAnyAccount: o.ssoAnyAccount, ssoGroupsClaim: o.ssoGroupsClaim,
 	}
@@ -996,6 +1014,9 @@ type httpConfig struct {
 	noRegister                                       bool
 	singleUser                                       bool // explicit acknowledgment that public built-in OAuth serves one person
 	allowRemoteAdmin                                 bool // explicit acknowledgment of a non-loopback operator surface
+	// clientRegistration is the declared dynamic-client-registration posture of
+	// the built-in authorization server. Empty means the default (bounded).
+	clientRegistration auth.RegistrationMode
 }
 
 // defaultAdminAddr is where the operator surface (/admin + /console) binds when a
@@ -1191,7 +1212,16 @@ func consoleAddr(cfg httpConfig) string {
 // tracks the condition in buildMuxes: the portal signs users in against the
 // built-in authorization server, which runs only when issuance has not been
 // handed to an external issuer or replaced by a static bearer.
-func servesPortal(cfg httpConfig) bool { return cfg.issuer == "" && cfg.token == "" }
+// servesPortal reports whether this configuration serves the account portal. It
+// drives the startup banner, so it has to agree with what buildMuxes mounts.
+//
+// The portal obtains its own OAuth client by registering dynamically, exactly as
+// an MCP client does. A gateway that refuses registration has nothing to hand
+// it, so the portal is not served there rather than served broken — the same
+// reason --issuer does not serve it.
+func servesPortal(cfg httpConfig) bool {
+	return cfg.issuer == "" && cfg.token == "" && cfg.clientRegistration != auth.RegistrationOff
+}
 
 // buildMuxes constructs the agent-plane mux (everything cfg.addr — and any
 // tunnel in front of it — serves: /mcp plus the OAuth discovery/authorization
@@ -1279,6 +1309,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		if err != nil {
 			return nil, nil, "", "", err
 		}
+		configureClientRegistration(builtInAS, srv, cfg)
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir))
 		builtInAS.Register(mcpMux)
 		rs := &auth.ResourceServer{
@@ -1318,6 +1349,7 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		if err != nil {
 			return nil, nil, "", "", err
 		}
+		configureClientRegistration(builtInAS, srv, cfg)
 		builtInAS.LoadClients(oauthClientsPathFor(cfg.authDir)) // remember DCR client_ids across restarts (no re-auth)
 		builtInAS.Register(mcpMux)
 		rs := &auth.ResourceServer{
@@ -1350,13 +1382,22 @@ func buildMuxes(srv *mcp.Server, cfg httpConfig, opAuth mcp.OperatorAuth) (mcpMu
 		// only when this process runs one: with --issuer, issuance and its consent
 		// screens belong to the operator's identity provider, and there is no
 		// registration endpoint here for a browser to obtain a client from.
-		if builtInAS != nil {
+		if builtInAS != nil && servesPortal(cfg) {
 			mcpMux.Handle(portal.Path, portal.Handler(portal.Config{
 				ResourceMetadata: connectionMetadata,
-				Version:          version,
 			}))
 		}
 	}
+	// GET / on the public listener answered 404, which tells someone who
+	// reached this gateway in a browser nothing — not what it is, not where to
+	// sign in. The landing page says both and nothing else: no counts, no
+	// provider names, no deployment specifics, and no sign-in affordance at all
+	// when this deployment serves no account portal to point at.
+	landingCfg := landing.Config{}
+	if connectionAuth != nil && builtInAS != nil && servesPortal(cfg) {
+		landingCfg.PortalPath = portal.Path
+	}
+	mcpMux.Handle("/", landing.Handler(landingCfg))
 
 	// The operator surface binds a SEPARATE listener whenever effectiveAdminAddr
 	// says so (explicit --admin-addr, or the loopback default under a tunnel), so
@@ -1660,7 +1701,9 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 		case "oauth-local":
 			if cfg.ssoIssuer != "" {
 				printSSOPosture(cfg)
+				break
 			}
+			printRegistrationPosture(cfg)
 		case "oauth-tunnel":
 			if cfg.ssoIssuer != "" {
 				printSSOPosture(cfg)
@@ -1669,6 +1712,9 @@ func announce(srv *mcp.Server, cfg httpConfig, mode, bearer, opTokenFile string,
 				fmt.Fprintf(os.Stderr, "  Posture        single-user — every remote client authenticates as %q (several people need --sso-issuer or --issuer)\n", localSubject())
 			}
 			fmt.Fprintf(os.Stderr, "  Audience       %s\n", firstNonEmpty(cfg.audience, endpoint))
+			if cfg.ssoIssuer == "" {
+				printRegistrationPosture(cfg)
+			}
 			switch {
 			case changedOrigin:
 				fmt.Fprintln(os.Stderr, "  URL changed    prior tunnel tokens are invalid; reconnect clients at this URL")
@@ -1729,7 +1775,28 @@ func writeSSOPosture(w io.Writer, cfg httpConfig) {
 	if inert := auth.InertAudienceRules(cfg.ssoAnyAccount, ssoAudienceRules(cfg.authDir).Summary()); inert != "" {
 		fmt.Fprintf(w, "                 WARNING: %s configured but not applied — --sso-any-account admits every account at the issuer\n", inert)
 	}
+	// Who may register reads directly under who may sign in: they are the two
+	// halves of one question, and either alone answers it wrongly.
+	writeRegistrationPosture(w, cfg)
 	fmt.Fprintln(w, "  Posture        multi-user — each provider account is a distinct principal")
+}
+
+// printRegistrationPosture states who may obtain an OAuth client here.
+//
+// It sits beside the line that says who may sign in, because those are the two
+// halves of one question and reading either alone gives the wrong answer: an
+// audience bound to one domain still admits a client registration from anyone,
+// and a gateway that registers nobody still admits whoever its audience does.
+// Stating both on every start is the same discipline the Admits line follows —
+// the posture is declared, not inferred from which flags were passed.
+func printRegistrationPosture(cfg httpConfig) { writeRegistrationPosture(os.Stderr, cfg) }
+
+func writeRegistrationPosture(w io.Writer, cfg httpConfig) {
+	mode := cfg.clientRegistration
+	if mode == "" {
+		mode = auth.RegistrationBounded
+	}
+	fmt.Fprintf(w, "  Registers      %s\n", mode.Describe(auth.DefaultRegistrationLimits()))
 }
 
 func claudeAvailable() bool {
@@ -1850,8 +1917,27 @@ type authPosture struct {
 	// SSOAnyAccount records that the operator declared the issuer itself to be
 	// the audience, so doctor can tell that posture apart from one whose bound
 	// went missing.
-	SSOAnyAccount bool   `json:"sso_any_account,omitempty"`
-	UpdatedAt     string `json:"updated_at"`
+	SSOAnyAccount bool `json:"sso_any_account,omitempty"`
+	// ClientRegistration records the declared dynamic-client-registration
+	// posture, so doctor states who may obtain a client beside who may sign in.
+	// Empty is a posture written before this was recorded, and doctor says so
+	// rather than guessing a mode on the operator's behalf.
+	ClientRegistration string `json:"client_registration,omitempty"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
+// recordedRegistrationMode is the posture to persist for doctor. Only the modes
+// that run the built-in authorization server have one: with an external issuer
+// or a static bearer this process serves no registration endpoint at all, and
+// recording a mode there would describe a surface that does not exist.
+func recordedRegistrationMode(mode string, cfg httpConfig) string {
+	if mode != "oauth-local" && mode != "oauth-tunnel" {
+		return ""
+	}
+	if cfg.clientRegistration == "" {
+		return string(auth.RegistrationBounded)
+	}
+	return string(cfg.clientRegistration)
 }
 
 func authPosturePath() string { return filepath.Join(microagencyDir(), "auth-posture.json") }
@@ -1905,7 +1991,8 @@ func recordAuthPostureAt(cfg httpConfig, mode, path string) (bool, error) {
 	posture := authPosture{
 		Mode: mode, Issuer: issuer, Resource: resource, Audience: audience, Tunnel: cfg.tunnel,
 		SSOIssuer: cfg.ssoIssuer, SSOHostedDomain: cfg.ssoHD, SSOAnyAccount: cfg.ssoAnyAccount,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		ClientRegistration: recordedRegistrationMode(mode, cfg),
+		UpdatedAt:          time.Now().UTC().Format(time.RFC3339),
 	}
 	if cfg.tunnel != "" {
 		posture.TunnelMode = tunnelMode(cfg)

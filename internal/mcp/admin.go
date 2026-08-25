@@ -85,6 +85,11 @@ type RunInfo struct {
 	// rather than being absent from the log entirely.
 	Outcome       string `json:"outcome,omitempty"`
 	OutcomeDetail string `json:"outcome_detail,omitempty"`
+	// ClientID and SourceDigest describe an unauthenticated event: which OAuth
+	// client a dynamic registration created, and a one-way digest of where it
+	// came from.
+	ClientID     string `json:"client_id,omitempty"`
+	SourceDigest string `json:"source_digest,omitempty"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -111,6 +116,7 @@ func (s *Server) RunLog() []RunInfo {
 			ArgsCapture: rec.ArgsCapture, ArgsShape: rec.ArgsShape, ArgsSHA256: rec.ArgsSHA256,
 			User: rec.User, Reason: rec.Reason, Outcome: rec.Outcome, OutcomeDetail: rec.OutcomeDetail, DelegatedIdentity: rec.DelegatedIdentity, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
 			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
+			ClientID: rec.ClientID, SourceDigest: rec.SourceDigest,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
 			RawBytes: rec.RawBytes, ParkedBytes: rec.ParkedBytes, MinimizedBytes: rec.MinimizedBytes,

@@ -37,14 +37,17 @@ const Path = "/account"
 // Config is what the page needs from the process serving it. Everything else it
 // discovers at runtime from the gateway's own OAuth metadata, so the portal
 // cannot drift from the endpoints the gateway actually advertises.
+//
+// It carries nothing about this deployment beyond that metadata URL. The page is
+// served to anyone who reaches /account, before any sign-in, so a field here is
+// a field published to the unauthenticated internet — which is why the build
+// version is no longer one of them.
 type Config struct {
 	// ResourceMetadata is the RFC 9728 protected-resource metadata URL this
 	// gateway advertises on a 401 — an absolute URL or an origin-relative path.
 	// The page reads the resource identifier and the authorization server from
 	// it, exactly as an MCP client does.
 	ResourceMetadata string `json:"resource_metadata"`
-	// Version is the gateway build serving this page.
-	Version string `json:"version"`
 }
 
 // Handler serves the account portal at Path. It answers GET only, returns the
