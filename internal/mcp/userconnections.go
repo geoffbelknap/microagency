@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -293,6 +294,133 @@ func credentialKeyForRegistration(reg upstreamReg) string {
 
 func (s *Server) recordConnectionEvent(owner, name, action string) {
 	s.putRun(s.nextRunID(), runRecord{Kind: "connection", Upstream: name, Tool: action, User: owner})
+}
+
+// connectionFault is the failure shape the /connections API returns. The status
+// code alone cannot carry what a caller needs: a 502 that means "the provider
+// was unreachable, try again" and a 502 that means "this provider cannot be
+// connected until an operator configures a client for it" call for opposite
+// next moves, and a client that can only read the status renders them the same.
+//
+// Actor is the one field worth arguing about, so it is stated rather than
+// implied. "user" means the person who made the request can act on Message.
+// "operator" means only whoever runs this deployment can, and a client showing
+// the failure to an end user must not present Message as their instruction —
+// the account portal shows them that the provider is not ready instead, because
+// a remediation they cannot perform reads as a retry and wastes their time.
+type connectionFault struct {
+	// Kind is the closed failure classification a client branches on:
+	// validation, not_found, conflict, resource_exhausted, unsupported, or
+	// transient.
+	Kind string `json:"kind"`
+	// Message is one sentence naming what happened, written for Actor.
+	Message string `json:"message"`
+	// Actor is who can fix it: "user" or "operator".
+	Actor string `json:"actor"`
+	// Retryable reports whether repeating the same request could succeed
+	// without anything else changing first.
+	Retryable bool `json:"retryable"`
+}
+
+const (
+	actorUser     = "user"
+	actorOperator = "operator"
+
+	faultValidation        = "validation"
+	faultNotFound          = "not_found"
+	faultConflict          = "conflict"
+	faultResourceExhausted = "resource_exhausted"
+	faultUnsupported       = "unsupported"
+	faultPolicyDenied      = "policy_denied"
+	faultTransient         = "transient"
+)
+
+// userFault is a failure the caller's own input or quota caused, so the caller
+// is the one who can act on it.
+func userFault(kind, message string, retryable bool) connectionFault {
+	return connectionFault{Kind: kind, Message: message, Actor: actorUser, Retryable: retryable}
+}
+
+// operatorFault is a failure in the deployment: the template, its target, or the
+// gateway's own configuration. Nothing the caller does changes it.
+func operatorFault(kind, message string) connectionFault {
+	return connectionFault{Kind: kind, Message: message, Actor: actorOperator, Retryable: false}
+}
+
+// writeConnectionFault answers with the fault envelope as JSON. Every refusal on
+// this API goes through here so the shape cannot drift between endpoints.
+func writeConnectionFault(w http.ResponseWriter, status int, fault connectionFault) {
+	writeJSON(w, status, fault)
+}
+
+// failConnection records the attempt and answers with the fault.
+//
+// Recording matters most for exactly the failures a user cannot fix. A template
+// whose target advertises no OAuth, or whose authorization server needs a client
+// the operator never configured, refuses every attempt identically and silently;
+// without an audit record the operator's only evidence is a user saying the
+// button does nothing. The record carries the classification and the gateway's
+// own diagnosis, which is operator-bound and stays out of the caller's response
+// when the caller is not the one who can act on it.
+func (s *Server) failConnection(w http.ResponseWriter, status int, owner, name, action string, fault connectionFault) {
+	s.putRun(s.nextRunID(), runRecord{
+		Kind: "connection", Upstream: name, Tool: action, User: owner,
+		Outcome: fault.Kind, OutcomeDetail: fault.Message,
+	})
+	writeConnectionFault(w, status, fault)
+}
+
+// classifyConnectionStart turns a failure from the OAuth start path into a fault.
+// The classification is taken from typed checks, never from matching another
+// layer's message text: a substring match on someone else's prose is control
+// flow that breaks silently on a rewording no test covers.
+func classifyConnectionStart(err error) (int, connectionFault) {
+	switch {
+	case errors.Is(err, ErrNoOAuthClientAvailable):
+		return http.StatusBadGateway, operatorFault(faultUnsupported,
+			"this provider's authorization server does not support dynamic client registration, and this gateway has no OAuth client configured for the template")
+	case errors.Is(err, ErrUnsafeResourceIndicator):
+		// The refused value is upstream-supplied. It belongs in the operator's
+		// diagnostics, which already have it, and not in this response.
+		return http.StatusBadGateway, operatorFault(faultPolicyDenied,
+			"this gateway refused the provider's authorization server: it asked for a token bound to an unrelated resource")
+	default:
+		return http.StatusBadGateway, userFault(faultTransient,
+			"the provider's authorization server could not be reached to start sign-in", true)
+	}
+}
+
+// probeUpstreamOAuth resolves an upstream's protected-resource metadata, keeping
+// "could not reach it" and "reached it, and it does not do OAuth" apart.
+//
+// Probe reports these differently and the two have different owners: a dial or
+// transport failure is a connectivity fact about right now, which a retry may
+// well clear, while an empty metadata location is a standing fact about what
+// that endpoint is — reporting the first as the second tells an operator to go
+// looking at a provider's OAuth configuration when the provider was never
+// reached at all.
+func probeUpstreamOAuth(ctx context.Context, u *gateway.Upstream, host string) (string, *connectionFault) {
+	metadata, err := u.Probe(ctx)
+	if err != nil {
+		slog.Warn("connection probe failed", "upstream", u.Name, "err", err)
+		fault := userFault(faultTransient, "could not reach "+host+" to start sign-in", true)
+		return "", &fault
+	}
+	if metadata == "" {
+		fault := operatorFault(faultUnsupported, host+" did not advertise OAuth, so this gateway cannot start a sign-in against it")
+		return "", &fault
+	}
+	return metadata, nil
+}
+
+// providerHost renders an upstream URL as the host a person recognises, port
+// included, matching what the account portal already shows for that provider. It
+// never returns an empty string, so a failure message always names something.
+func providerHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "the provider"
 }
 
 func (s *Server) reserveConnectionStart(owner, template string, maxPerUser, existingForTemplate, existingGlobal int, reauth bool) (string, error) {
@@ -841,37 +969,37 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 		Params   map[string]string `json:"params"`
 		Label    string            `json:"label"`
 	}
+	owner := callerKey(r.Context())
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, "the request body is not valid JSON", false))
 		return
 	}
 	// Naming the connection at creation closes the window in which a second
 	// connection from the same template exists and neither can be told apart.
 	label, err := validateConnectionLabel(in.Label)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, err.Error(), false))
 		return
 	}
 	template, templateVersion, ok := s.connectionTemplateWithVersion(in.Template, false)
 	if !ok {
-		http.Error(w, "unknown connection template", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, operatorFault(faultNotFound, "this provider is no longer published on this gateway"))
 		return
 	}
 	scope, err := requestedTemplateScopes(template, in.Scopes)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, err.Error(), false))
 		return
 	}
 	upstreamURL, err := scopedTemplateURL(template, in.Params)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, err.Error(), false))
 		return
 	}
-	owner := callerKey(r.Context())
 	perTemplate, global := s.selfServiceCounts(owner, template.ID)
 	reservation, err := s.reserveConnectionStart(owner, template.ID, template.MaxPerUser, perTemplate, global, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		writeConnectionFault(w, http.StatusTooManyRequests, userFault(faultResourceExhausted, err.Error(), true))
 		return
 	}
 	keepReservation := false
@@ -881,15 +1009,18 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 		}
 	}()
 	name := template.ID + "-" + randomConnectionSuffix(9)
+	host := providerHost(upstreamURL)
 	u := &gateway.Upstream{Name: name, URL: upstreamURL, Client: s.upstreamClient}
-	metadata, err := u.Probe(r.Context())
-	if err != nil || metadata == "" {
-		http.Error(w, "upstream does not advertise OAuth", http.StatusBadGateway)
+	metadata, fault := probeUpstreamOAuth(r.Context(), u, host)
+	if fault != nil {
+		s.failConnection(w, http.StatusBadGateway, owner, name, "authorization_start_failed", *fault)
 		return
 	}
 	clientID, clientSecret, err := s.templateClient(r.Context(), template)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		slog.Warn("template OAuth client unavailable", "template", template.ID, "err", err)
+		s.failConnection(w, http.StatusServiceUnavailable, owner, name, "authorization_start_failed",
+			operatorFault(faultTransient, "this gateway could not read the OAuth client configured for this provider"))
 		return
 	}
 	authorizeURL, err := s.startUpstreamOAuth(r.Context(), name, upstreamURL, false, false, template.ReadOnly, owner, scope, metadata, callback, clientID, clientSecret,
@@ -897,7 +1028,9 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 		withConnectionLabel(label),
 		withConnectionReservation(reservation))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		slog.Warn("connection authorization start failed", "template", template.ID, "upstream", name, "err", err)
+		status, fault := classifyConnectionStart(err)
+		s.failConnection(w, status, owner, name, "authorization_start_failed", fault)
 		return
 	}
 	keepReservation = true
@@ -917,23 +1050,23 @@ func (s *Server) userSetConnectionLabel(w http.ResponseWriter, r *http.Request) 
 	name := r.PathValue("name")
 	owner := callerKey(r.Context())
 	if _, ok := s.ownedSelfServiceConnection(r.Context(), name); !ok {
-		http.Error(w, "unknown connection", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	var in struct {
 		Label string `json:"label"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, "the request body is not valid JSON", false))
 		return
 	}
 	label, err := validateConnectionLabel(in.Label)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, err.Error(), false))
 		return
 	}
 	if err := s.SetUpstreamLabel(name, label); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	s.persistLabel(name, label)
@@ -954,11 +1087,13 @@ func (s *Server) userRefreshConnection(w http.ResponseWriter, r *http.Request) {
 	owner := callerKey(r.Context())
 	if _, ok := s.ownedSelfServiceConnection(r.Context(), name); !ok {
 		s.recordConnectionEvent(owner, "", "refresh_denied")
-		http.Error(w, "unknown connection", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	if err := s.RefreshUpstream(r.Context(), name); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		slog.Warn("connection refresh failed", "upstream", name, "err", err)
+		s.failConnection(w, http.StatusBadGateway, owner, name, "refresh_failed",
+			userFault(faultTransient, "could not reload this connection's tools from the provider", true))
 		return
 	}
 	s.recordConnectionEvent(owner, name, "refreshed")
@@ -971,16 +1106,17 @@ func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Reques
 	record, ok := s.ownedSelfServiceConnection(r.Context(), name)
 	if !ok {
 		s.recordConnectionEvent(owner, "", "reauthorize_denied")
-		http.Error(w, "unknown connection", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	template, templateVersion, ok := s.connectionTemplateWithVersion(record.template, false)
 	if !ok {
-		http.Error(w, "connection template is disabled or removed", http.StatusForbidden)
+		writeConnectionFault(w, http.StatusForbidden, operatorFault(faultNotFound, "this provider is no longer published on this gateway"))
 		return
 	}
 	if !templateMatchesConnection(template, record.conn.Endpoint()) {
-		http.Error(w, "connection template endpoint changed; delete and recreate this connection", http.StatusConflict)
+		writeConnectionFault(w, http.StatusConflict, userFault(faultConflict,
+			"this provider now points somewhere else; disconnect this connection and connect it again", false))
 		return
 	}
 	var in struct {
@@ -989,13 +1125,13 @@ func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Reques
 	_ = json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in)
 	scope, err := requestedTemplateScopes(template, in.Scopes)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeConnectionFault(w, http.StatusBadRequest, userFault(faultValidation, err.Error(), false))
 		return
 	}
 	perTemplate, global := s.selfServiceCounts(owner, template.ID)
 	reservation, err := s.reserveConnectionStart(owner, template.ID, template.MaxPerUser, perTemplate, global, true)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		writeConnectionFault(w, http.StatusTooManyRequests, userFault(faultResourceExhausted, err.Error(), true))
 		return
 	}
 	keepReservation := false
@@ -1004,15 +1140,18 @@ func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Reques
 			s.releaseConnectionStart(reservation)
 		}
 	}()
+	host := providerHost(record.conn.Endpoint())
 	u := &gateway.Upstream{Name: name, URL: record.conn.Endpoint(), Client: s.upstreamClient}
-	metadata, err := u.Probe(r.Context())
-	if err != nil || metadata == "" {
-		http.Error(w, "upstream does not advertise OAuth", http.StatusBadGateway)
+	metadata, fault := probeUpstreamOAuth(r.Context(), u, host)
+	if fault != nil {
+		s.failConnection(w, http.StatusBadGateway, owner, name, "reauthorization_start_failed", *fault)
 		return
 	}
 	clientID, clientSecret, err := s.templateClient(r.Context(), template)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		slog.Warn("template OAuth client unavailable", "template", template.ID, "err", err)
+		s.failConnection(w, http.StatusServiceUnavailable, owner, name, "reauthorization_start_failed",
+			operatorFault(faultTransient, "this gateway could not read the OAuth client configured for this provider"))
 		return
 	}
 	discover := !record.enabled && !record.revoked
@@ -1020,7 +1159,9 @@ func (s *Server) userReauthorizeConnection(w http.ResponseWriter, r *http.Reques
 		withSelfServiceOAuth(template.ID, templateVersion, selfServiceTokenKey(owner, name), selfServiceClientKey(owner, template.ID, record.conn.Endpoint()), record.authGeneration),
 		withConnectionReservation(reservation))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		slog.Warn("connection reauthorization start failed", "template", template.ID, "upstream", name, "err", err)
+		status, fault := classifyConnectionStart(err)
+		s.failConnection(w, status, owner, name, "reauthorization_start_failed", fault)
 		return
 	}
 	keepReservation = true
@@ -1034,16 +1175,18 @@ func (s *Server) userDeleteConnection(w http.ResponseWriter, r *http.Request) {
 	record, ok := s.ownedSelfServiceConnection(r.Context(), name)
 	if !ok {
 		s.recordConnectionEvent(owner, "", "delete_denied")
-		http.Error(w, "unknown connection", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	s.cancelOAuthFlows(func(flow *oauthFlow) bool { return flow.name == name })
 	if err := s.RevokeUpstream(name); err != nil {
-		http.Error(w, "unknown connection", http.StatusNotFound)
+		writeConnectionFault(w, http.StatusNotFound, userFault(faultNotFound, "you have no connection by that name", false))
 		return
 	}
 	if err := s.removeSelfServiceRegistration(r.Context(), name, record); err != nil {
-		http.Error(w, "connection disabled, but durable deletion failed: "+err.Error(), http.StatusServiceUnavailable)
+		slog.Warn("durable connection deletion failed", "upstream", name, "err", err)
+		s.failConnection(w, http.StatusServiceUnavailable, owner, name, "delete_failed",
+			operatorFault(faultTransient, "the connection was disabled and its tools are gone, but this gateway could not finish deleting its stored record"))
 		return
 	}
 	_ = s.RemoveUpstream(name)

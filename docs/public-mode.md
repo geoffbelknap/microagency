@@ -455,6 +455,38 @@ connections:
 - `POST /connections/{name}/reauthorize` to replace a revoked or changed grant
 - `DELETE /connections/{name}` to remove the connection and credential
 
+### When a connection is refused
+
+Every refusal on these routes answers with the same JSON body:
+
+```json
+{
+  "kind": "unsupported",
+  "message": "this provider's authorization server does not support dynamic client registration, and this gateway has no OAuth client configured for the template",
+  "actor": "operator",
+  "retryable": false
+}
+```
+
+`kind` is one of `validation`, `not_found`, `conflict`, `resource_exhausted`,
+`unsupported`, `policy_denied`, or `transient`. `retryable` says whether
+repeating the same request could succeed on its own.
+
+`actor` says who can act on `message`. `user` means the caller: a rejected
+label, a quota they have reached, a provider that was briefly unreachable.
+`operator` means the deployment has to change first, and the message is written
+for whoever runs the gateway. A client showing an `operator` failure to an end
+user should say the provider is not ready rather than repeat a remediation that
+person cannot perform. The account portal does exactly that.
+
+A start that fails is recorded in the audit log as
+`authorization_start_failed`, with the classification in `outcome` and the
+gateway's diagnosis in `outcome_detail`. A template that refuses every attempt
+is visible in `GET /admin/runs` without waiting for someone to report it. The
+most common cause is the case above: the provider's authorization server does
+not offer [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) dynamic
+client registration, so the template needs a `client_id` and `client_secret`.
+
 The operator retains gateway-wide controls at
 `POST /admin/upstreams/{name}/label` (a label on a shared connection reaches
 every admitted caller's context, so it is set here rather than by one user),

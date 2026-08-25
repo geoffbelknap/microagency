@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -129,6 +130,27 @@ func sameOrigin(a, b string) bool {
 	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
 }
 
+// ErrNoOAuthClientAvailable reports that an upstream's authorization server does
+// not support dynamic client registration and no client was configured for it.
+//
+// It is a sentinel because two callers need to tell this condition apart from
+// every other reason a flow fails to start, and they need to do it without
+// matching on prose. It is a standing deployment fact, not a transient one: no
+// amount of retrying changes it, and only an operator configuring a client for
+// the connection does. The operator console says so in its own words; the
+// account portal reports that the provider is not ready rather than handing a
+// user a remediation that is not theirs to perform.
+var ErrNoOAuthClientAvailable = errors.New("this authorization server does not support dynamic client registration")
+
+// ErrUnsafeResourceIndicator reports that an upstream's authorization server
+// named an RFC 8707 resource indicator outside the upstream's own origin, so the
+// flow was refused rather than binding a token whose audience is some other
+// resource. The refusal is the security property; the sentinel exists so callers
+// can report it as a refusal instead of as a transport failure, and so the
+// upstream-supplied value it wraps stays in operator diagnostics rather than
+// being echoed back to whoever clicked connect.
+var ErrUnsafeResourceIndicator = errors.New("the provider's authorization server asked for a token bound to an unrelated resource")
+
 // loadOrRegisterClient returns the OAuth client to use for this AS. Precedence:
 // (1) a client already stored for this AS (so retries don't spawn duplicate apps);
 // (2) operator-supplied client_id/secret — the path for an AS WITHOUT dynamic client
@@ -168,7 +190,7 @@ func (s *Server) loadOrRegisterClientAtKey(ctx context.Context, meta *auth.ASMet
 		}
 	}
 	if meta.RegistrationEndpoint == "" {
-		return "", "", fmt.Errorf("this authorization server does not support dynamic client registration; supply an OAuth client_id/client_secret when adding the connection")
+		return "", "", fmt.Errorf("%w; supply an OAuth client_id/client_secret when adding the connection", ErrNoOAuthClientAvailable)
 	}
 	id, secret, err := auth.RegisterClient(ctx, s.httpClient(), meta.RegistrationEndpoint, callbackURL, "microagency")
 	if err != nil {
@@ -295,7 +317,7 @@ func (s *Server) startUpstreamOAuth(ctx context.Context, name, url string, disco
 	if meta.Resource == "" {
 		meta.Resource = url
 	} else if !resourceAllowedForUpstream(meta.Resource, url) {
-		return "", fmt.Errorf("authorization server advertised resource indicator %q that is not an absolute URL on the upstream origin %q; refusing to bind a token to an unrelated resource", meta.Resource, url)
+		return "", fmt.Errorf("%w: it advertised resource indicator %q, which is not an absolute URL on the upstream origin %q", ErrUnsafeResourceIndicator, meta.Resource, url)
 	}
 	flow := &oauthFlow{name: name, url: url, discover: discover, reauth: reauth, readOnly: readOnly, owner: owner, meta: meta, redirectURI: callbackURL, expiry: time.Now().Add(10 * time.Minute)}
 	for _, option := range options {
