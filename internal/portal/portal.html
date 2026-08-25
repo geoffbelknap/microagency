@@ -160,8 +160,51 @@
       throw new Error("unauthenticated");
     }
     var text = (await r.text()).trim();
-    if (!r.ok) throw new Error(text || (method + " " + path + " failed (" + r.status + ")."));
+    if (!r.ok) throw refusal(text, method, path, r.status);
     return text ? JSON.parse(text) : null;
+  }
+
+  /* refusal turns a refused call into an Error carrying the gateway's own
+     classification when it sent one: {kind, message, actor, retryable}. The
+     classification travels WITH the error because it decides what a person is
+     shown — re-deriving that later by reading the sentence would be guessing at
+     something the gateway already stated. */
+  function refusal(text, method, path, status) {
+    var fault = null;
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && typeof parsed.message === "string" && parsed.message) fault = parsed;
+    } catch (e) { fault = null; }
+    var err = new Error((fault && fault.message) || text || (method + " " + path + " failed (" + status + ")."));
+    err.fault = fault;
+    return err;
+  }
+
+  /* whatToSay decides what a person reads about a failure.
+
+     A message the gateway addressed to the user is shown as written: it names
+     the thing they typed or the limit they reached, and they can act on it. A
+     message addressed to the operator is not — it is written in the vocabulary
+     of the deployment ("configure a client for the template"), and putting it in
+     front of a user reads as an instruction they cannot follow, which is worse
+     than saying nothing. They are told plainly that the provider is not ready
+     and that it is not theirs to fix. */
+  function whatToSay(e) {
+    var fault = e && e.fault;
+    if (fault && fault.actor === "operator") {
+      return "This provider is not ready to connect. Setting it up is your operator's to finish on the gateway; " +
+        "nothing you do here will change it. The attempt was recorded, so your operator can see it.";
+    }
+    if (fault && fault.message) return fault.message;
+    return (e && e.message) || "The gateway did not answer.";
+  }
+
+  /* canRetry reports whether repeating the same action could succeed on its own.
+     Unknown failures are treated as retryable: offering a retry that fails again
+     costs less than removing the only control from a page that just refused. */
+  function canRetry(e) {
+    var fault = e && e.fault;
+    return !fault || fault.retryable !== false;
   }
 
   /* ---------- OAuth: discovery, registration, PKCE ---------- */
@@ -339,7 +382,7 @@
     } catch (e) {
       if (e && e.message === "unauthenticated") return;
       show("#boot", false); show("#signedout", true);
-      notice("#signin-notice", e.message, "bad");
+      notice("#signin-notice", whatToSay(e), "bad");
       return;
     }
     var who = subjectOf(state.token);
@@ -360,7 +403,7 @@
   function fail(e) {
     if (e && e.message === "unauthenticated") return;
     show("#boot", false); show("#app", false); show("#signout", false); show("#signedout", true);
-    notice("#signin-notice", (e && e.message) || String(e), "bad");
+    notice("#signin-notice", whatToSay(e), "bad");
   }
 
   /* ---------- rendering ---------- */
@@ -515,7 +558,7 @@
       await api("POST", "/connections/" + encodeURIComponent(conn.name) + "/refresh");
       flash("Reloaded the tool list for " + conn.name + ".");
       await reload();
-    } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+    } catch (e) { if (e.message !== "unauthenticated") flash(whatToSay(e), "bad"); }
   }
 
   async function doReauthorize(conn) {
@@ -523,7 +566,7 @@
       var res = await api("POST", "/connections/" + encodeURIComponent(conn.name) + "/reauthorize", {});
       if (res && res.authorize_url) { location.href = res.authorize_url; return; }
       await reload();
-    } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+    } catch (e) { if (e.message !== "unauthenticated") flash(whatToSay(e), "bad"); }
   }
 
   /* Disconnect destroys a credential. The prompt names the consequence and what
@@ -561,12 +604,16 @@
       "connection apart from another one from the same provider.",
       body, "Save", async function () {
         var value = input.value;
-        closeModal();
+        modalWorking(true, "Saving\u2026");
         try {
           await api("PATCH", "/connections/" + encodeURIComponent(conn.name), { label: value });
+          closeModal();
           flash(value ? "Labelled " + conn.name + " \u201c" + value + "\u201d." : "Removed the label from " + conn.name + ".");
           await reload();
-        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+        } catch (e) {
+          if (e.message === "unauthenticated") return;
+          modalFailed(e);
+        }
       });
   }
 
@@ -580,12 +627,16 @@
       "the grant — reconnecting means signing in at the provider again. Nothing at " + hostOf(conn.url) +
       " is deleted, and the record of your authorization stays in your provider account until you remove it there.",
       null, "Disconnect", async function () {
-        closeModal();
+        modalWorking(true, "Disconnecting\u2026");
         try {
           await api("DELETE", "/connections/" + encodeURIComponent(conn.name));
+          closeModal();
           flash("Disconnected " + conn.name + ". Its credential is gone.");
           await reload();
-        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+        } catch (e) {
+          if (e.message === "unauthenticated") return;
+          modalFailed(e);
+        }
       }, true);
   }
 
@@ -645,17 +696,30 @@
           if (field.kind === "bool") { if (field.node.checked) values[field.name] = "true"; }
           else { var v = field.node.value.trim(); if (v) values[field.name] = v; }
         });
-        closeModal();
+        /* The dialog stays open until this succeeds or explains itself. Closing
+           first and reporting elsewhere is what made a refused connection look
+           like a button that does nothing at all. */
+        modalWorking(true, "Starting…");
         try {
           var res = await api("POST", "/connections",
             { template: tmpl.id, params: values, label: labelInput.value });
           if (res && res.authorize_url) { location.href = res.authorize_url; return; }
+          closeModal();
           await reload();
-        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+        } catch (e) {
+          if (e.message === "unauthenticated") return; /* signedOut closed the dialog */
+          modalFailed(e);
+        }
       });
   }
 
   /* ---------- modal ---------- */
+
+  /* A dialog owns its own outcome. It has a notice slot and a confirm button it
+     can put into a working state, so an action that fails reports where the
+     person is looking instead of closing the dialog and writing somewhere else
+     on the page — which is indistinguishable from the button doing nothing. */
+  var modalConfirm = null;
 
   function openModal(title, desc, bodyNode, confirmLabel, onConfirm, danger) {
     var modal = $("#modal");
@@ -663,11 +727,16 @@
     modal.appendChild(el("h3", null, title));
     if (desc) modal.appendChild(el("p", "lead", desc));
     if (bodyNode) modal.appendChild(bodyNode);
+    var slot = el("div");
+    slot.id = "modal-notice";
+    modal.appendChild(slot);
     var foot = el("div", "foot");
     var cancel = el("button", "btn sm", "Cancel");
+    cancel.id = "modal-cancel";
     cancel.onclick = closeModal;
     var ok = el("button", "btn sm " + (danger ? "danger" : "primary"), confirmLabel);
     ok.onclick = onConfirm;
+    modalConfirm = { node: ok, label: confirmLabel, cancel: cancel };
     foot.appendChild(cancel);
     foot.appendChild(ok);
     modal.appendChild(foot);
@@ -675,7 +744,32 @@
     var first = modal.querySelector("input");
     (first || cancel).focus();
   }
-  function closeModal() { $("#scrim").classList.remove("show"); }
+  function closeModal() { modalConfirm = null; $("#scrim").classList.remove("show"); }
+
+  /* modalWorking marks the dialog's action as in flight. The label says what is
+     happening rather than leaving the original verb under a dead button. */
+  function modalWorking(on, workingLabel) {
+    if (!modalConfirm) return;
+    modalConfirm.node.disabled = !!on;
+    modalConfirm.node.textContent = on ? workingLabel : modalConfirm.label;
+    if (on) notice("#modal-notice", "");
+  }
+
+  /* modalFailed renders a refusal inside the dialog that caused it. When nothing
+     the person does can change the outcome, the action is withdrawn rather than
+     left there inviting a retry that is already known to fail, and the remaining
+     control says the dialog is finished rather than "Cancel". */
+  function modalFailed(e) {
+    if (!modalConfirm) return;
+    notice("#modal-notice", whatToSay(e), "bad");
+    if (canRetry(e)) {
+      modalWorking(false);
+      return;
+    }
+    modalConfirm.node.remove();
+    modalConfirm.cancel.textContent = "Close";
+    modalConfirm.cancel.focus();
+  }
 
   $("#scrim").onclick = function (ev) { if (ev.target === this) closeModal(); };
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeModal(); });

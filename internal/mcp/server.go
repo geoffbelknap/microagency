@@ -211,6 +211,14 @@ type runRecord struct {
 	ArgsSHA256 string          `json:"args_sha256,omitempty"`
 	User       string          `json:"user,omitempty"`   // the OAuth sub that ran it; admin-plane records carry the acting operator token's name
 	Reason     string          `json:"reason,omitempty"` // operator-supplied justification (required for ref materialization)
+	// Outcome and OutcomeDetail describe an action that did not complete:
+	// Outcome is the closed failure classification, OutcomeDetail the gateway's
+	// own diagnosis of it. A connection lifecycle action that fails is recorded
+	// with both, because a template that refuses every attempt is otherwise
+	// invisible — the successful connections are logged and the failures leave
+	// nothing for an operator to find.
+	Outcome       string `json:"outcome,omitempty"`
+	OutcomeDetail string `json:"outcome_detail,omitempty"`
 	// DelegatedIdentity is the provider identity a delegated (google-dwd) call
 	// acted as — the derived subject — recorded beside the caller identity so
 	// the audit trail shows both who called and who the upstream saw.

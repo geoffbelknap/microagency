@@ -152,3 +152,50 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 	}
 }
+
+// A refused connection must be reported where the person is looking. The page
+// reads the gateway's failure envelope, so the field names it branches on are
+// part of the portal↔API contract and belong here beside the routes.
+func TestPortalReadsTheFailureEnvelope(t *testing.T) {
+	body := get(t, Handler(Config{}), Path).Body.String()
+	for _, want := range []string{
+		"actor",     // who can act on the failure
+		"retryable", // whether repeating it could work
+		"operator",  // the branch that withholds an operator's remediation
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("portal page does not read %q from a refusal; it cannot tell a user's problem from an operator's", want)
+		}
+	}
+}
+
+// The connect dialog must not close before its request resolves. Closing first
+// and writing the outcome elsewhere on the page is indistinguishable from the
+// button doing nothing, which is the failure this page is written to avoid.
+func TestConnectDialogReportsItsOwnFailure(t *testing.T) {
+	body := get(t, Handler(Config{}), Path).Body.String()
+	for _, want := range []string{
+		"modal-notice", // the dialog's own notice slot
+		"Starting…",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("connect dialog missing %q; a refused connection has nowhere to render", want)
+		}
+	}
+}
+
+// A remediation only an operator can perform must not be handed to a user as if
+// it were theirs. The page says the provider is not ready and that the attempt
+// was recorded, rather than repeating the gateway's operator-facing sentence.
+func TestOperatorOnlyFailureDoesNotReadAsRetryable(t *testing.T) {
+	body := get(t, Handler(Config{}), Path).Body.String()
+	for _, want := range []string{
+		"This provider is not ready to connect",
+		"your operator's to finish",
+		"The attempt was recorded",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("portal page missing operator-fault wording %q", want)
+		}
+	}
+}

@@ -79,6 +79,12 @@ type RunInfo struct {
 	Bytes                int             `json:"bytes"`
 	Protected            int             `json:"protected,omitempty"` // sensitive field values minimized on this call
 	ExitCode             int             `json:"exit_code"`
+	// Outcome and OutcomeDetail carry the failure classification and the
+	// gateway's own diagnosis for an action that did not complete. A connection
+	// a user could not start reads here as a recorded attempt with a reason,
+	// rather than being absent from the log entirely.
+	Outcome       string `json:"outcome,omitempty"`
+	OutcomeDetail string `json:"outcome_detail,omitempty"`
 	// Stderr is the guest's captured stderr (bounded) — operator-only diagnostics.
 	// It is deliberately absent from the agent-facing tool result, which can only
 	// point here.
@@ -103,7 +109,7 @@ func (s *Server) RunLog() []RunInfo {
 			Delivery: rec.Delivery, ProgramRequestID: rec.ProgramRequestID, SourceID: rec.SourceID,
 			Upstream: rec.Upstream, Tool: rec.Tool, Args: rec.Args,
 			ArgsCapture: rec.ArgsCapture, ArgsShape: rec.ArgsShape, ArgsSHA256: rec.ArgsSHA256,
-			User: rec.User, Reason: rec.Reason, DelegatedIdentity: rec.DelegatedIdentity, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
+			User: rec.User, Reason: rec.Reason, Outcome: rec.Outcome, OutcomeDetail: rec.OutcomeDetail, DelegatedIdentity: rec.DelegatedIdentity, Campaign: rec.Campaign, GrantID: rec.GrantID, GrantDigest: rec.GrantDigest,
 			Effect: rec.Effect, ResourceIDs: append([]string(nil), rec.ResourceIDs...), Session: rec.Session,
 			Substrate: rec.Substrate, Engine: rec.Engine, LatencyMs: rec.LatencyMs,
 			InputBytes: rec.InputBytes, OutputBytes: rec.OutputBytes,
