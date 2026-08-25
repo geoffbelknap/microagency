@@ -375,14 +375,19 @@ func (s *Server) failConnection(w http.ResponseWriter, status int, owner, name, 
 // layer's message text: a substring match on someone else's prose is control
 // flow that breaks silently on a rewording no test covers.
 func classifyConnectionStart(err error) (int, connectionFault) {
+	// Only a genuine failure to reach the provider is a bad gateway. The other
+	// two are decisions made on this side — a template without the OAuth client
+	// its provider requires, and a refusal by this gateway's own policy — and
+	// reporting them as 5xx invites any intermediary to replace the response
+	// with its own error page, discarding the one message that says what to do.
 	switch {
 	case errors.Is(err, ErrNoOAuthClientAvailable):
-		return http.StatusBadGateway, operatorFault(faultUnsupported,
+		return http.StatusConflict, operatorFault(faultUnsupported,
 			"this provider's authorization server does not support dynamic client registration, and this gateway has no OAuth client configured for the template")
 	case errors.Is(err, ErrUnsafeResourceIndicator):
 		// The refused value is upstream-supplied. It belongs in the operator's
 		// diagnostics, which already have it, and not in this response.
-		return http.StatusBadGateway, operatorFault(faultPolicyDenied,
+		return http.StatusConflict, operatorFault(faultPolicyDenied,
 			"this gateway refused the provider's authorization server: it asked for a token bound to an unrelated resource")
 	default:
 		return http.StatusBadGateway, userFault(faultTransient,
