@@ -88,6 +88,7 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 	}
 	out := make([]map[string]any, 0, limit)
 	total, fullSchemas, schemaDigests, summarized, omitted := 0, 0, 0, 0, 0
+	ambiguous := 0
 	exactSchemaLookup := false
 	for i := 0; i < limit; i++ {
 		h := hits[i]
@@ -108,6 +109,18 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		}
 		if v, ok := h.tool["read_only_blocked"]; ok {
 			entry["read_only_blocked"] = v
+		}
+		// The connection's human-meaningful name, as its own field. It is what
+		// separates two connections instantiated from one template, which are
+		// otherwise identical down to the schema.
+		if v, ok := h.tool["label"]; ok {
+			entry["label"] = v
+		}
+		// This entry is one of several same-template candidates no label picks
+		// apart. Calling it is refused, so say so before the agent spends the call.
+		if v, ok := h.tool["ambiguous"]; ok {
+			entry["ambiguous"] = v
+			ambiguous++
 		}
 		full := marshalLen(entry)
 		// The top hit is always full so the best match is immediately usable; others
@@ -136,6 +149,10 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		summarized++
 	}
 	result := map[string]any{"tools": out}
+	// Notes accumulate in the order an agent needs them, then render as one
+	// field. A tie is not an overflow and not an empty state, so a branch that
+	// has something to say must not silently replace what another wrote.
+	var notes []string
 	if len(out) == 0 {
 		// A bare {"tools":[]} is three indistinguishable states: nothing
 		// connected, nothing matched, or a broken index — and this lands on
@@ -146,15 +163,20 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		// real index is the agent's cue to vary terms, not to conclude the
 		// capability does not exist.
 		if len(allIndexed) == 0 {
-			result["note"] = "No upstream MCP servers are connected to this gateway yet, so there are no tools to find. " +
-				"This is an operator action, not something to retry: ask the operator to connect servers in the microagency console."
+			notes = append(notes, "No upstream MCP servers are connected to this gateway yet, so there are no tools to find. "+
+				"This is an operator action, not something to retry: ask the operator to connect servers in the microagency console.")
 		} else if allowed != nil && len(indexed) == 0 {
-			result["note"] = "None of this run's granted tools remain available. The gateway may have disabled, revoked, or refreshed a connection after the program started."
+			notes = append(notes, "None of this run's granted tools remain available. The gateway may have disabled, revoked, or refreshed a connection after the program started.")
 		} else {
-			result["note"] = fmt.Sprintf("0 of %d indexed tools matched %q. The servers are connected and the index is live — "+
+			notes = append(notes, fmt.Sprintf("0 of %d indexed tools matched %q. The servers are connected and the index is live — "+
 				"vary the keywords (names and descriptions are matched) rather than concluding the capability is missing.",
-				len(indexed), in.Query)
+				len(indexed), in.Query))
 		}
+	}
+	if ambiguous > 0 {
+		notes = append(notes, fmt.Sprintf("%d returned tool(s) are marked \"ambiguous\": each belongs to one of several connections created from the same template, "+
+			"exposing the same tool with the same schema, and no label tells them apart. Calling one is refused rather than guessed at. "+
+			"Give each connection a distinct label to choose between them.", ambiguous))
 	}
 	if summarized > 0 || omitted > 0 {
 		// Self-describing overflow: tell the agent how to recover any full detail.
@@ -162,7 +184,10 @@ func (s *Server) findToolsAllowed(ctx context.Context, args json.RawMessage, all
 		if omitted > 0 {
 			note = fmt.Sprintf("%d lower-ranked result(s) were omitted and %d summarized to stay within budget.", omitted, summarized)
 		}
-		result["note"] = note + " Narrow your query, or call find_tools with a tool's exact name for its full description and inputSchema."
+		notes = append(notes, note+" Narrow your query, or call find_tools with a tool's exact name for its full description and inputSchema.")
+	}
+	if len(notes) > 0 {
+		result["note"] = strings.Join(notes, " ")
 	}
 	response := toolResult(result)
 	parentRun, delivery, requestID := programAuditContext(ctx)

@@ -93,6 +93,13 @@ type upstream struct {
 	selfService bool
 	template    string
 	revoked     bool
+	// label is a short human-meaningful name for THIS connection — "production",
+	// "staging" — surfaced as its own field in the agent's view of every tool the
+	// connection exposes. It is what makes two connections instantiated from one
+	// template choosable on purpose rather than by coin flip (see ambiguity.go).
+	// Held to an identifier's charset by validateConnectionLabel, because it is
+	// caller-supplied text that lands in a model's context.
+	label string
 	// delegation, when set, makes this a google-dwd connection: per call, the
 	// source derives a short-lived upstream token acting as the CALLER's
 	// provider-verified email, so the provider's own ACLs trim results.
@@ -171,6 +178,11 @@ func WithPrivateDestination() UpstreamOption {
 
 // WithRevoked restores a persisted revoked record without restoring a credential.
 func WithRevoked() UpstreamOption { return func(u *upstream) { u.revoked = true } }
+
+// WithLabel names the connection for the humans and agents that read its tools.
+// The label must already have passed validateConnectionLabel; registration paths
+// that accept caller input validate before constructing the option.
+func WithLabel(label string) UpstreamOption { return func(u *upstream) { u.label = label } }
 
 // registerUpstream atomically registers rec under name, failing if the name is
 // already taken. The existence check and the write happen under ONE lock
@@ -412,13 +424,15 @@ type UpstreamInfo struct {
 	Owner              string `json:"owner,omitempty"` // canonical principal key (issuer#subject) this connection is scoped to; "" = shared
 	// AuditFullArgs: this connection is opted up to full argument capture in the
 	// audit log on a multi-principal gateway (default there: structure + digest).
-	AuditFullArgs bool     `json:"audit_full_args,omitempty"`
-	SelfService   bool     `json:"self_service,omitempty"`
-	Template      string   `json:"template,omitempty"`
-	Revoked       bool     `json:"revoked,omitempty"`
-	Tools         int      `json:"tools"` // count of advertised tools (shown per connection in the console)
-	GrantCount    int      `json:"grant_count,omitempty"`
-	GrantDigests  []string `json:"grant_digests,omitempty"`
+	AuditFullArgs bool   `json:"audit_full_args,omitempty"`
+	SelfService   bool   `json:"self_service,omitempty"`
+	Template      string `json:"template,omitempty"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	// Label is the connection's human-meaningful name, or empty when unset.
+	Label        string   `json:"label,omitempty"`
+	Tools        int      `json:"tools"` // count of advertised tools (shown per connection in the console)
+	GrantCount   int      `json:"grant_count,omitempty"`
+	GrantDigests []string `json:"grant_digests,omitempty"`
 	// Strategy is how a calling principal maps to upstream authority: static,
 	// per-user-oauth, or google-dwd. Delegation carries a google-dwd
 	// connection's non-secret config; the key itself is never exposed.
@@ -463,6 +477,25 @@ func (s *Server) SetUpstreamOwner(name, owner string) error {
 		return fmt.Errorf("gateway: self-service upstream %q ownership is immutable; revoke or delete it instead", name)
 	}
 	rec.owner = owner
+	return nil
+}
+
+// SetUpstreamLabel sets (or, with "", clears) a connection's human-meaningful
+// label. The label is REFUSED rather than rewritten when it cannot be expressed
+// in the label charset, so the label an author sets is the label they read back.
+// Errors if the upstream is unknown.
+func (s *Server) SetUpstreamLabel(name, label string) error {
+	checked, err := validateConnectionLabel(label)
+	if err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	rec, ok := s.reg.conns[name]
+	if !ok {
+		return fmt.Errorf("gateway: unknown upstream %q", name)
+	}
+	rec.label = checked
 	return nil
 }
 
@@ -589,7 +622,7 @@ func (s *Server) UpstreamList() []UpstreamInfo {
 		if !hasExplicit && s.reg.secureDefault {
 			effective = defaultMinimizePolicyJSON // secure-by-default
 		}
-		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, PrivateDestination: rec.privateDestination, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
+		info := UpstreamInfo{Name: name, URL: rec.conn.Endpoint(), State: state, Provenance: rec.provenance, ReadOnly: rec.readOnly, PrivateDestination: rec.privateDestination, Owner: rec.owner, AuditFullArgs: rec.auditFullArgs, SelfService: rec.selfService, Template: rec.template, Revoked: rec.revoked, Label: rec.label, Tools: len(rec.tools), GrantCount: len(rec.grants), GrantDigests: sortedGrantDigests(rec.grants),
 			Strategy: StrategyStatic, Minimize: json.RawMessage(explicit), MinimizeEffective: json.RawMessage(effective)}
 		switch {
 		case rec.delegation != nil:
@@ -657,42 +690,18 @@ func (s *Server) indexedToolsFor(callerKey, campaign string) []map[string]any {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	var out []map[string]any
+	// groups collects, per (template, upstream tool name), the entries a caller
+	// would have to choose between. Grouping happens here, where the connection
+	// record is in hand, so find_tools can warn about a tie at DISCOVERY time —
+	// before the agent spends a call and meets the refusal.
+	groups := map[string][]*indexCandidate{}
 	for name, rec := range s.reg.conns {
-		if rec.revoked {
-			continue
-		}
-		if rec.owner != "" && rec.owner != callerKey {
-			continue
-		}
-		// A delegated connection is usable only by callers with a verified
-		// email to act as; for anyone else it is absent from the index — the
-		// same as-unknown boundary the invocation gate enforces.
-		if rec.delegation != nil && delegationSubject == "" {
+		if !connectionVisibleTo(rec, callerKey, delegationSubject) {
 			continue
 		}
 		for _, t := range rec.tools {
-			if s.highAssurance || len(rec.grants) > 0 {
-				grant, ok := matchingGrant(*rec, callerKey, campaign, t.Name)
-				if !ok || (s.highAssurance && !grant.HighAssurance) || (rec.owner == "" && !grant.AllowShared) {
-					continue
-				}
-				expires, _ := time.Parse(time.RFC3339, grant.ExpiresAt)
-				grantWrites := grant.Effect == effectWrite
-				if !time.Now().Before(expires) || grantWrites != isHighAssuranceWriteTool(t) || (rec.readOnly && grantWrites) {
-					continue
-				}
-				if rec.owner == "" && grantWrites {
-					if len(grant.Resources) == 0 {
-						continue
-					}
-					allShared := true
-					for _, resource := range grant.Resources {
-						allShared = allShared && resource.SharedWritable
-					}
-					if !allShared {
-						continue
-					}
-				}
+			if !s.toolIndexable(rec, t, callerKey, campaign) {
+				continue
 			}
 			full := name + nsSep + t.Name
 			// A write tool on a read-only upstream is findable but NOT invocable, so
@@ -711,9 +720,20 @@ func (s *Server) indexedToolsFor(callerKey, campaign string) []map[string]any {
 				m["read_only_blocked"] = true // the upstream is read-only; this write is refused
 			}
 			m["invocable"] = invocable
+			// The label is its OWN field. It is never folded into the description,
+			// because caller-supplied text that can extend or terminate surrounding
+			// prose in the model's context is the thing a label must not be.
+			if rec.label != "" {
+				m["label"] = rec.label
+			}
+			if rec.template != "" && invocable {
+				key := rec.template + "\x00" + t.Name
+				groups[key] = append(groups[key], &indexCandidate{entry: m, label: rec.label})
+			}
 			out = append(out, m)
 		}
 	}
+	markAmbiguousCandidates(groups)
 	sort.Slice(out, func(i, j int) bool {
 		return out[i]["name"].(string) < out[j]["name"].(string)
 	})
@@ -780,6 +800,16 @@ func (s *Server) invokeUpstream(ctx context.Context, name string, args json.RawM
 			return deny(upName, grantID, digest, "connection is not enabled")
 		}
 		return toolError("tool %q is discovered but not enabled; ask the operator to enable upstream %q", name, upName), true
+	}
+	// Ambiguity gate. A governed connection is exempt on BOTH branches: with a
+	// matching grant the operator named this connection exactly, so no guess was
+	// made; without one the governed denial below owns the response, and it must
+	// stay opaque — naming sibling connections to an ungranted caller would turn
+	// this refusal into the disclosure oracle the governed path exists to avoid.
+	if !governed {
+		if peers := s.indistinguishablePeers(principal, campaign, upName, rec, tool); len(peers) > 0 && !labelDistinguishes(rec.label, peers) {
+			return ambiguousCallRefusal(name, upName, rec.template, tool, rec.label, rec.owner != "", peers), true
+		}
 	}
 	// Restore any tokenized-field placeholders the model authored back to their real
 	// values before this call is dialed (the return path for field minimization).

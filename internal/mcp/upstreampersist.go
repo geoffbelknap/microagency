@@ -43,7 +43,11 @@ type upstreamReg struct {
 	Minimize      string `json:"minimize,omitempty"`     // field-minimization policy JSON (type→action); "" = off
 	SelfService   bool   `json:"self_service,omitempty"` // admitted from an operator-approved template
 	Template      string `json:"template,omitempty"`     // template id for self-service connections
-	Revoked       bool   `json:"revoked,omitempty"`      // credential deleted; never reload as callable
+	// Label is the connection's human-meaningful name. Absent means unlabelled,
+	// which is what every record written before labels existed decodes to — and
+	// what the ambiguity gate reads as "nothing to choose this one by".
+	Label   string `json:"label,omitempty"`
+	Revoked bool   `json:"revoked,omitempty"` // credential deleted; never reload as callable
 	// Strategy declares how a calling principal maps to upstream authority
 	// (StrategyStatic | StrategyPerUserOAuth | StrategyGoogleDWD). "" derives
 	// the legacy meaning: per-user-oauth for self-service records, else static.
@@ -216,6 +220,13 @@ func (s *Server) persistRegistrationRecord(reg upstreamReg) {
 				if !reg.SelfService && regs[i].SelfService {
 					reg.SelfService, reg.Template = true, regs[i].Template
 				}
+				if reg.Label == "" {
+					// Preserve the label across re-registration: a reauthorization
+					// carries no label, and silently dropping it would un-name a
+					// connection an agent is choosing by that name. Clearing goes
+					// through persistLabel, which is explicit.
+					reg.Label = regs[i].Label
+				}
 				if reg.Strategy == "" {
 					reg.Strategy = regs[i].Strategy // preserve the credential strategy across re-registration
 				}
@@ -251,6 +262,20 @@ func (s *Server) persistOwner(name, owner string) {
 		for i := range regs {
 			if regs[i].Name == name {
 				regs[i].Owner = owner
+				return regs, true
+			}
+		}
+		return regs, false
+	})
+}
+
+// persistLabel updates just the label of a persisted registration, so a rename
+// survives restart independently of the add/enable path.
+func (s *Server) persistLabel(name, label string) {
+	s.updateRegistrations(func(regs []upstreamReg) ([]upstreamReg, bool) {
+		for i := range regs {
+			if regs[i].Name == name {
+				regs[i].Label = label
 				return regs, true
 			}
 		}
@@ -548,6 +573,14 @@ func (s *Server) ReloadUpstreams(ctx context.Context) {
 		}
 		if reg.ReadOnly {
 			_ = s.SetUpstreamReadOnly(reg.Name, true)
+		}
+		if reg.Label != "" {
+			// A stored label that no longer passes the charset is dropped, not
+			// applied: the rules that keep a label safe in a model's context are
+			// enforced on the way OUT of the state file as well as into it.
+			if err := s.SetUpstreamLabel(reg.Name, reg.Label); err != nil {
+				slog.Warn("reload upstream label refused; connection left unlabelled", "upstream", reg.Name, "err", err)
+			}
 		}
 		if reg.AuditFullArgs {
 			_ = s.SetUpstreamAuditFullArgs(reg.Name, true)

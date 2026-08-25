@@ -72,7 +72,8 @@ Each part of the system has its own page:
   explicit opt-in, the unencrypted mode-0600 file).
 - [The tool index](docs/tool-index.md) — why upstream tools live in an index
   instead of `tools/list`, the enabled/discovered split that gates
-  invocation, and index refresh.
+  invocation, index refresh, and the connection labels that keep two
+  connections from one template from becoming a coin flip.
 - [Large results and reduce](docs/reduce.md) — reference handles and their
   structural previews, the query engines, the microVM path for real code,
   the experimental read-only program broker, and the contract for writing

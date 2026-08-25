@@ -442,7 +442,7 @@ func (s *Server) commitSelfServiceOAuth(ctx context.Context, flow *oauthFlow, co
 	s.reg.conns[flow.name] = &upstream{
 		conn: conn, tools: tools, enabled: !flow.discover, provenance: provenance,
 		readOnly: flow.readOnly, owner: flow.owner, selfService: true,
-		template: flow.template, authGeneration: flow.authGeneration,
+		template: flow.template, label: flow.label, authGeneration: flow.authGeneration,
 		minimizeSuggested: suggestion,
 	}
 	return nil
@@ -677,6 +677,7 @@ func (s *Server) UserConnectionsHandler(a Authenticator, callbackBase, resourceM
 	mux.HandleFunc("GET /connections/templates", g(s.userListConnectionTemplates))
 	mux.HandleFunc("GET /connections", g(s.userListConnections))
 	mux.HandleFunc("POST /connections", g(func(w http.ResponseWriter, r *http.Request) { s.userStartConnection(w, r, callback) }))
+	mux.HandleFunc("PATCH /connections/{name}", g(s.userSetConnectionLabel))
 	mux.HandleFunc("POST /connections/{name}/refresh", g(s.userRefreshConnection))
 	mux.HandleFunc("POST /connections/{name}/reauthorize", g(func(w http.ResponseWriter, r *http.Request) { s.userReauthorizeConnection(w, r, callback) }))
 	mux.HandleFunc("DELETE /connections/{name}", g(s.userDeleteConnection))
@@ -729,7 +730,11 @@ func (s *Server) userListConnectionTemplates(w http.ResponseWriter, _ *http.Requ
 }
 
 type userConnectionInfo struct {
-	Name     string `json:"name"`
+	Name string `json:"name"`
+	// Label is the caller's own human-meaningful name for this connection, or
+	// empty when it has none. It is what the caller's agent sees beside every
+	// tool this connection exposes.
+	Label    string `json:"label,omitempty"`
 	Template string `json:"template"`
 	URL      string `json:"url"`
 	State    string `json:"state"`
@@ -748,7 +753,7 @@ func (s *Server) userListConnections(w http.ResponseWriter, r *http.Request) {
 	for _, connection := range all {
 		if connection.SelfService && connection.Owner == owner {
 			out = append(out, userConnectionInfo{
-				Name: connection.Name, Template: connection.Template, URL: connection.URL,
+				Name: connection.Name, Label: connection.Label, Template: connection.Template, URL: connection.URL,
 				State: connection.State, ReadOnly: connection.ReadOnly,
 				Tools: connection.Tools, LastOK: connection.LastOK,
 			})
@@ -834,9 +839,17 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 		Template string            `json:"template"`
 		Scopes   []string          `json:"scopes"`
 		Params   map[string]string `json:"params"`
+		Label    string            `json:"label"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	// Naming the connection at creation closes the window in which a second
+	// connection from the same template exists and neither can be told apart.
+	label, err := validateConnectionLabel(in.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	template, templateVersion, ok := s.connectionTemplateWithVersion(in.Template, false)
@@ -881,6 +894,7 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 	}
 	authorizeURL, err := s.startUpstreamOAuth(r.Context(), name, upstreamURL, false, false, template.ReadOnly, owner, scope, metadata, callback, clientID, clientSecret,
 		withSelfServiceOAuth(template.ID, templateVersion, selfServiceTokenKey(owner, name), selfServiceClientKey(owner, template.ID, upstreamURL), 0),
+		withConnectionLabel(label),
 		withConnectionReservation(reservation))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -889,6 +903,42 @@ func (s *Server) userStartConnection(w http.ResponseWriter, r *http.Request, cal
 	keepReservation = true
 	s.recordConnectionEvent(owner, name, "authorization_started")
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "authorization_required", "name": name, "authorize_url": authorizeURL})
+}
+
+// userSetConnectionLabel names one of the caller's OWN connections. A label on an
+// owned connection reaches only that principal's agent context, which is why the
+// principal sets it here rather than asking the operator; a label on a shared
+// connection reaches every admitted caller and is set on the operator surface
+// instead.
+//
+// An invalid label is refused with the reason, never trimmed or rewritten into
+// something acceptable. Sending {"label":""} clears it.
+func (s *Server) userSetConnectionLabel(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	owner := callerKey(r.Context())
+	if _, ok := s.ownedSelfServiceConnection(r.Context(), name); !ok {
+		http.Error(w, "unknown connection", http.StatusNotFound)
+		return
+	}
+	var in struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxHTTPBody)).Decode(&in); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	label, err := validateConnectionLabel(in.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.SetUpstreamLabel(name, label); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.persistLabel(name, label)
+	s.recordConnectionEvent(owner, name, "labelled")
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "label": label})
 }
 
 func (s *Server) ownedSelfServiceConnection(ctx context.Context, name string) (upstream, bool) {

@@ -403,22 +403,32 @@
     var main = el("div", "main");
     var tmpl = templateFor(conn.template);
 
+    var provider = (tmpl && tmpl.display_name) || conn.template || conn.name;
     var title = el("div", "nm");
-    title.appendChild(el("span", null, (tmpl && tmpl.display_name) || conn.template || conn.name));
+    title.appendChild(el("span", null, conn.label || provider));
     var st = stateOf(conn);
     title.appendChild(el("span", "pill " + st.cls, conn.state));
     if (conn.read_only) title.appendChild(el("span", "pill", "read-only"));
     main.appendChild(title);
 
     var meta = el("div", "meta");
+    if (conn.label) meta.appendChild(el("div", null, provider));
     meta.appendChild(el("div", null, conn.name));
     meta.appendChild(el("div", null, target(conn.url)));
     meta.appendChild(el("div", null, conn.tools + (conn.tools === 1 ? " tool" : " tools") + " · " + when(conn.last_ok)));
     main.appendChild(meta);
     main.appendChild(el("div", "why", st.why));
+    if (!conn.label && sharesTemplate(conn)) {
+      main.appendChild(el("div", "why",
+        "You have more than one " + provider + " connection, and their tools are identical — same names, " +
+        "same descriptions, same schemas. Your agent cannot tell them apart, so it is refused rather than " +
+        "allowed to guess. Label each one to choose between them."));
+    }
     row.appendChild(main);
 
     var acts = el("div", "acts");
+    acts.appendChild(button("Label", "sm", function () { openLabel(conn); },
+      "Give this connection a short name your agent sees beside its tools."));
     acts.appendChild(button("Refresh", "sm", function () { doRefresh(conn); },
       "Reload this connection's tool list from the provider."));
     acts.appendChild(button("Reauthorize", "sm", function () { doReauthorize(conn); },
@@ -518,6 +528,48 @@
 
   /* Disconnect destroys a credential. The prompt names the consequence and what
      survives it, and the confirm button repeats the verb rather than saying OK. */
+  /* sharesTemplate reports whether another of this user's connections came from
+     the same template. Those are the ones whose tools an agent cannot tell apart. */
+  function sharesTemplate(conn) {
+    if (!conn.template) return false;
+    var n = 0;
+    for (var i = 0; i < state.conns.length; i++) {
+      if (state.conns[i].template === conn.template) n++;
+    }
+    return n > 1;
+  }
+
+  function openLabel(conn) {
+    var body = el("div");
+    var wrap = el("div", "field");
+    var input = document.createElement("input");
+    input.id = "conn_label";
+    input.type = "text";
+    input.value = conn.label || "";
+    input.maxLength = 32;
+    input.placeholder = "production";
+    var label = el("label", null, "Label");
+    label.setAttribute("for", "conn_label");
+    wrap.appendChild(label);
+    wrap.appendChild(el("p", "desc",
+      "Up to 32 characters: letters, digits, spaces, and - _ . Leave it empty to remove the label."));
+    wrap.appendChild(input);
+    body.appendChild(wrap);
+    openModal(
+      "Label " + conn.name,
+      "Your agent sees this beside every tool this connection exposes, which is how it tells this " +
+      "connection apart from another one from the same provider.",
+      body, "Save", async function () {
+        var value = input.value;
+        closeModal();
+        try {
+          await api("PATCH", "/connections/" + encodeURIComponent(conn.name), { label: value });
+          flash(value ? "Labelled " + conn.name + " \u201c" + value + "\u201d." : "Removed the label from " + conn.name + ".");
+          await reload();
+        } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
+      });
+  }
+
   function confirmDisconnect(conn) {
     var tmpl = templateFor(conn.template);
     var name = (tmpl && tmpl.display_name) || conn.template || conn.name;
@@ -566,7 +618,21 @@
       body.appendChild(wrap);
       inputs.push({ name: param.name, kind: param.kind, node: input });
     });
-    if (!params.length) body.appendChild(el("p", "note", "this provider takes no options here"));
+    var labelWrap = el("div", "field");
+    var labelInput = document.createElement("input");
+    labelInput.id = "p_label";
+    labelInput.type = "text";
+    labelInput.maxLength = 32;
+    labelInput.placeholder = "production";
+    var labelLabel = el("label", null, "Label (optional)");
+    labelLabel.setAttribute("for", "p_label");
+    labelWrap.appendChild(labelLabel);
+    labelWrap.appendChild(el("p", "desc",
+      "A short name your agent sees beside this connection's tools. Worth setting when you connect the " +
+      "same provider more than once, because the tools are otherwise identical."));
+    labelWrap.appendChild(labelInput);
+    body.appendChild(labelWrap);
+    if (!params.length) body.appendChild(el("p", "note", "this provider takes no other options here"));
 
     openModal(
       "Connect " + (tmpl.display_name || tmpl.id),
@@ -581,7 +647,8 @@
         });
         closeModal();
         try {
-          var res = await api("POST", "/connections", { template: tmpl.id, params: values });
+          var res = await api("POST", "/connections",
+            { template: tmpl.id, params: values, label: labelInput.value });
           if (res && res.authorize_url) { location.href = res.authorize_url; return; }
           await reload();
         } catch (e) { if (e.message !== "unauthenticated") flash(e.message, "bad"); }
