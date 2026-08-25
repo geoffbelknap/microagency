@@ -423,10 +423,17 @@ func TestFederatedTunnelMountsNoOperatorConsent(t *testing.T) {
 	}
 	// The provider callback is on the tunneled mux, where the provider's
 	// browser redirect can reach it.
+	// An unknown state means no request this server issued, so the caller is not
+	// necessarily anyone. It answers 404 with a notice that identifies nothing:
+	// this branch is reachable by guessing the path, and it is the only branch
+	// here that is.
 	cb := httptest.NewRecorder()
 	mcpMux.ServeHTTP(cb, httptest.NewRequest(http.MethodGet, "/oauth/sso/callback?state=unknown", nil))
-	if cb.Code != http.StatusOK {
-		t.Fatalf("callback with unknown state = %d, want the notice page", cb.Code)
+	if cb.Code != http.StatusNotFound {
+		t.Fatalf("callback with unknown state = %d, want 404", cb.Code)
+	}
+	if body := cb.Body.String(); strings.Contains(body, "microagency") {
+		t.Error("the unknown-state notice names the product to an anonymous caller")
 	}
 }
 

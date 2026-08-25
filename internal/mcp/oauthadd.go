@@ -350,7 +350,10 @@ func (s *Server) completeUpstreamOAuth(w http.ResponseWriter, r *http.Request, s
 	flow := s.takeOAuthFlowFor(q.Get("state"), selfService)
 	if flow == nil {
 		if selfService {
-			writeMessage(w, "This authorization request is unknown or expired.")
+			// The only branch here an unauthenticated caller can reach: no state
+			// this gateway issued, so nothing to report and nobody to report it
+			// to. It answers without identifying what runs on this address.
+			authui.WriteUnknownRequest(w, "This request is unknown or has expired. Start again from your account page.")
 		} else {
 			writeMessage(w, "This authorization request is unknown or expired. Start again from the console.")
 		}
