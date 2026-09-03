@@ -5,7 +5,7 @@ go 1.26.3
 toolchain go1.26.6
 
 require (
-	github.com/geoffbelknap/microagent v0.9.1-0.20260812224853-21a99f69009d
+	github.com/geoffbelknap/microagent v0.10.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 )
 
@@ -25,8 +25,8 @@ require (
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
