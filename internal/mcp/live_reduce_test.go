@@ -56,7 +56,7 @@ func TestLiveReduceCode(t *testing.T) {
 	}
 	s := newTestServer(t, runner, WithBudgetGate(gate), WithStateDir(gatewayDir))
 
-	singleRef, _ := store.Put("SINGLE_INPUT_SENTINEL", "local")
+	singleRef, _ := store.Put("SINGLE_INPUT_SENTINEL", localCallerKey())
 	single := call(t, s, "reduce", map[string]any{
 		"ref":  string(singleRef),
 		"code": `print("LIVE_SINGLE|" + open("/app/input").read())`,
@@ -64,8 +64,8 @@ func TestLiveReduceCode(t *testing.T) {
 	assertLiveReduceResult(t, single, "LIVE_SINGLE|SINGLE_INPUT_SENTINEL")
 	t.Log("single-input sentinel passed")
 
-	firstRef, _ := store.Put("ALPHA", "local")
-	secondRef, _ := store.Put("BETA", "local")
+	firstRef, _ := store.Put("ALPHA", localCallerKey())
+	secondRef, _ := store.Put("BETA", localCallerKey())
 	multi := call(t, s, "reduce", map[string]any{
 		"refs": []string{string(firstRef), string(secondRef)},
 		"code": `import socket

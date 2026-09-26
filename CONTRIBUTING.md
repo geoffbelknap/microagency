@@ -39,6 +39,13 @@ for d in engines/*/; do (cd "$d" && go test ./...); done
 `make test` runs `go test ./...` for the main module. CI also runs the race
 detector (`go test -race -short`) on push to main.
 
+Live `reduce(code)` validation runs before stable releases and through manual
+dispatch of `.github/workflows/live-reduce.yml`. Add the `run-live-reduce` label
+to a PR to run it on that PR and subsequent updates. Use it when changing
+code execution, reference ownership, sandbox integration, or the microagent
+dependency. The workflow boots Linux KVM microVMs using the pinned runtime.
+It has no scheduled trigger.
+
 ## Docs
 
 User-facing documentation lives under `docs/`, one page per mechanism, with
