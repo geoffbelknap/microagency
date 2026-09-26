@@ -1,8 +1,8 @@
 name: Live reduce(code)
 
 on:
-  schedule:
-    - cron: "23 7 * * 1"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
   workflow_call:
 
@@ -10,12 +10,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: live-reduce-${{ github.workflow }}-${{ github.ref }}
+  group: live-reduce-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
   linux-kvm:
     name: live-reduce-linux-kvm
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-live-reduce')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

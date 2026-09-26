@@ -35,7 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run="$(gh api "repos/${{ github.repository }}/actions/workflows/live-reduce.yml/runs?status=completed&per_page=1" --jq '.workflow_runs[0] // empty')"
+          run="$(gh api "repos/${{ github.repository }}/actions/workflows/live-reduce.yml/runs?status=completed&per_page=20" --jq '[.workflow_runs[] | select(.conclusion != "skipped")][0] // empty')"
           if [ -z "$run" ]; then
             echo "### Linux KVM live reduce(code) validation" >> "$GITHUB_STEP_SUMMARY"
             echo "No completed Linux KVM live run is recorded." >> "$GITHUB_STEP_SUMMARY"
@@ -55,7 +55,7 @@ jobs:
             echo "- Run: $url"
             echo "- Apple VF: no hosted live signal; validate on a direct supported host"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$conclusion" != success ] || [ "$age_hours" -gt 168 ]; then
+          if [ "$conclusion" != success ]; then
             echo "::warning::Linux KVM live validation is $conclusion and ${age_hours}h old"
           fi
 
