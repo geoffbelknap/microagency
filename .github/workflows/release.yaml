@@ -58,7 +58,7 @@ jobs:
       # HOMEBREW_APP_PRIVATE_KEY secrets, and the app installed on homebrew-tap.
       - name: Generate Homebrew tap token
         id: app-token
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.HOMEBREW_APP_CLIENT_ID }}
           private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
